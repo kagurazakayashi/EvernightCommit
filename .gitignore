@@ -1,0 +1,17 @@
+# 构建产物
+build/
+out/
+bin/
+lib/
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# IDE 本地文件
+.vs/
+.vscode/
+.idea/
+CMakeUserPresets.json
+*.user
+*.suo
