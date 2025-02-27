@@ -12,6 +12,7 @@
 #include "platform/windows/path_picker.h"
 #include "platform/windows/utf_text.h"
 #include "ui/commands.h"
+#include "ui/resource_ids.h"
 
 namespace gc::ui {
 namespace {
@@ -43,6 +44,16 @@ constexpr std::wstring_view kPendingNotice = L"提示：Git 功能尚未接入�
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
 
+// 从本程序资源中加载应用图标。窗口类在创建窗口之前注册，此时拿不到窗口 DPI，
+// 因此按系统度量取尺寸（大图标取 SM_CXICON，小图标取 SM_CXSMICON）。
+HICON LoadAppIcon(HINSTANCE instance, bool largest) {
+  const int cx = largest ? 0 : ::GetSystemMetrics(SM_CXSMICON);
+  const int cy = largest ? 0 : ::GetSystemMetrics(SM_CYSMICON);
+  const UINT flags = largest ? (LR_DEFAULTSIZE | LR_DEFAULTCOLOR) : LR_DEFAULTCOLOR;
+  return static_cast<HICON>(
+      ::LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, cx, cy, flags));
+}
+
 }  // namespace
 
 bool MainWindow::RegisterWindowClass(HINSTANCE instance) {
@@ -56,6 +67,9 @@ bool MainWindow::RegisterWindowClass(HINSTANCE instance) {
   description.lpfnWndProc = &MainWindow::Thunk;
   description.hInstance = instance;
   description.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+  // 窗口与任务栏图标；资源缺失时 hIcon/hIconSm 为 nullptr，系统回退到默认图标。
+  description.hIcon = LoadAppIcon(instance, /*largest=*/true);
+  description.hIconSm = LoadAppIcon(instance, /*largest=*/false);
   description.hbrBackground = ::GetSysColorBrush(COLOR_BTNFACE);
   description.lpszClassName = kMainWindowWindowClass;
   return ::RegisterClassExW(&description) != 0;

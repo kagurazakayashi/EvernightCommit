@@ -1,3 +1,5 @@
+![EvernightCommit 图标](resources/EvernightCommit.ico)
+
 # EvernightCommit（Git 提交工具，Windows 原生 C++）
 
 项目名 **EvernightCommit**；窗口标题沿用需求文档规定的“Git 提交工具”。
