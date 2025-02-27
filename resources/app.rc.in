@@ -1,1 +1,4 @@
+#include "resource_ids.h"
+
 1 24 "@GC_APP_MANIFEST_RC@"
+IDI_APP_ICON ICON "@GC_APP_ICON_RC@"

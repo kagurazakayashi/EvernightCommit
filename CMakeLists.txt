@@ -89,6 +89,13 @@ target_compile_definitions(gc_ui PRIVATE
 # ---------- 主程序（GUI 子系统，启动时不显示控制台） ----------
 file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.manifest" _gc_manifest_native)
 string(REPLACE "\\" "\\\\" GC_APP_MANIFEST_RC "${_gc_manifest_native}")
+file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/EvernightCommit.ico" _gc_icon_native)
+string(REPLACE "\\" "\\\\" GC_APP_ICON_RC "${_gc_icon_native}")
+
+# 资源脚本（app.rc）与 C++ 源码共用同一份资源 ID 定义：把 src/ui/resource_ids.h
+# 复制到生成目录，使 app.rc 中的 #include "resource_ids.h" 能够解析。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resource_ids.h"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/resource_ids.h" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc.in"
   "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONLY)
 
