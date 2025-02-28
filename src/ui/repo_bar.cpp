@@ -39,7 +39,7 @@ void RepoBar::Create(HWND parent) {
   repoBrowse_ = CreatePushButton(parent, L"浏览…", kIdRepoBrowse);
 
   gitLabel_ = CreateLabel(parent, L"Git 程序：", kIdGitLabel);
-  gitEdit_ = CreateSingleLineEdit(parent, L"", kIdGitEdit);
+  gitCombo_ = CreateEditableCombo(parent, kIdGitCombo);
   gitBrowse_ = CreatePushButton(parent, L"浏览…", kIdGitBrowse);
 
   fetch_ = CreatePushButton(parent, L"fetch", kIdFetchButton);
@@ -50,6 +50,10 @@ void RepoBar::Create(HWND parent) {
 int RepoBar::ToolbarWidth(const UiMetrics& metrics) const {
   const int width = metrics.ButtonWidth(L"fetch") + metrics.ButtonWidth(L"pull") + metrics.ButtonWidth(L"status");
   return width + 2 * metrics.ColGap();
+}
+
+void RepoBar::SetGitCandidates(const std::vector<std::wstring>& candidates) {
+  SetComboCandidates(gitCombo_, candidates);
 }
 
 void RepoBar::Layout(const RECT& area, const UiMetrics& metrics) {
@@ -76,7 +80,8 @@ void RepoBar::Layout(const RECT& area, const UiMetrics& metrics) {
   Place(repoBrowse_, Row(x + labelWidth + colGap + editWidth + colGap, firstTop, browseWidth, rowHeight));
 
   Place(gitLabel_, Row(x, secondTop + (rowHeight - metrics.LabelHeight()) / 2, labelWidth, metrics.LabelHeight()));
-  Place(gitEdit_, Row(x + labelWidth + colGap, secondTop, editWidth, rowHeight));
+  // 组合框窗口高度包含下拉列表区域：给足高度，长路径候选也能完整滚动查看。
+  Place(gitCombo_, Row(x + labelWidth + colGap, secondTop, editWidth, metrics.Scale(240)));
   Place(gitBrowse_, Row(x + labelWidth + colGap + editWidth + colGap, secondTop, browseWidth, rowHeight));
 
   int toolbarX = x + leftWidth + colGap;

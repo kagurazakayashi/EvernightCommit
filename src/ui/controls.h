@@ -21,6 +21,10 @@ HWND CreateSingleLineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreateMultilineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreatePushButton(HWND parent, std::wstring_view text, int id);
 HWND CreateCheckBox(HWND parent, std::wstring_view text, int id, bool checked);
+// 可编辑组合框：既能在下拉列表中挑选候选项，也能直接键入文本。
+HWND CreateEditableCombo(HWND parent, int id);
+// 重建下拉候选列表并保持编辑框文本不变；候选项按插入顺序显示。
+void SetComboCandidates(HWND combo, const std::vector<std::wstring>& items);
 HWND CreateReportListView(HWND parent, int id, const std::vector<ListColumn>& columns);
 // timeOnly=false 时显示可键盘输入的完整日期，true 时显示时/分/秒。
 HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly);

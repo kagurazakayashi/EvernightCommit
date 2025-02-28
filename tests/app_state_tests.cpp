@@ -33,3 +33,35 @@ GC_TEST(workspace_empty_state_text_mentions_missing_git_call) {
   GC_CHECK(std::wstring(texts.staged).find(L"git status") != std::wstring::npos);
   GC_CHECK(std::wstring(texts.history).find(L"git log") != std::wstring::npos);
 }
+
+GC_TEST(app_state_git_tool_starts_unverified_and_unusable) {
+  gc::app::AppState state;
+
+  GC_CHECK(state.Git().status == gc::app::GitExeStatus::unverified);
+  GC_CHECK(state.Git().path.empty());
+  GC_CHECK(!state.GitUsable());
+}
+
+GC_TEST(app_state_git_tool_verified_enables_usage_invalid_disables) {
+  gc::app::AppState state;
+
+  gc::app::GitToolState verified;
+  verified.status = gc::app::GitExeStatus::verified;
+  verified.path = L"C:\\Program Files\\Git\\cmd\\git.exe";
+  verified.version = L"2.55.0.windows.5";
+  state.SetGitTool(verified);
+  GC_CHECK(state.GitUsable());
+  GC_CHECK(state.Git().version == L"2.55.0.windows.5");
+
+  gc::app::GitToolState failed;
+  failed.status = gc::app::GitExeStatus::invalid;
+  failed.path = L"C:\\Windows\\notepad.exe";
+  failed.message = L"该程序没有报告 Git 版本，可能不是 git.exe";
+  state.SetGitTool(failed);
+  GC_CHECK(!state.GitUsable());
+  GC_CHECK(state.Git().status == gc::app::GitExeStatus::invalid);
+
+  // 用户改正路径并重新验证通过后可恢复，不要求重启程序。
+  state.SetGitTool(verified);
+  GC_CHECK(state.GitUsable());
+}

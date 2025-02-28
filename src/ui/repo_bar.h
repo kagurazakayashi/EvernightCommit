@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "ui/ui_metrics.h"
 
@@ -17,8 +18,11 @@ public:
   // 两行输入 + 仓库工具栏都保持可见时所需的最小宽度。
   [[nodiscard]] int MinimumWidth(const UiMetrics& metrics) const;
 
+  // 填充“Git 程序”下拉候选列表（完整路径），保持当前文本。
+  void SetGitCandidates(const std::vector<std::wstring>& candidates);
+
   [[nodiscard]] HWND repoEdit() const noexcept { return repoEdit_; }
-  [[nodiscard]] HWND gitEdit() const noexcept { return gitEdit_; }
+  [[nodiscard]] HWND gitCombo() const noexcept { return gitCombo_; }
   [[nodiscard]] HWND repoBrowse() const noexcept { return repoBrowse_; }
   [[nodiscard]] HWND gitBrowse() const noexcept { return gitBrowse_; }
   [[nodiscard]] HWND fetchButton() const noexcept { return fetch_; }
@@ -32,7 +36,7 @@ private:
   HWND repoEdit_ = nullptr;
   HWND repoBrowse_ = nullptr;
   HWND gitLabel_ = nullptr;
-  HWND gitEdit_ = nullptr;
+  HWND gitCombo_ = nullptr;
   HWND gitBrowse_ = nullptr;
   HWND fetch_ = nullptr;
   HWND pull_ = nullptr;

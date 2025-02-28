@@ -1,7 +1,10 @@
 add_executable(gc_tests
   support/test_main.cpp
   app_state_tests.cpp
+  git_locator_tests.cpp
+  git_probe_tests.cpp
   layout_tests.cpp
+  subprocess_command_line_tests.cpp
   ui_metrics_tests.cpp
   utf_text_tests.cpp)
 
