@@ -2,9 +2,11 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <string>
 
 #include "app/app_state.h"
+#include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
 #include "ui/action_bar.h"
 #include "ui/changes_pane.h"
@@ -46,12 +48,20 @@ private:
   void ApplyFonts(HWND window);
   void UpdateLayoutSpecs(HWND window);
   [[nodiscard]] SIZE MinimumWindowSize(HWND window) const;
-  void OnCommand(HWND window, int commandId);
+  void OnCommand(HWND window, WPARAM wParam);
+  void OnGitComboNotify(HWND window, UINT notifyCode);
   void BrowseRepoPath(HWND window);
   void BrowseGitPath(HWND window);
   void OnSplitterDragged(HWND window, int splitterId, int parentX);
 
+  // Git 可执行文件发现/选择/验证（步骤 2）。
+  void InitializeGitDetection(HWND window);
+  void CommitGitInput(HWND window);
+  void RequestGitVerification(HWND window, const std::wstring& normalizedPath);
+  void OnGitProbeCompleted(HWND window, uint64_t completionSerial);
+
   platform::UniqueWindow window_;
+  platform::GitVerifyWorker gitWorker_;
   app::AppState state_;
   UiMetrics metrics_;
   std::wstring programInfo_;

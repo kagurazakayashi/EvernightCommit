@@ -6,8 +6,11 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "git/workspace_model.h"
+#include "platform/windows/git_toolchain.h"
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
 #include "platform/windows/utf_text.h"
@@ -24,7 +27,7 @@ constexpr int kInitialWindowWidth = 1100;
 constexpr int kInitialWindowHeight = 780;
 
 constexpr std::wstring_view kTipBrowseRepo = L"选择本地仓库目录。仅记录路径，仓库识别与 Git 操作尚未接入。";
-constexpr std::wstring_view kTipBrowseGit = L"选择 git.exe 程序路径。仅记录路径，Git 可用性检测尚未接入。";
+constexpr std::wstring_view kTipBrowseGit = L"浏览选择 git.exe；选定后立即在后台运行 git --version 验证。";
 constexpr std::wstring_view kTipFetch = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git fetch";
 constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
 constexpr std::wstring_view kTipStatus = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git status";
@@ -39,7 +42,8 @@ constexpr std::wstring_view kTipCoauthor = L"合作者条目的增删尚未实�
 constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月、日。";
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
-constexpr std::wstring_view kPendingNotice = L"提示：Git 功能尚未接入，所有 Git 操作按钮均处于禁用状态。";
+constexpr std::wstring_view kPendingNotice =
+    L"提示：Git 操作（status/暂存/提交/fetch/pull/push 等）将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
@@ -119,6 +123,7 @@ void MainWindow::OnCreate(HWND window) {
   RegisterTooltips();
   UpdateCommandAvailability();
   RefreshTexts(window);
+  InitializeGitDetection(window);
 }
 
 void MainWindow::RegisterTooltips() {
@@ -143,7 +148,9 @@ void MainWindow::RegisterTooltips() {
 }
 
 void MainWindow::UpdateCommandAvailability() {
-  const BOOL gitReady = app::AppState::kGitAccessConnected ? TRUE : FALSE;
+  // 依赖 Git 的控件要同时满足：功能已接通（后续步骤）且当前 Git 程序验证可用；
+  // 验证失败后一旦用户改正路径并验证通过，无需重启即可恢复。
+  const BOOL gitReady = (app::AppState::kGitOperationsImplemented && state_.GitUsable()) ? TRUE : FALSE;
   for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), repoBar_.statusButton(),
                       changesPane_.stageAddButton(), changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
                       commitForm_.CoauthorRemove(), actionBar_.refreshButton(), actionBar_.createCommitButton(),
@@ -175,7 +182,7 @@ void MainWindow::RefreshTexts(HWND window) {
   infoBar_.Refresh(L"当前分支：" + state_.BranchDisplay(), L"上游：" + state_.UpstreamDisplay(),
                    L"任务状态：" + state_.StatusNote(), programInfo_);
   changesPane_.ShowWorkspace(state_.Workspace(), git::NotLoadedTexts());
-  if (app::AppState::kGitAccessConnected) {
+  if (app::AppState::kGitOperationsImplemented) {
     actionBar_.SetStatus(state_.StatusNote());
   } else {
     actionBar_.SetStatus(kPendingNotice);
@@ -229,7 +236,9 @@ SIZE MainWindow::MinimumWindowSize(HWND window) const {
   return SIZE{frame.right - frame.left, frame.bottom - frame.top};
 }
 
-void MainWindow::OnCommand(HWND window, int commandId) {
+void MainWindow::OnCommand(HWND window, WPARAM wParam) {
+  const int commandId = LOWORD(wParam);
+  const UINT notifyCode = HIWORD(wParam);
   switch (commandId) {
     case kIdRepoBrowse:
       BrowseRepoPath(window);
@@ -237,8 +246,28 @@ void MainWindow::OnCommand(HWND window, int commandId) {
     case kIdGitBrowse:
       BrowseGitPath(window);
       break;
+    case kIdGitCombo:
+      OnGitComboNotify(window, notifyCode);
+      break;
     default:
       break;  // 其余按钮保持禁用，不会收到命令通知。
+  }
+}
+
+void MainWindow::OnGitComboNotify(HWND window, UINT notifyCode) {
+  switch (notifyCode) {
+    case CBN_EDITCHANGE:
+      // 键入逐字符通知：只重排防抖定时器，停顿后统一验证，避免每敲一键启动一个子进程。
+      ::KillTimer(window, kGitVerifyTimer);
+      ::SetTimer(window, kGitVerifyTimer, kGitVerifyDebounceMs, nullptr);
+      break;
+    case CBN_SELCHANGE:
+    case CBN_KILLFOCUS:
+      ::KillTimer(window, kGitVerifyTimer);
+      CommitGitInput(window);
+      break;
+    default:
+      break;
   }
 }
 
@@ -259,7 +288,7 @@ void MainWindow::BrowseRepoPath(HWND window) {
 }
 
 void MainWindow::BrowseGitPath(HWND window) {
-  std::wstring start = GetControlText(repoBar_.gitEdit());
+  std::wstring start = GetControlText(repoBar_.gitCombo());
   if (start.empty()) {
     start = platform::CurrentWorkingDirectory();
   }
@@ -267,9 +296,80 @@ void MainWindow::BrowseGitPath(HWND window) {
   if (!picked.has_value() || picked->empty()) {
     return;
   }
-  SetControlText(repoBar_.gitEdit(), *picked);
-  state_.SetGitExePath(*picked);
-  state_.SetStatusNote(L"已记录 Git 程序路径；Git 可用性检测尚未接入。");
+  ::KillTimer(window, kGitVerifyTimer);  // 明确选择不再防抖。
+  const std::wstring normalized = platform::NormalizeGitExeInput(*picked);
+  SetControlText(repoBar_.gitCombo(), normalized);
+  RequestGitVerification(window, normalized);
+}
+
+void MainWindow::InitializeGitDetection(HWND window) {
+  // 启动即按当前进程 PATH 发现候选（等价 `where git` 的搜索意图，不扫盘）。
+  const std::vector<std::wstring> candidates = platform::DiscoverGitCandidates();
+  repoBar_.SetGitCandidates(candidates);
+  if (candidates.empty()) {
+    app::GitToolState tool;
+    tool.status = app::GitExeStatus::unverified;
+    tool.message = L"当前进程 PATH 中未找到 git.exe，请手动输入路径或用“浏览…”选择。";
+    state_.SetStatusNote(tool.message);
+    state_.SetGitTool(std::move(tool));
+    RefreshTexts(window);
+    return;
+  }
+  SetControlText(repoBar_.gitCombo(), candidates.front());
+  RequestGitVerification(window, candidates.front());
+}
+
+void MainWindow::CommitGitInput(HWND window) {
+  const std::wstring raw = GetControlText(repoBar_.gitCombo());
+  const std::wstring normalized = platform::NormalizeGitExeInput(raw);
+  if (normalized.empty()) {
+    app::GitToolState tool;
+    tool.status = app::GitExeStatus::unverified;
+    tool.message = L"未选择 Git 程序。";
+    state_.SetGitTool(std::move(tool));
+    state_.SetStatusNote(L"Git 未设置：请输入 git.exe 路径或用“浏览…”选择。");
+    UpdateCommandAvailability();
+    RefreshTexts(window);
+    return;
+  }
+  const app::GitToolState& current = state_.Git();
+  if (normalized == current.path &&
+      (current.status == app::GitExeStatus::verifying || current.status == app::GitExeStatus::verified)) {
+    return;  // 编程式改写文本回环触发的重复提交：跳过。
+  }
+  if (normalized != raw) {
+    SetControlText(repoBar_.gitCombo(), normalized);
+  }
+  RequestGitVerification(window, normalized);
+}
+
+void MainWindow::RequestGitVerification(HWND window, const std::wstring& normalizedPath) {
+  app::GitToolState tool;
+  tool.status = app::GitExeStatus::verifying;
+  tool.path = normalizedPath;
+  tool.message = L"正在后台验证 Git 程序（git --version）…";
+  state_.SetGitTool(std::move(tool));
+  state_.SetGitExePath(normalizedPath);
+  state_.SetStatusNote(L"正在验证 Git 程序：" + normalizedPath);
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+  gitWorker_.RequestVerify(window, kGitProbeCompleted, normalizedPath, kGitProbeTimeoutMs);
+}
+
+void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
+  platform::GitExeVerification verification;
+  if (!gitWorker_.FetchLatest(completionSerial, &verification)) {
+    return;  // 较慢完成的旧结果：已被更新的选择取代，丢弃。
+  }
+  app::GitToolState tool;
+  tool.path = verification.path;
+  tool.version = verification.version;
+  tool.message = verification.message;
+  tool.status = verification.outcome == git::GitProbeOutcome::verified ? app::GitExeStatus::verified
+                                                                       : app::GitExeStatus::invalid;
+  state_.SetGitTool(std::move(tool));
+  state_.SetStatusNote(verification.message);
+  UpdateCommandAvailability();
   RefreshTexts(window);
 }
 
@@ -324,7 +424,16 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       return 0;
     }
     case WM_COMMAND:
-      OnCommand(window, LOWORD(wParam));
+      OnCommand(window, wParam);
+      return 0;
+    case WM_TIMER:
+      if (wParam == kGitVerifyTimer) {
+        ::KillTimer(window, kGitVerifyTimer);
+        CommitGitInput(window);
+      }
+      return 0;
+    case kGitProbeCompleted:
+      OnGitProbeCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
     case kSplitterDragged:
       OnSplitterDragged(window, static_cast<int>(wParam), static_cast<int>(lParam));
@@ -333,6 +442,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       ::DestroyWindow(window);
       return 0;
     case WM_DESTROY:
+      // 先停掉后台验证线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
+      gitWorker_.Shutdown();
+      ::KillTimer(window, kGitVerifyTimer);
       window_.Disown();
       ::PostQuitMessage(0);
       return 0;

@@ -86,6 +86,24 @@ HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly) {
   return Make(parent, DATETIMEPICK_CLASSW, L"", kChildVisible | WS_TABSTOP | format, 0, id);
 }
 
+HWND CreateEditableCombo(HWND parent, int id) {
+  return Make(parent, L"COMBOBOX", L"", kChildVisible | WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | CBS_HASSTRINGS,
+              0, id);
+}
+
+void SetComboCandidates(HWND combo, const std::vector<std::wstring>& items) {
+  if (combo == nullptr) {
+    return;
+  }
+  const std::wstring current = GetControlText(combo);
+  ::SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+  for (const std::wstring& item : items) {
+    ::SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+  }
+  // CB_RESETCONTENT 会连带清空编辑框，这里恢复用户当前文本。
+  SetControlText(combo, current);
+}
+
 void SetControlText(HWND target, std::wstring_view text) {
   if (target == nullptr) {
     return;

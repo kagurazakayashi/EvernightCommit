@@ -55,18 +55,25 @@ endif()
 # ---------- 应用状态与 Git 数据模型（不依赖窗口系统） ----------
 add_library(gc_core STATIC
   src/app/app_state.cpp
+  src/git/git_locator.cpp
+  src/git/git_probe.cpp
   src/git/workspace_model.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
 
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
+  src/platform/windows/git_toolchain.cpp
+  src/platform/windows/git_verify_worker.cpp
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/platform_init.cpp
-  src/platform/windows/utf_text.cpp)
+  src/platform/windows/subprocess.cpp
+  src/platform/windows/utf_text.cpp
+  src/platform/windows/win_path.cpp)
 target_include_directories(gc_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(gc_platform PUBLIC gc_build_settings comctl32 ole32 shell32 uuid)
+# 平台层在 Win32 能力之上复用 git/ 的纯逻辑（PATH 搜索、版本输出判定）。
+target_link_libraries(gc_platform PUBLIC gc_build_settings gc_core comctl32 ole32 shell32 uuid)
 
 # ---------- Win32 界面 ----------
 add_library(gc_ui STATIC

@@ -43,6 +43,43 @@ private:
   HWND hwnd_ = nullptr;
 };
 
+// 内核对象句柄（进程/线程/管道）的持有者；INVALID_HANDLE_VALUE 与 nullptr 都不认领。
+class UniqueHandle {
+public:
+  UniqueHandle() = default;
+  explicit UniqueHandle(HANDLE handle) noexcept : handle_(handle) {}
+  UniqueHandle(const UniqueHandle&) = delete;
+  UniqueHandle& operator=(const UniqueHandle&) = delete;
+
+  UniqueHandle(UniqueHandle&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+  UniqueHandle& operator=(UniqueHandle&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      handle_ = std::exchange(other.handle_, nullptr);
+    }
+    return *this;
+  }
+
+  ~UniqueHandle() { Reset(); }
+
+  void Reset(HANDLE handle = nullptr) noexcept {
+    if (Valid()) {
+      ::CloseHandle(handle_);
+    }
+    handle_ = handle;
+  }
+
+  [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+  [[nodiscard]] bool Valid() const noexcept { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
+  [[nodiscard]] explicit operator bool() const noexcept { return Valid(); }
+
+  // 把所有权交给系统（例如交给 WaitForSingleObject 后由调用方 CloseHandle）。
+  HANDLE Release() noexcept { return std::exchange(handle_, nullptr); }
+
+private:
+  HANDLE handle_ = nullptr;
+};
+
 // GDI 字体句柄的持有者。
 class OwnedFont {
 public:

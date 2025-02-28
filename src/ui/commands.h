@@ -10,7 +10,7 @@ enum ControlId : int {
   kIdRepoEdit = 102,
   kIdRepoBrowse = 103,
   kIdGitLabel = 104,
-  kIdGitEdit = 105,
+  kIdGitCombo = 105,
   kIdGitBrowse = 106,
 
   kIdBranchLabel = 110,
@@ -64,5 +64,12 @@ enum ControlId : int {
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
+// Git --version 后台验证完成通知；wParam 为请求序号。
+inline constexpr UINT kGitProbeCompleted = WM_APP + 2;
+
+// “Git 程序”输入防抖：连续键入只在停顿后验证一次。
+inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;
+inline constexpr UINT kGitVerifyDebounceMs = 500;
+inline constexpr unsigned long kGitProbeTimeoutMs = 3000;
 
 }  // namespace gc::ui
