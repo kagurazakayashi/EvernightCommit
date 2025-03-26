@@ -99,18 +99,22 @@ int RepoInfoBar::MinimumHeight(const UiMetrics& metrics) noexcept {
 
 int RepoInfoBar::MinimumWidth(const UiMetrics& metrics) const {
   const int gap = metrics.ColGap() * 2;
-  return metrics.LabelWidth(GetControlText(branch_)) + gap + metrics.LabelWidth(GetControlText(upstream_)) + gap +
-         metrics.LabelWidth(GetControlText(task_)) + gap + metrics.LabelWidth(GetControlText(program_));
+  return metrics.LabelWidth(GetControlText(type_)) + gap + metrics.LabelWidth(GetControlText(branch_)) + gap +
+         metrics.LabelWidth(GetControlText(upstream_)) + gap + metrics.LabelWidth(GetControlText(task_)) + gap +
+         metrics.LabelWidth(GetControlText(program_));
 }
 
 void RepoInfoBar::Create(HWND parent) {
+  type_ = CreateLabel(parent, L"仓库类型：", kIdRepoTypeLabel);
   branch_ = CreateLabel(parent, L"当前分支：", kIdBranchLabel);
   upstream_ = CreateLabel(parent, L"上游：", kIdUpstreamLabel);
   task_ = CreateLabel(parent, L"任务状态：", kIdTaskLabel);
   program_ = CreateLabel(parent, L"", kIdAppInfoLabel);
 }
 
-void RepoInfoBar::Refresh(std::wstring branch, std::wstring upstream, std::wstring task, std::wstring program) {
+void RepoInfoBar::Refresh(std::wstring type, std::wstring branch, std::wstring upstream, std::wstring task,
+                          std::wstring program) {
+  SetControlText(type_, std::move(type));
   SetControlText(branch_, std::move(branch));
   SetControlText(upstream_, std::move(upstream));
   SetControlText(task_, std::move(task));
@@ -122,11 +126,14 @@ void RepoInfoBar::Layout(const RECT& area, const UiMetrics& metrics) {
   const int height = metrics.LabelHeight();
   const int top = area.top + ((area.bottom - area.top) - height) / 2;
 
+  const int typeWidth = metrics.LabelWidth(GetControlText(type_));
   const int branchWidth = metrics.LabelWidth(GetControlText(branch_));
   const int upstreamWidth = metrics.LabelWidth(GetControlText(upstream_));
   const int programWidth = metrics.LabelWidth(GetControlText(program_));
 
   int x = area.left;
+  Place(type_, Row(x, top, typeWidth, height));
+  x += typeWidth + gap;
   Place(branch_, Row(x, top, branchWidth, height));
   x += branchWidth + gap;
   Place(upstream_, Row(x, top, upstreamWidth, height));

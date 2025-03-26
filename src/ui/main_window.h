@@ -8,6 +8,7 @@
 #include "app/app_state.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
+#include "platform/windows/repo_detect.h"
 #include "ui/action_bar.h"
 #include "ui/changes_pane.h"
 #include "ui/commit_form.h"
@@ -43,6 +44,8 @@ private:
   void OnCreate(HWND window);
   void DoLayout(HWND window);
   void RefreshTexts(HWND window);
+  // 三块列表的空状态文案随识别结果变化（未加载 / 已识别但工作区读取未实现）。
+  [[nodiscard]] gc::git::EmptyStateTexts WorkspaceStateTexts() const;
   void UpdateCommandAvailability();
   void RegisterTooltips();
   void ApplyFonts(HWND window);
@@ -50,6 +53,7 @@ private:
   [[nodiscard]] SIZE MinimumWindowSize(HWND window) const;
   void OnCommand(HWND window, WPARAM wParam);
   void OnGitComboNotify(HWND window, UINT notifyCode);
+  void OnRepoEditNotify(HWND window, UINT notifyCode);
   void BrowseRepoPath(HWND window);
   void BrowseGitPath(HWND window);
   void OnSplitterDragged(HWND window, int splitterId, int parentX);
@@ -60,11 +64,22 @@ private:
   void RequestGitVerification(HWND window, const std::wstring& normalizedPath);
   void OnGitProbeCompleted(HWND window, uint64_t completionSerial);
 
+  // 仓库路径选择与识别（步骤 3）。
+  void InitializeRepoInput(HWND window);
+  void CommitRepoInput(HWND window);
+  void RequestRepoDetection(HWND window, const std::wstring& normalizedPath);
+  void SetRepoFailed(HWND window, const std::wstring& normalizedPath, gc::git::RepoError error,
+                     std::wstring_view detail);
+  void OnRepoDetectCompleted(HWND window, uint64_t completionSerial);
+  void ResumeRepoDetectionWhenGitReady(HWND window);
+
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
+  platform::RepoDetectWorker repoWorker_;
   app::AppState state_;
   UiMetrics metrics_;
   std::wstring programInfo_;
+  bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别
 
   BandSpec bandSpec_{};
   ChangesSpec changesSpec_{};

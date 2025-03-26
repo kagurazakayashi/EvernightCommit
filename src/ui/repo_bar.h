@@ -43,17 +43,19 @@ private:
   HWND status_ = nullptr;
 };
 
-// 第二行：当前分支、上游、任务状态与程序信息。
+// 第二行：仓库类型、当前分支、上游、任务状态与程序信息。
 class RepoInfoBar {
 public:
   void Create(HWND parent);
   void Layout(const RECT& area, const UiMetrics& metrics);
-  void Refresh(std::wstring branch, std::wstring upstream, std::wstring task, std::wstring program);
+  void Refresh(std::wstring type, std::wstring branch, std::wstring upstream, std::wstring task,
+               std::wstring program);
   [[nodiscard]] static int MinimumHeight(const UiMetrics& metrics) noexcept;
-  // 四段单行说明文字都不被裁剪时所需的最小宽度。
+  // 五段单行说明文字都不被裁剪时所需的最小宽度。
   [[nodiscard]] int MinimumWidth(const UiMetrics& metrics) const;
 
 private:
+  HWND type_ = nullptr;
   HWND branch_ = nullptr;
   HWND upstream_ = nullptr;
   HWND task_ = nullptr;
