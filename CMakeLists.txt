@@ -57,6 +57,7 @@ add_library(gc_core STATIC
   src/app/app_state.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp
+  src/git/repository.cpp
   src/git/workspace_model.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
@@ -64,10 +65,10 @@ target_link_libraries(gc_core PUBLIC gc_build_settings)
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
   src/platform/windows/git_toolchain.cpp
-  src/platform/windows/git_verify_worker.cpp
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/platform_init.cpp
+  src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp
   src/platform/windows/utf_text.cpp
   src/platform/windows/win_path.cpp)

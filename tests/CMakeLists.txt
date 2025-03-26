@@ -4,6 +4,7 @@ add_executable(gc_tests
   git_locator_tests.cpp
   git_probe_tests.cpp
   layout_tests.cpp
+  repository_tests.cpp
   subprocess_command_line_tests.cpp
   ui_metrics_tests.cpp
   utf_text_tests.cpp)

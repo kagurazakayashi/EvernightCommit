@@ -14,6 +14,7 @@
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
 #include "platform/windows/utf_text.h"
+#include "platform/windows/win_path.h"
 #include "ui/commands.h"
 #include "ui/resource_ids.h"
 
@@ -26,7 +27,8 @@ constexpr int kSplitterRightId = 902;
 constexpr int kInitialWindowWidth = 1100;
 constexpr int kInitialWindowHeight = 780;
 
-constexpr std::wstring_view kTipBrowseRepo = L"选择本地仓库目录。仅记录路径，仓库识别与 Git 操作尚未接入。";
+constexpr std::wstring_view kTipBrowseRepo =
+    L"选择本地仓库目录；也可在输入框直接键入路径（停顿后自动识别）。支持仓库的子目录，识别时会上溯到工作区根。";
 constexpr std::wstring_view kTipBrowseGit = L"浏览选择 git.exe；选定后立即在后台运行 git --version 验证。";
 constexpr std::wstring_view kTipFetch = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git fetch";
 constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
@@ -43,7 +45,9 @@ constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月�
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
 constexpr std::wstring_view kPendingNotice =
-    L"提示：Git 操作（status/暂存/提交/fetch/pull/push 等）将在后续步骤接入，按钮当前保持禁用。";
+    L"提示：仓库识别与分支摘要已接入；Git 操作（status/暂存/提交/fetch/pull/push 等）将在后续步骤接入，按钮当前保持禁用。";
+
+constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
 
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
@@ -57,6 +61,19 @@ HICON LoadAppIcon(HINSTANCE instance, bool largest) {
   return static_cast<HICON>(
       ::LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, cx, cy, flags));
 }
+
+// 程序改写“本地仓库”输入框时抑制 EN_CHANGE 通知，避免自己触发的文本变更又被当成一次新的用户选择。
+// 标志恒为“作用域内为 true、出作用域复位”，中途抛异常也不会泄漏成永久抑制。
+class SuppressRepoEditNotify {
+public:
+  explicit SuppressRepoEditNotify(bool& flag) : flag_(flag) { flag_ = true; }
+  SuppressRepoEditNotify(const SuppressRepoEditNotify&) = delete;
+  SuppressRepoEditNotify& operator=(const SuppressRepoEditNotify&) = delete;
+  ~SuppressRepoEditNotify() { flag_ = false; }
+
+private:
+  bool& flag_;
+};
 
 }  // namespace
 
@@ -122,11 +139,13 @@ void MainWindow::OnCreate(HWND window) {
   tooltips_.Create(window, metrics_.Font());
   RegisterTooltips();
   UpdateCommandAvailability();
+  InitializeRepoInput(window);
   RefreshTexts(window);
   InitializeGitDetection(window);
 }
 
 void MainWindow::RegisterTooltips() {
+  tooltips_.Add(repoBar_.repoEdit(), L"输入本地仓库目录（也可以是其子目录）；识别在后台只读执行，不会改动仓库。");
   tooltips_.Add(repoBar_.repoBrowse(), kTipBrowseRepo);
   tooltips_.Add(repoBar_.gitBrowse(), kTipBrowseGit);
   tooltips_.Add(repoBar_.fetchButton(), kTipFetch);
@@ -148,9 +167,10 @@ void MainWindow::RegisterTooltips() {
 }
 
 void MainWindow::UpdateCommandAvailability() {
-  // 依赖 Git 的控件要同时满足：功能已接通（后续步骤）且当前 Git 程序验证可用；
-  // 验证失败后一旦用户改正路径并验证通过，无需重启即可恢复。
-  const BOOL gitReady = (app::AppState::kGitOperationsImplemented && state_.GitUsable()) ? TRUE : FALSE;
+  // 依赖 Git 的控件要同时满足：功能已接通（后续步骤）、Git 程序验证可用、仓库已识别为可用工作区；
+  // 任一条件失效（改正路径、切换仓库、识别失败、裸仓库）都会立即重新禁用。
+  const BOOL gitReady =
+      (app::AppState::kGitOperationsImplemented && state_.GitUsable() && state_.RepoUsable()) ? TRUE : FALSE;
   for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), repoBar_.statusButton(),
                       changesPane_.stageAddButton(), changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
                       commitForm_.CoauthorRemove(), actionBar_.refreshButton(), actionBar_.createCommitButton(),
@@ -179,15 +199,25 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
 }
 
 void MainWindow::RefreshTexts(HWND window) {
-  infoBar_.Refresh(L"当前分支：" + state_.BranchDisplay(), L"上游：" + state_.UpstreamDisplay(),
-                   L"任务状态：" + state_.StatusNote(), programInfo_);
-  changesPane_.ShowWorkspace(state_.Workspace(), git::NotLoadedTexts());
+  infoBar_.Refresh(L"仓库类型：" + state_.RepoTypeDisplay(), L"当前分支：" + state_.BranchDisplay(),
+                   L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + state_.StatusNote(), programInfo_);
+  changesPane_.ShowWorkspace(state_.Workspace(), WorkspaceStateTexts());
   if (app::AppState::kGitOperationsImplemented) {
     actionBar_.SetStatus(state_.StatusNote());
   } else {
     actionBar_.SetStatus(kPendingNotice);
   }
   DoLayout(window);
+}
+
+gc::git::EmptyStateTexts MainWindow::WorkspaceStateTexts() const {
+  // 仓库识别成功后，列表仍是空的，但要说明“已识别、只是工作区读取未实现”，
+  // 不能让用户误以为识别失败或仓库为空。
+  if (state_.Repo().status == app::RepoLoadStatus::loaded &&
+      git::KindHasWorkspace(state_.Repo().detection.kind)) {
+    return git::LoadedButNotImplementedTexts();
+  }
+  return git::NotLoadedTexts();
 }
 
 void MainWindow::ApplyFonts(HWND window) {
@@ -249,6 +279,9 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdGitCombo:
       OnGitComboNotify(window, notifyCode);
       break;
+    case kIdRepoEdit:
+      OnRepoEditNotify(window, notifyCode);
+      break;
     default:
       break;  // 其余按钮保持禁用，不会收到命令通知。
   }
@@ -271,6 +304,25 @@ void MainWindow::OnGitComboNotify(HWND window, UINT notifyCode) {
   }
 }
 
+void MainWindow::OnRepoEditNotify(HWND window, UINT notifyCode) {
+  if (suppressRepoEditNotify_) {
+    return;  // 程序改写输入框（绝对化、浏览回填）不是用户的新选择。
+  }
+  switch (notifyCode) {
+    case EN_CHANGE:
+      // 键入逐字符通知：只重排防抖定时器，停顿后统一识别，避免每敲一键发起一批 Git 查询。
+      ::KillTimer(window, kRepoDetectTimer);
+      ::SetTimer(window, kRepoDetectTimer, kRepoDetectDebounceMs, nullptr);
+      break;
+    case EN_KILLFOCUS:
+      ::KillTimer(window, kRepoDetectTimer);
+      CommitRepoInput(window);
+      break;
+    default:
+      break;
+  }
+}
+
 void MainWindow::BrowseRepoPath(HWND window) {
   std::wstring start = GetControlText(repoBar_.repoEdit());
   if (start.empty()) {
@@ -281,10 +333,39 @@ void MainWindow::BrowseRepoPath(HWND window) {
   if (!picked.has_value() || picked->empty()) {
     return;
   }
-  SetControlText(repoBar_.repoEdit(), *picked);
-  state_.SetRepoPath(*picked);
-  state_.SetStatusNote(L"已记录本地仓库路径；仓库识别与 Git 操作尚未接入。");
-  RefreshTexts(window);
+  ::KillTimer(window, kRepoDetectTimer);  // 明确选择不再防抖。
+  {
+    const SuppressRepoEditNotify guard(suppressRepoEditNotify_);
+    SetControlText(repoBar_.repoEdit(), *picked);
+  }
+  CommitRepoInput(window);
+}
+
+void MainWindow::InitializeRepoInput(HWND /*window*/) {
+  // 初值取应用启动时的工作目录（只读取，不改变进程工作目录）。
+  const std::wstring startupDirectory = platform::CurrentWorkingDirectory();
+  const std::wstring absolute = platform::ToAbsolutePath(startupDirectory);
+  const std::wstring initial = absolute.empty() ? startupDirectory : absolute;
+  {
+    const SuppressRepoEditNotify guard(suppressRepoEditNotify_);
+    SetControlText(repoBar_.repoEdit(), initial);
+  }
+  state_.SetRepoPath(initial);
+
+  app::RepoState repo;
+  repo.status = app::RepoLoadStatus::unloaded;
+  if (initial.empty()) {
+    repo.detection.error = git::RepoError::inputEmpty;
+    state_.SetRepo(std::move(repo));
+    state_.SetStatusNote(std::wstring(kRepoInputPlaceholder) + L"。" +
+                         git::BuildRepoErrorDetail(repo.detection.error, {}));
+    return;
+  }
+  // 识别要等 Git 程序验证通过才能开始（见 OnGitProbeCompleted），这里只挂起等待状态；
+  // 不能假装“正在识别”，否则没有任何查询会把它结束掉。
+  repo.detection.error = git::RepoError::gitUnavailable;
+  state_.SetRepo(std::move(repo));
+  state_.SetStatusNote(L"等待 Git 程序验证通过后识别仓库：" + initial);
 }
 
 void MainWindow::BrowseGitPath(HWND window) {
@@ -307,12 +388,13 @@ void MainWindow::InitializeGitDetection(HWND window) {
   const std::vector<std::wstring> candidates = platform::DiscoverGitCandidates();
   repoBar_.SetGitCandidates(candidates);
   if (candidates.empty()) {
+    const std::wstring message = L"当前进程 PATH 中未找到 git.exe，请手动输入路径或用“浏览…”选择。";
     app::GitToolState tool;
     tool.status = app::GitExeStatus::unverified;
-    tool.message = L"当前进程 PATH 中未找到 git.exe，请手动输入路径或用“浏览…”选择。";
-    state_.SetStatusNote(tool.message);
+    tool.message = message;
     state_.SetGitTool(std::move(tool));
-    RefreshTexts(window);
+    // 没有可用的 Git 就无从识别仓库；置为“Git 程序不可用”，用户补好路径后会自动补做识别。
+    SetRepoFailed(window, state_.Info().repoPath, git::RepoError::gitUnavailable, message);
     return;
   }
   SetControlText(repoBar_.gitCombo(), candidates.front());
@@ -353,7 +435,10 @@ void MainWindow::RequestGitVerification(HWND window, const std::wstring& normali
   state_.SetStatusNote(L"正在验证 Git 程序：" + normalizedPath);
   UpdateCommandAvailability();
   RefreshTexts(window);
-  gitWorker_.RequestVerify(window, kGitProbeCompleted, normalizedPath, kGitProbeTimeoutMs);
+  // 任务体只在工作线程执行；序号由控制器管理，旧结果按序号作废。
+  gitWorker_.Request(window, kGitProbeCompleted, normalizedPath, [timeout = kGitProbeTimeoutMs](const std::wstring& exe) {
+    return platform::VerifyGitExe(exe, timeout);
+  });
 }
 
 void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
@@ -370,7 +455,105 @@ void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
   state_.SetGitTool(std::move(tool));
   state_.SetStatusNote(verification.message);
   UpdateCommandAvailability();
+  // Git 一开始不可用、随后才验证通过的场合：自动补一次仓库识别，用户无需重选路径。
+  ResumeRepoDetectionWhenGitReady(window);
   RefreshTexts(window);
+}
+
+void MainWindow::CommitRepoInput(HWND window) {
+  const std::wstring raw = git::TrimWide(GetControlText(repoBar_.repoEdit()));
+  if (raw.empty()) {
+    SetRepoFailed(window, {}, git::RepoError::inputEmpty, {});
+    return;
+  }
+  // 相对路径按启动工作目录展开；展示与内部状态都用绝对路径（仓库识别只读，不改任何东西）。
+  const std::wstring absolute = platform::ToAbsolutePath(raw);
+  const std::wstring normalized = absolute.empty() ? raw : absolute;
+  if (normalized != raw) {
+    const SuppressRepoEditNotify guard(suppressRepoEditNotify_);
+    SetControlText(repoBar_.repoEdit(), normalized);
+  }
+  state_.SetRepoPath(normalized);
+  if (state_.Repo().status == app::RepoLoadStatus::detecting) {
+    return;  // 上一次识别还在进行：它会以最新一次提交为准，无需重复排队。
+  }
+  RequestRepoDetection(window, normalized);
+}
+
+void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalizedPath) {
+  if (!state_.GitUsable()) {
+    SetRepoFailed(window, normalizedPath, git::RepoError::gitUnavailable, {});
+    return;
+  }
+  app::RepoState repo;
+  repo.status = app::RepoLoadStatus::detecting;
+  state_.SetRepo(std::move(repo));
+  state_.SetStatusNote(L"正在后台识别仓库（只读查询，不会改动仓库）：" + normalizedPath);
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+
+  platform::RepoDetectRequest request;
+  request.exePath = state_.Git().path;
+  request.directory = normalizedPath;
+  request.timeoutMilliseconds = kRepoDetectTimeoutMs;
+  repoWorker_.Request(window, kRepoDetectCompleted, std::move(request),
+                      [](const platform::RepoDetectRequest& pending) {
+                        return platform::RunRepositoryDetection(pending);
+                      });
+}
+
+void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, git::RepoError error,
+                               std::wstring_view detail) {
+  const std::wstring message = git::BuildRepoErrorDetail(error, detail);
+  app::RepoState repo;
+  repo.status = (error == git::RepoError::inputEmpty) ? app::RepoLoadStatus::unloaded
+                                                      : app::RepoLoadStatus::failed;
+  repo.detection.kind = (error == git::RepoError::notRepository) ? git::RepoKind::notRepository
+                                                                 : git::RepoKind::failed;
+  repo.detection.error = error;
+  repo.detection.root = normalizedPath;
+  repo.detection.message = message;
+  state_.SetRepo(std::move(repo));
+  // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
+  state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
+                                              : message);
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+}
+
+void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
+  git::RepoDetection detection;
+  if (!repoWorker_.FetchLatest(completionSerial, &detection)) {
+    return;  // 较慢完成的旧结果：已被更新的仓库选择取代，丢弃。
+  }
+  app::RepoState repo;
+  const bool answeredByGit =
+      detection.error == git::RepoError::none || detection.kind == git::RepoKind::notRepository;
+  repo.status = answeredByGit ? app::RepoLoadStatus::loaded : app::RepoLoadStatus::failed;
+  repo.detection = std::move(detection);
+  state_.SetRepo(std::move(repo));
+  state_.SetStatusNote(state_.Repo().detection.message);
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+}
+
+void MainWindow::ResumeRepoDetectionWhenGitReady(HWND window) {
+  // Git 刚刚可用时补上没做成的识别：包含首次启动（等待 Git 验证）与用户改正路径两种情况。
+  if (!state_.GitUsable()) {
+    return;
+  }
+  const app::RepoState& repo = state_.Repo();
+  const std::wstring& path = state_.Info().repoPath;
+  if (path.empty()) {
+    return;
+  }
+  const bool waitingForGit = repo.detection.error == git::RepoError::gitUnavailable &&
+                             (repo.status == app::RepoLoadStatus::unloaded ||
+                              repo.status == app::RepoLoadStatus::failed);
+  if (!waitingForGit) {
+    return;  // 只补因为“Git 不可用”而没能识别的场合，其他失败原因不该被反复重试。
+  }
+  RequestRepoDetection(window, path);
 }
 
 void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
@@ -430,10 +613,16 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       if (wParam == kGitVerifyTimer) {
         ::KillTimer(window, kGitVerifyTimer);
         CommitGitInput(window);
+      } else if (wParam == kRepoDetectTimer) {
+        ::KillTimer(window, kRepoDetectTimer);
+        CommitRepoInput(window);
       }
       return 0;
     case kGitProbeCompleted:
       OnGitProbeCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
+    case kRepoDetectCompleted:
+      OnRepoDetectCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
     case kSplitterDragged:
       OnSplitterDragged(window, static_cast<int>(wParam), static_cast<int>(lParam));
@@ -442,9 +631,11 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       ::DestroyWindow(window);
       return 0;
     case WM_DESTROY:
-      // 先停掉后台验证线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
+      // 先停掉后台线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
       gitWorker_.Shutdown();
+      repoWorker_.Shutdown();
       ::KillTimer(window, kGitVerifyTimer);
+      ::KillTimer(window, kRepoDetectTimer);
       window_.Disown();
       ::PostQuitMessage(0);
       return 0;

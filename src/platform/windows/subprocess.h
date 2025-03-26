@@ -14,7 +14,9 @@ struct SubprocessRunResult {
   bool exited = false;       // 进程在期限内退出（含被超时终止后的确认）
   bool timedOut = false;
   unsigned long exitCode = 0;
-  std::string utf8Output;    // stdout+stderr 合并的原始字节
+  std::string utf8Stdout;    // 子进程标准输出的原始字节
+  std::string utf8Stderr;    // 子进程标准错误的原始字节
+  std::string utf8Output;    // stdout 后接 stderr 的合并字节，供只关心“有没有回话”的探测使用
   std::wstring commandLine;  // 实际传给 CreateProcessW 的命令行，供诊断展示
 };
 
@@ -26,6 +28,8 @@ struct SubprocessRunResult {
 // 同步执行一个隐藏窗口的程序并捕获输出。会阻塞调用线程直到退出或超时（超时后终止进程），
 // 因此只允许在后台工作线程调用，不允许在 GUI 线程调用。
 // workingDirectory 为空时沿用父进程当前目录。
+// stdout 与 stderr 分别捕获：Git 的机器输出走 stdout，致命信息走 stderr，
+// 合并读取会因两条流的写入时机不同而打乱按行取字段的顺序。
 [[nodiscard]] SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
                                                     const std::vector<std::wstring>& arguments,
                                                     std::wstring_view workingDirectory,

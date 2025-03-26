@@ -90,6 +90,49 @@ struct PipeReader {
   }
 };
 
+// 一路输出（stdout 或 stderr）的管道两端。
+struct CapturedPipe {
+  UniqueHandle read;
+  UniqueHandle write;
+};
+
+// 建立一条不继承读端的管道；写端供子进程继承，父进程启动后立即关闭。
+bool OpenCapturedPipe(CapturedPipe& pipe, SECURITY_ATTRIBUTES& inheritable, std::wstring& errorText,
+                      unsigned long& errorCode) {
+  HANDLE rawRead = nullptr;
+  HANDLE rawWrite = nullptr;
+  if (::CreatePipe(&rawRead, &rawWrite, &inheritable, 256 * 1024) == 0) {
+    errorCode = ::GetLastError();
+    errorText = L"无法创建输出管道：" + FormatLaunchErrorText(errorCode);
+    return false;
+  }
+  pipe.read.Reset(rawRead);
+  pipe.write.Reset(rawWrite);
+  if (::SetHandleInformation(pipe.read.get(), HANDLE_FLAG_INHERIT, 0) == 0) {
+    errorCode = ::GetLastError();
+    errorText = L"管道句柄设置失败：" + FormatLaunchErrorText(errorCode);
+    return false;
+  }
+  return true;
+}
+
+// 启动抽取线程。线程创建失败时放弃这一路输出，但进程等待照常进行。
+bool StartReader(PipeReader& reader, std::thread& thread) {
+  try {
+    thread = std::thread([&reader]() { reader.Run(); });
+  } catch (const std::system_error&) {
+    reader.readHandle.Reset();
+    return false;
+  }
+  return true;
+}
+
+void JoinReader(std::thread& thread) {
+  // 万一孙进程继承了写端导致 ReadFile 仍阻塞，显式取消它，保证线程必然能结束。
+  ::CancelSynchronousIo(thread.native_handle());
+  thread.join();
+}
+
 }  // namespace
 
 std::wstring BuildCommandLine(std::wstring_view program, const std::vector<std::wstring>& arguments) {
@@ -114,27 +157,23 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vect
   }
 
   SECURITY_ATTRIBUTES inheritable{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-  HANDLE rawRead = nullptr;
-  HANDLE rawWrite = nullptr;
-  if (::CreatePipe(&rawRead, &rawWrite, &inheritable, 256 * 1024) == 0) {
-    result.launchError = ::GetLastError();
-    result.launchErrorText = L"无法创建输出管道：" + FormatLaunchErrorText(result.launchError);
-    return result;
-  }
-  UniqueHandle readPipe(rawRead);
-  UniqueHandle writePipe(rawWrite);
-  if (::SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0) == 0) {
-    result.launchError = ::GetLastError();
-    result.launchErrorText = L"管道句柄设置失败：" + FormatLaunchErrorText(result.launchError);
+  CapturedPipe stdoutPipe;
+  CapturedPipe stderrPipe;
+  std::wstring pipeError;
+  unsigned long pipeErrorCode = 0;
+  if (!OpenCapturedPipe(stdoutPipe, inheritable, pipeError, pipeErrorCode) ||
+      !OpenCapturedPipe(stderrPipe, inheritable, pipeError, pipeErrorCode)) {
+    result.launchError = pipeErrorCode;
+    result.launchErrorText = pipeError;
     return result;
   }
 
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESTDHANDLES;
-  startup.hStdInput = nullptr;  // 内部验证命令不需要交互输入。
-  startup.hStdOutput = writePipe.get();
-  startup.hStdError = writePipe.get();  // 两个字段共享同一写端句柄，子进程退出时一并关闭。
+  startup.hStdInput = nullptr;  // 内部查询命令不需要交互输入。
+  startup.hStdOutput = stdoutPipe.write.get();
+  startup.hStdError = stderrPipe.write.get();
 
   PROCESS_INFORMATION processInformation{};
   std::wstring mutableCommand = result.commandLine;  // CreateProcessW 要求可写缓冲。
@@ -145,7 +184,8 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vect
                        /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
                        workDir.empty() ? nullptr : workDir.c_str(), &startup, &processInformation);
   // 父进程一侧的写端立即关闭：否则管道永远不会 EOF，读取线程无法结束。
-  writePipe.Reset();
+  stdoutPipe.write.Reset();
+  stderrPipe.write.Reset();
   if (created == 0) {
     result.launchError = ::GetLastError();
     result.launchErrorText = FormatLaunchErrorText(result.launchError);
@@ -155,16 +195,15 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vect
   UniqueHandle processHandle(processInformation.hProcess);
   UniqueHandle threadHandle(processInformation.hThread);
 
-  auto reader = std::make_unique<PipeReader>();
-  reader->readHandle.Reset(readPipe.Release());  // 读取线程独占管道读端。
-  bool readerStarted = true;
-  std::thread readerThread;
-  try {
-    readerThread = std::thread([&reader]() { reader->Run(); });
-  } catch (const std::system_error&) {
-    readerStarted = false;  // 无线程可用时直接放弃读取；进程等待仍然进行。
-    reader->readHandle.Reset();
-  }
+  // 两条流各用独立线程抽取：单线程轮读会在其中一条写满时死锁。
+  std::unique_ptr<PipeReader> stdoutReader = std::make_unique<PipeReader>();
+  std::unique_ptr<PipeReader> stderrReader = std::make_unique<PipeReader>();
+  stdoutReader->readHandle.Reset(stdoutPipe.read.Release());
+  stderrReader->readHandle.Reset(stderrPipe.read.Release());
+  std::thread stdoutThread;
+  std::thread stderrThread;
+  bool stdoutStarted = StartReader(*stdoutReader, stdoutThread);
+  bool stderrStarted = StartReader(*stderrReader, stderrThread);
 
   const DWORD waited = ::WaitForSingleObject(processHandle.get(), timeoutMilliseconds);
   if (waited == WAIT_TIMEOUT) {
@@ -175,12 +214,15 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vect
     result.exited = waited == WAIT_OBJECT_0;
   }
 
-  if (readerStarted) {
-    // 万一孙进程继承了写端导致 ReadFile 仍阻塞，显式取消它，保证线程必然能结束。
-    ::CancelSynchronousIo(readerThread.native_handle());
-    readerThread.join();
-    result.utf8Output = std::move(reader->output);
+  if (stdoutStarted) {
+    JoinReader(stdoutThread);
+    result.utf8Stdout = std::move(stdoutReader->output);
   }
+  if (stderrStarted) {
+    JoinReader(stderrThread);
+    result.utf8Stderr = std::move(stderrReader->output);
+  }
+  result.utf8Output = result.utf8Stdout + result.utf8Stderr;
   unsigned long exitCode = 0;
   if (::GetExitCodeProcess(processHandle.get(), &exitCode) != 0) {
     result.exitCode = exitCode;

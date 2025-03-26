@@ -52,4 +52,7 @@ struct EmptyStateTexts {
 // 尚未接入 Git 读取时三块列表各自显示的空状态说明。
 EmptyStateTexts NotLoadedTexts() noexcept;
 
+// 仓库已识别、但工作区读取（git status / git log）尚未实现时的说明。
+EmptyStateTexts LoadedButNotImplementedTexts() noexcept;
+
 }  // namespace gc::git

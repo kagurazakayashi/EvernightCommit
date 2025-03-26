@@ -12,4 +12,13 @@ EmptyStateTexts NotLoadedTexts() noexcept {
   return kTexts;
 }
 
+EmptyStateTexts LoadedButNotImplementedTexts() noexcept {
+  static constexpr EmptyStateTexts kTexts{
+      L"仓库已识别\r\n文件列表将在后续步骤接入 git status。",
+      L"仓库已识别\r\n文件列表将在后续步骤接入 git status。",
+      L"仓库已识别\r\n提交历史将在后续步骤接入 git log。"};
+
+  return kTexts;
+}
+
 }  // namespace gc::git
