@@ -28,11 +28,22 @@ struct SubprocessRunResult {
 // 同步执行一个隐藏窗口的程序并捕获输出。会阻塞调用线程直到退出或超时（超时后终止进程），
 // 因此只允许在后台工作线程调用，不允许在 GUI 线程调用。
 // workingDirectory 为空时沿用父进程当前目录。
+// environmentBlock 为 NULL 结尾的 Unicode 环境块（GetEnvironmentStringsW 同格式），
+// 传 nullptr 时子进程继承本进程环境。仅测试夹具需要传入隔离环境块；
+// 生产代码一律使用下面的四参重载，不指定环境块。
 // stdout 与 stderr 分别捕获：Git 的机器输出走 stdout，致命信息走 stderr，
 // 合并读取会因两条流的写入时机不同而打乱按行取字段的顺序。
 [[nodiscard]] SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
                                                     const std::vector<std::wstring>& arguments,
                                                     std::wstring_view workingDirectory,
-                                                    unsigned long timeoutMilliseconds);
+                                                    unsigned long timeoutMilliseconds,
+                                                    const wchar_t* environmentBlock);
+
+[[nodiscard]] inline SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
+                                                           const std::vector<std::wstring>& arguments,
+                                                           std::wstring_view workingDirectory,
+                                                           unsigned long timeoutMilliseconds) {
+  return RunHiddenCaptured(program, arguments, workingDirectory, timeoutMilliseconds, nullptr);
+}
 
 }  // namespace gc::platform
