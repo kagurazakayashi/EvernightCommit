@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <stdexcept>
 #include <string>
 
 namespace gc::test {
@@ -16,6 +17,13 @@ struct Location {
 bool Report(bool passed, const std::string& description, Location location);
 
 int FailureCount();
+
+// 前置条件失败：环境不满足（找不到可用 Git、临时目录创建失败、夹具命令意外非 0 退出等）。
+// 抛出即中止当前用例；运行器把它与“断言失败”分开报告，但同样计入失败、返回非 0 退出码，
+// 绝不静默跳过集成测试。
+struct PrerequisiteFailure : std::runtime_error {
+  explicit PrerequisiteFailure(const std::string& reason) : std::runtime_error(reason) {}
+};
 
 struct Registrar {
   Registrar(const char* name, CaseBody body);
@@ -35,3 +43,13 @@ int RunAll();
 
 #define GC_CHECK_MESSAGE(condition, description) \
   ::gc::test::Report(static_cast<bool>(condition), (description), ::gc::test::Location{__FILE__, __LINE__})
+
+// 前置条件不满足时中止用例并给出原因（reason 为 std::string 可构造的表达式）。
+#define GC_REQUIRE(condition, reason) \
+  do { \
+    if (!static_cast<bool>(condition)) { \
+      ::gc::test::Report(false, "前置条件失败: " + static_cast<std::string>(reason), \
+                         ::gc::test::Location{__FILE__, __LINE__}); \
+      throw ::gc::test::PrerequisiteFailure(reason); \
+    } \
+  } while (false)

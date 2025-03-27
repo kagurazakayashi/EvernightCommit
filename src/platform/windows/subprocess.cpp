@@ -147,7 +147,8 @@ std::wstring BuildCommandLine(std::wstring_view program, const std::vector<std::
 }
 
 SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vector<std::wstring>& arguments,
-                                      std::wstring_view workingDirectory, unsigned long timeoutMilliseconds) {
+                                      std::wstring_view workingDirectory, unsigned long timeoutMilliseconds,
+                                      const wchar_t* environmentBlock) {
   SubprocessRunResult result;
   result.commandLine = BuildCommandLine(program, arguments);
   if (program.empty()) {
@@ -179,10 +180,14 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program, const std::vect
   std::wstring mutableCommand = result.commandLine;  // CreateProcessW 要求可写缓冲。
   const std::wstring programString(program);
   const std::wstring workDir(workingDirectory);
+
+  // CreateProcessW 的 lpEnvironment 形参是 LPVOID/TCHAR*，语义上只读；去 const 仅限本调用。
+  void* environment = const_cast<void*>(static_cast<const void*>(environmentBlock));
   const BOOL created =
       ::CreateProcessW(programString.c_str(), mutableCommand.data(), nullptr, nullptr,
-                       /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
-                       workDir.empty() ? nullptr : workDir.c_str(), &startup, &processInformation);
+                       /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                       environment, workDir.empty() ? nullptr : workDir.c_str(), &startup,
+                       &processInformation);
   // 父进程一侧的写端立即关闭：否则管道永远不会 EOF，读取线程无法结束。
   stdoutPipe.write.Reset();
   stderrPipe.write.Reset();

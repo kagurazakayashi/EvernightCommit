@@ -1,9 +1,12 @@
 add_executable(gc_tests
   support/test_main.cpp
+  support/git_fixture.cpp
   app_state_tests.cpp
+  git_fixture_tests.cpp
   git_locator_tests.cpp
   git_probe_tests.cpp
   layout_tests.cpp
+  repo_detect_fixture_tests.cpp
   repository_tests.cpp
   subprocess_command_line_tests.cpp
   ui_metrics_tests.cpp
