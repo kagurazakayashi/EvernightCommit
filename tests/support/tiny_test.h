@@ -53,3 +53,13 @@ int RunAll();
       throw ::gc::test::PrerequisiteFailure(reason); \
     } \
   } while (false)
+
+// 同 GC_REQUIRE，但失败信息用可读描述替代条件文本本身。
+#define GC_REQUIRE_MESSAGE(condition, description) \
+  do { \
+    if (!static_cast<bool>(condition)) { \
+      ::gc::test::Report(false, "前置条件失败: " + static_cast<std::string>(description), \
+                         ::gc::test::Location{__FILE__, __LINE__}); \
+      throw ::gc::test::PrerequisiteFailure(description); \
+    } \
+  } while (false)

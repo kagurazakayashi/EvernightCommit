@@ -69,6 +69,10 @@ inline constexpr UINT kSplitterDragged = WM_APP + 1;
 inline constexpr UINT kGitProbeCompleted = WM_APP + 2;
 // 仓库识别（只读 Git 查询）后台完成通知；wParam 为请求序号。
 inline constexpr UINT kRepoDetectCompleted = WM_APP + 3;
+// 外部命令窗口操作的观察通知（轮询进行中的操作状态）；无参数。
+inline constexpr UINT kGitOperationTick = WM_APP + 4;
+inline constexpr UINT_PTR kGitOperationTimer = 0x4713;
+inline constexpr UINT kGitOperationTickMs = 500;
 
 // “Git 程序”输入防抖：连续键入只在停顿后验证一次。
 inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;

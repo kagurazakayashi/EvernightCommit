@@ -135,6 +135,12 @@ void JoinReader(std::thread& thread) {
 
 }  // namespace
 
+std::wstring QuoteArgument(std::wstring_view value) {
+  std::wstring segment;
+  AppendArgument(segment, value, /*alwaysQuote=*/true);
+  return segment;
+}
+
 std::wstring BuildCommandLine(std::wstring_view program, const std::vector<std::wstring>& arguments) {
   std::wstring commandLine;
   // 程序路径一律加引号：路径几乎总可能含空格。

@@ -17,7 +17,6 @@
 #include "platform/windows/win_path.h"
 #include "ui/commands.h"
 #include "ui/resource_ids.h"
-
 namespace gc::ui {
 namespace {
 
@@ -32,7 +31,8 @@ constexpr std::wstring_view kTipBrowseRepo =
 constexpr std::wstring_view kTipBrowseGit = L"浏览选择 git.exe；选定后立即在后台运行 git --version 验证。";
 constexpr std::wstring_view kTipFetch = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git fetch";
 constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
-constexpr std::wstring_view kTipStatus = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git status";
+constexpr std::wstring_view kTipStatus =
+    L"在新命令窗口里执行 git status：显示真实命令与输出，Git 结束窗口仍保留；本程序通过结果文件获知退出码。";
 constexpr std::wstring_view kTipStageAdd = L"该操作尚未实现，按钮保持禁用。对应命令：git add <所选文件>";
 constexpr std::wstring_view kTipStageRemove =
     L"该操作尚未实现，按钮保持禁用。对应命令：git restore --staged <所选文件>";
@@ -45,7 +45,8 @@ constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月�
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
 constexpr std::wstring_view kPendingNotice =
-    L"提示：仓库识别与分支摘要已接入；Git 操作（status/暂存/提交/fetch/pull/push 等）将在后续步骤接入，按钮当前保持禁用。";
+    L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
+    L"暂存/提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
 
@@ -142,6 +143,7 @@ void MainWindow::OnCreate(HWND window) {
   InitializeRepoInput(window);
   RefreshTexts(window);
   InitializeGitDetection(window);
+  InitializeCommandWatching(window);
 }
 
 void MainWindow::RegisterTooltips() {
@@ -171,12 +173,42 @@ void MainWindow::UpdateCommandAvailability() {
   // 任一条件失效（改正路径、切换仓库、识别失败、裸仓库）都会立即重新禁用。
   const BOOL gitReady =
       (app::AppState::kGitOperationsImplemented && state_.GitUsable() && state_.RepoUsable()) ? TRUE : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), repoBar_.statusButton(),
+  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(),
                       changesPane_.stageAddButton(), changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
                       commitForm_.CoauthorRemove(), actionBar_.refreshButton(), actionBar_.createCommitButton(),
                       actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
+  // status 是首个接入命令窗口执行器的操作：除上述条件外，同一时刻只允许一个操作在跑，
+  // 避免并发提交让“哪个窗口对应哪次操作”变得含糊。
+  const BOOL statusReady =
+      (state_.GitUsable() && state_.RepoUsable() && commandRunner_.ActiveCount() == 0) ? TRUE : FALSE;
+  ::EnableWindow(repoBar_.statusButton(), statusReady);
+}
+
+std::wstring MainWindow::TaskStatusNote() const {
+  // 进行中/已完成的操作说明优先于常规任务状态：用户必须能看到“命令窗口里正在跑什么”。
+  for (uint64_t operationId : activeOperations_) {
+    std::wstring status;
+    if (commandRunner_.DescribeOperation(operationId, &status, nullptr)) {
+      return L"命令窗口操作：" + status;
+    }
+  }
+  return state_.StatusNote();
+}
+
+std::wstring MainWindow::OperationBanner() const {
+  // 底部状态条：有操作在进行时用实时状态取代“功能未接入”的固定说明。
+  for (uint64_t operationId : activeOperations_) {
+    std::wstring status;
+    if (commandRunner_.DescribeOperation(operationId, &status, nullptr)) {
+      return L"命令窗口操作：" + status;
+    }
+  }
+  if (app::AppState::kGitOperationsImplemented) {
+    return state_.StatusNote();
+  }
+  return std::wstring(kPendingNotice);
 }
 
 void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
@@ -200,13 +232,9 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
 
 void MainWindow::RefreshTexts(HWND window) {
   infoBar_.Refresh(L"仓库类型：" + state_.RepoTypeDisplay(), L"当前分支：" + state_.BranchDisplay(),
-                   L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + state_.StatusNote(), programInfo_);
+                   L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + TaskStatusNote(), programInfo_);
   changesPane_.ShowWorkspace(state_.Workspace(), WorkspaceStateTexts());
-  if (app::AppState::kGitOperationsImplemented) {
-    actionBar_.SetStatus(state_.StatusNote());
-  } else {
-    actionBar_.SetStatus(kPendingNotice);
-  }
+  actionBar_.SetStatus(OperationBanner());
   DoLayout(window);
 }
 
@@ -281,6 +309,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
       break;
     case kIdRepoEdit:
       OnRepoEditNotify(window, notifyCode);
+      break;
+    case kIdStatusButton:
+      if (notifyCode == BN_CLICKED) {
+        LaunchStatusOperation(window);
+      }
       break;
     default:
       break;  // 其余按钮保持禁用，不会收到命令通知。
@@ -556,6 +589,118 @@ void MainWindow::ResumeRepoDetectionWhenGitReady(HWND window) {
   RequestRepoDetection(window, path);
 }
 
+void MainWindow::InitializeCommandWatching(HWND window) {
+  commandRunner_.Startup(window);
+  ::SetTimer(window, kGitOperationTimer, kGitOperationTickMs, nullptr);
+}
+
+void MainWindow::LaunchStatusOperation(HWND window) {
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    return;
+  }
+  if (commandRunner_.ActiveCount() > 0) {
+    return;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
+  }
+  const std::wstring gitExe = state_.Git().path;
+  std::wstring repository = state_.Repo().detection.root;
+  if (repository.empty()) {
+    repository = state_.Info().repoPath;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = L"status";
+  operation.displayName = L"status";
+  operation.gitExecutable = gitExe;
+  operation.repositoryDirectory = repository;
+  // 只读地查看工作区状态；参数按数组提交，不进任何 shell 字符串。
+  operation.arguments = {L"status"};
+
+  uint64_t operationId = 0;
+  platform::CommandWindowResult failure;
+  if (!commandRunner_.Start(operation, &operationId, &failure)) {
+    std::wstring note = L"status 启动失败：" + failure.failureReason;
+    if (failure.completion != git::CommandCompletion::launchFailed) {
+      note += L"（状态：" + std::wstring(git::CommandCompletionLabel(failure.completion)) + L"）";
+    }
+    state_.SetStatusNote(note);
+    UpdateCommandAvailability();
+    RefreshTexts(window);
+    return;
+  }
+  activeOperations_.push_back(operationId);
+  state_.SetStatusNote(L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…");
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+}
+
+void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
+  const auto position = std::find(activeOperations_.begin(), activeOperations_.end(), operationId);
+  if (position == activeOperations_.end()) {
+    return;  // 不认识的操作 ID：本窗口不拥有它（例如通知在销毁后到达），直接忽略。
+  }
+  platform::CommandWindowResult result;
+  if (!commandRunner_.TakeResult(operationId, &result)) {
+    return;  // 理论上不会发生：结果在通知之前登记；这里不删除 ID，等下一次通知或退出确认。
+  }
+  activeOperations_.erase(position);
+
+  std::wstring note = L"status " + std::wstring(git::CommandCompletionLabel(result.completion));
+  if (result.completion == git::CommandCompletion::finished ||
+      result.completion == git::CommandCompletion::gitNotStarted) {
+    note += L"，Git 退出码 " + std::to_wstring(result.exitCode);
+    if (result.exitCode == 0) {
+      note += L"（成功）。命令窗口仍保持打开，可继续查看输出。";
+    } else {
+      note += L"（非 0，请在命令窗口查看 Git 原始输出）。";
+    }
+  } else {
+    note += L"：" + result.failureReason;
+  }
+  state_.SetStatusNote(note);
+  // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
+  commandRunner_.ClearAllResults();
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+}
+
+void MainWindow::TickActiveOperations(HWND window) {
+  // 轮询只负责把“执行中”刷成最新可见文本，并清理执行器里已不存在的操作 ID
+  // （真正的完成判定来自观察线程的通知，不靠这里的文案匹配）。
+  const size_t before = activeOperations_.size();
+  std::erase_if(activeOperations_, [this](uint64_t operationId) {
+    std::wstring status;
+    return !commandRunner_.DescribeOperation(operationId, &status, nullptr);
+  });
+  if (activeOperations_.size() != before) {
+    UpdateCommandAvailability();
+  }
+  RefreshTexts(window);
+}
+
+void MainWindow::StopOperationWatching() {
+  if (window_.get() != nullptr) {
+    ::KillTimer(window_.get(), kGitOperationTimer);
+  }
+  activeOperations_.clear();
+  commandRunner_.Shutdown();
+}
+
+bool MainWindow::ConfirmCloseWithActiveOperations(HWND window) {
+  const std::vector<std::wstring> active = commandRunner_.ActiveOperationNames();
+  if (active.empty()) {
+    return true;
+  }
+  std::wstring message =
+      L"以下 Git 操作仍在命令窗口中执行：\n";
+  for (const std::wstring& name : active) {
+    message += L"  • " + name + L"\n";
+  }
+  message += L"\n关闭本程序不会中断它们，也不会替你读取结果。\n是否仍要关闭？";
+  const int answer = ::MessageBoxW(window, message.c_str(), L"Git 操作仍在进行",
+                                   MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+  return answer == IDYES;
+}
+
 void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
   const int index = (splitterId == kSplitterLeftId) ? 0 : 1;
   RatioFromMouseX(changesArea_, changesSpec_, index, parentX, &changesSpec_.leftRatio, &changesSpec_.middleRatio);
@@ -616,6 +761,8 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       } else if (wParam == kRepoDetectTimer) {
         ::KillTimer(window, kRepoDetectTimer);
         CommitRepoInput(window);
+      } else if (wParam == kGitOperationTimer) {
+        TickActiveOperations(window);
       }
       return 0;
     case kGitProbeCompleted:
@@ -624,18 +771,27 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kRepoDetectCompleted:
       OnRepoDetectCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case platform::CommandWindowRunner::kCompletionMessage:
+      OnCommandWindowCompleted(
+          window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
+                      (static_cast<uint64_t>(static_cast<int64_t>(lParam)) << 32));
+      return 0;
     case kSplitterDragged:
       OnSplitterDragged(window, static_cast<int>(wParam), static_cast<int>(lParam));
       return 0;
     case WM_CLOSE:
-      ::DestroyWindow(window);
+      if (ConfirmCloseWithActiveOperations(window)) {
+        ::DestroyWindow(window);
+      }
       return 0;
     case WM_DESTROY:
       // 先停掉后台线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
       gitWorker_.Shutdown();
       repoWorker_.Shutdown();
+      StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);
+      ::KillTimer(window, kGitOperationTimer);
       window_.Disown();
       ::PostQuitMessage(0);
       return 0;
