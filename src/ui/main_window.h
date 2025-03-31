@@ -4,8 +4,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "app/app_state.h"
+#include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
@@ -73,9 +75,22 @@ private:
   void OnRepoDetectCompleted(HWND window, uint64_t completionSerial);
   void ResumeRepoDetectionWhenGitReady(HWND window);
 
+  // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
+  void InitializeCommandWatching(HWND window);
+  void LaunchStatusOperation(HWND window);
+  void OnCommandWindowCompleted(HWND window, uint64_t operationId);
+  void TickActiveOperations(HWND window);
+  void StopOperationWatching();
+  [[nodiscard]] std::wstring TaskStatusNote() const;
+  [[nodiscard]] std::wstring OperationBanner() const;
+  // 关闭前确认：仍有操作在命令窗口里执行时，不静默离开。
+  bool ConfirmCloseWithActiveOperations(HWND window);
+
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
+  platform::CommandWindowRunner commandRunner_;
+  std::vector<uint64_t> activeOperations_;
   app::AppState state_;
   UiMetrics metrics_;
   std::wstring programInfo_;

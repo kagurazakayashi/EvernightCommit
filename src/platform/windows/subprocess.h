@@ -25,6 +25,11 @@ struct SubprocessRunResult {
 [[nodiscard]] std::wstring BuildCommandLine(std::wstring_view program,
                                             const std::vector<std::wstring>& arguments);
 
+// 把单个字符串（程序路径或一个参数）按同一套程序参数规则编码为“带引号的一段”：
+// 一律加引号，内部引号转义，反斜杠按规则加倍。供需要“逐段构造命令行”的调用方复用
+// （外部命令窗口执行器要按段校验 cmd 解析后的引号区域，见 git/command_window.h）。
+[[nodiscard]] std::wstring QuoteArgument(std::wstring_view value);
+
 // 同步执行一个隐藏窗口的程序并捕获输出。会阻塞调用线程直到退出或超时（超时后终止进程），
 // 因此只允许在后台工作线程调用，不允许在 GUI 线程调用。
 // workingDirectory 为空时沿用父进程当前目录。
