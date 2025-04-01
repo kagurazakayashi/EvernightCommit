@@ -22,6 +22,9 @@ public:
 
   [[nodiscard]] HWND stageAddButton() const noexcept { return stageAdd_; }
   [[nodiscard]] HWND stageRemoveButton() const noexcept { return stageRemove_; }
+  // 两个更改列表本身：主窗口只取句柄挂说明性工具提示，不直接操作条目内容。
+  [[nodiscard]] HWND unstagedList() const noexcept { return unstagedList_; }
+  [[nodiscard]] HWND stagedList() const noexcept { return stagedList_; }
 
 private:
   [[nodiscard]] static RECT InnerRect(const RECT& group, const UiMetrics& metrics) noexcept;

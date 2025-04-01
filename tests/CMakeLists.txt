@@ -13,7 +13,9 @@ add_executable(gc_tests
   repository_tests.cpp
   subprocess_command_line_tests.cpp
   ui_metrics_tests.cpp
-  utf_text_tests.cpp)
+  utf_text_tests.cpp
+  workspace_status_tests.cpp
+  workspace_status_fixture_tests.cpp)
 
 target_include_directories(gc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gc_tests PRIVATE gc_core gc_platform gc_ui)

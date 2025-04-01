@@ -5,6 +5,7 @@
 
 #include "git/repository.h"
 #include "git/workspace_model.h"
+#include "git/workspace_status.h"
 
 namespace gc::app {
 
@@ -54,12 +55,15 @@ public:
   void SetStatusNote(std::wstring note) { statusNote_ = std::move(note); }
   void SetGitTool(GitToolState state) { gitTool_ = std::move(state); }
   void SetRepo(RepoState state) { repo_ = std::move(state); }
+  // 工作區快照整体替換：切換倉庫或讀取失敗時不會留下上一次的列表內容。
+  void SetWorkspace(git::WorkspaceSnapshot snapshot) { workspace_ = std::move(snapshot); }
 
   [[nodiscard]] const RepoInfo& Info() const noexcept { return info_; }
   [[nodiscard]] const std::wstring& StatusNote() const noexcept { return statusNote_; }
   [[nodiscard]] const GitToolState& Git() const noexcept { return gitTool_; }
   [[nodiscard]] const RepoState& Repo() const noexcept { return repo_; }
-  [[nodiscard]] const git::WorkspaceModel& Workspace() const noexcept { return workspace_; }
+  [[nodiscard]] const git::WorkspaceSnapshot& Workspace() const noexcept { return workspace_; }
+  [[nodiscard]] const git::WorkspaceModel& WorkspaceModel() const noexcept { return workspace_.model; }
 
   // Git 程序经 --version 验证可用；这是后续所有 Git 功能的前置条件。
   [[nodiscard]] bool GitUsable() const noexcept { return gitTool_.status == GitExeStatus::verified; }
@@ -73,13 +77,18 @@ public:
   [[nodiscard]] std::wstring BranchDisplay() const;
   [[nodiscard]] std::wstring UpstreamDisplay() const;
   [[nodiscard]] std::wstring RepoTypeDisplay() const;
+  // 三块列表在“该列没有条目”时的说明：区分无变化、正在读取与读取失败。
+  [[nodiscard]] git::EmptyStateTexts WorkspaceHintTexts() const;
+
+  // 已读取成功后返回“工作区状态摘要 + 子模块变化的范围说明”，其余状态返回空串。
+  [[nodiscard]] std::wstring WorkspaceBanner() const;
 
 private:
   RepoInfo info_;
   std::wstring statusNote_{L"未执行任何操作。"};
   GitToolState gitTool_;
   RepoState repo_;
-  git::WorkspaceModel workspace_;
+  git::WorkspaceSnapshot workspace_;
 };
 
 }  // namespace gc::app

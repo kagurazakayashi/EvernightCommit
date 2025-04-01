@@ -123,6 +123,47 @@ std::wstring GetControlText(HWND target) {
   return value;
 }
 
+void ClearListItems(HWND list) {
+  if (list != nullptr) {
+    ::SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
+  }
+}
+
+int GetListItemCount(HWND list) {
+  if (list == nullptr) {
+    return 0;
+  }
+  return static_cast<int>(::SendMessageW(list, LVM_GETITEMCOUNT, 0, 0));
+}
+
+void AddListRow(HWND list, const std::vector<std::wstring>& cells) {
+  if (list == nullptr || cells.empty()) {
+    return;
+  }
+  // ListView 要求 pszText 指向可写缓冲区（控件不会保留指针），这里逐个单元格取本地副本。
+  std::wstring primary(cells[0]);
+  LVITEMW item{};
+  item.mask = LVIF_TEXT;
+  item.iItem = GetListItemCount(list);
+  item.iSubItem = 0;
+  item.pszText = primary.data();
+  const int inserted = static_cast<int>(::SendMessageW(list, LVM_INSERTITEMW, 0,
+                                                       reinterpret_cast<LPARAM>(&item)));
+  if (inserted < 0) {
+    return;
+  }
+  for (size_t column = 1; column < cells.size(); ++column) {
+    std::wstring text(cells[column]);
+    LVITEMW cell{};
+    cell.mask = LVIF_TEXT;
+    cell.iItem = inserted;
+    cell.iSubItem = static_cast<int>(column);
+    cell.pszText = text.data();
+    ::SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(inserted),
+                   reinterpret_cast<LPARAM>(&cell));
+  }
+}
+
 void ApplyListColumnWidths(HWND list, const std::vector<ListColumn>& columns, int width) {
   if (list == nullptr || width <= 0 || columns.empty()) {
     return;

@@ -73,6 +73,8 @@ inline constexpr UINT kRepoDetectCompleted = WM_APP + 3;
 inline constexpr UINT kGitOperationTick = WM_APP + 4;
 inline constexpr UINT_PTR kGitOperationTimer = 0x4713;
 inline constexpr UINT kGitOperationTickMs = 500;
+// 工作区状态（git status）后台读取完成通知；wParam 为请求序号。
+inline constexpr UINT kWorkspaceStatusCompleted = WM_APP + 5;
 
 // “Git 程序”输入防抖：连续键入只在停顿后验证一次。
 inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;
@@ -84,5 +86,8 @@ inline constexpr UINT_PTR kRepoDetectTimer = 0x4712;
 inline constexpr UINT kRepoDetectDebounceMs = 500;
 // 识别是纯本地只读查询；放宽到 8 秒以容纳慢盘与大型仓库。
 inline constexpr unsigned long kRepoDetectTimeoutMs = 8000;
+// 工作区读取同样是本地只读查询，但 --untracked-files=all 要把未跟踪目录展开到每个文件，
+// 大型仓库首次读取明显更慢；放宽到 20 秒，超时后界面报告“Git 查询超时”而不是无限等待。
+inline constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
 
 }  // namespace gc::ui

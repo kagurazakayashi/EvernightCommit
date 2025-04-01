@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "platform/windows/repo_detect.h"
+#include "platform/windows/workspace_status.h"
 
 namespace gc::test {
 
@@ -106,6 +107,8 @@ public:
 
   // 用本夹具的隔离执行器装配仓库识别依赖，供集成测试直接驱动生产逻辑 DetectRepository。
   [[nodiscard]] platform::RepoDetectDeps MakeDetectDeps();
+  // 同上，装配工作区状态读取（git status）的执行依赖。
+  [[nodiscard]] platform::WorkspaceStatusDeps MakeStatusDeps();
 
 private:
   // 把 baseEnvironment_ 拼成 NULL 结尾的 Unicode 环境块。

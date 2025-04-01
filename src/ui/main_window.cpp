@@ -36,16 +36,28 @@ constexpr std::wstring_view kTipStatus =
 constexpr std::wstring_view kTipStageAdd = L"该操作尚未实现，按钮保持禁用。对应命令：git add <所选文件>";
 constexpr std::wstring_view kTipStageRemove =
     L"该操作尚未实现，按钮保持禁用。对应命令：git restore --staged <所选文件>";
-constexpr std::wstring_view kTipRefresh = L"该操作尚未实现，按钮保持禁用。刷新会读取 git status。";
+constexpr std::wstring_view kTipRefresh =
+    L"手动刷新尚未接入：当前在识别仓库成功后自动读取一次 git status，统一的自动刷新将在下一步接入。";
 constexpr std::wstring_view kTipCreateCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git commit";
 constexpr std::wstring_view kTipUndoCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git reset --soft HEAD^";
 constexpr std::wstring_view kTipPush = L"该操作尚未实现，按钮保持禁用。对应命令：git push";
+constexpr std::wstring_view kTipUnstagedList =
+    L"未暂存的更改来自只读的 git status（porcelain v2，机器可读格式）：\r\n"
+    L"包含已跟踪文件的修改/删除/重命名、未跟踪文件（目录已展开为单个文件），以及待解决的冲突项。\r\n"
+    L"被 Git 忽略的文件不列出，也不会被强制加入。\r\n"
+    L"同一文件可以同时出现在左右两侧：暂存一次修改后继续编辑，两侧各显示自己的状态。\r\n"
+    L"“子模块”条目只表示父仓库记录的提交指针与子模块内部状态；在父仓库暂存子模块不会提交它内部的任何文件。";
+constexpr std::wstring_view kTipStagedList =
+    L"已暂存的更改是索引相对最近一次提交的差异，同样来自只读的 git status。\r\n"
+    L"创建提交时只会写入这里的内容；未暂存那一侧的改动仍留在工作区。\r\n"
+    L"“重命名”条目会显示“旧路径 → 新路径”，内部同时保留两个原始路径。";
 constexpr std::wstring_view kTipCoauthor = L"合作者条目的增删尚未实现，按钮保持禁用。";
 constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月、日。";
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
 constexpr std::wstring_view kPendingNotice =
     L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
+    L"未暂存/已暂存列表已按只读 git status 填充；"
     L"暂存/提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
@@ -155,6 +167,8 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(repoBar_.statusButton(), kTipStatus);
   tooltips_.Add(changesPane_.stageAddButton(), kTipStageAdd);
   tooltips_.Add(changesPane_.stageRemoveButton(), kTipStageRemove);
+  tooltips_.Add(changesPane_.unstagedList(), kTipUnstagedList);
+  tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
   tooltips_.Add(commitForm_.CoauthorAdd(), kTipCoauthor);
   tooltips_.Add(commitForm_.CoauthorRemove(), kTipCoauthor);
   tooltips_.Add(commitForm_.SyncCheckbox(), kTipTimeSync);
@@ -205,6 +219,11 @@ std::wstring MainWindow::OperationBanner() const {
       return L"命令窗口操作：" + status;
     }
   }
+  // 读到子模块变化时，这条说明比固定提示更有价值：父仓库暂存的范围必须当场讲清楚。
+  const std::wstring submoduleNote = state_.WorkspaceBanner();
+  if (!submoduleNote.empty()) {
+    return submoduleNote;
+  }
   if (app::AppState::kGitOperationsImplemented) {
     return state_.StatusNote();
   }
@@ -233,19 +252,9 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
 void MainWindow::RefreshTexts(HWND window) {
   infoBar_.Refresh(L"仓库类型：" + state_.RepoTypeDisplay(), L"当前分支：" + state_.BranchDisplay(),
                    L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + TaskStatusNote(), programInfo_);
-  changesPane_.ShowWorkspace(state_.Workspace(), WorkspaceStateTexts());
+  changesPane_.ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
   actionBar_.SetStatus(OperationBanner());
   DoLayout(window);
-}
-
-gc::git::EmptyStateTexts MainWindow::WorkspaceStateTexts() const {
-  // 仓库识别成功后，列表仍是空的，但要说明“已识别、只是工作区读取未实现”，
-  // 不能让用户误以为识别失败或仓库为空。
-  if (state_.Repo().status == app::RepoLoadStatus::loaded &&
-      git::KindHasWorkspace(state_.Repo().detection.kind)) {
-    return git::LoadedButNotImplementedTexts();
-  }
-  return git::NotLoadedTexts();
 }
 
 void MainWindow::ApplyFonts(HWND window) {
@@ -521,6 +530,9 @@ void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalize
   app::RepoState repo;
   repo.status = app::RepoLoadStatus::detecting;
   state_.SetRepo(std::move(repo));
+  // 换仓库的第一步就是把旧列表清空：识别还没回来时宁可看到“正在读取”，
+  // 也不能让上一个仓库的未暂存/已暂存条目留在屏上被当成当前状态。
+  ClearWorkspace();
   state_.SetStatusNote(L"正在后台识别仓库（只读查询，不会改动仓库）：" + normalizedPath);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -547,6 +559,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   repo.detection.root = normalizedPath;
   repo.detection.message = message;
   state_.SetRepo(std::move(repo));
+  ClearWorkspace();
   // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
   state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
                                               : message);
@@ -567,6 +580,50 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
   state_.SetRepo(std::move(repo));
   state_.SetStatusNote(state_.Repo().detection.message);
   UpdateCommandAvailability();
+  // 识别成功后立刻接着读工作区；识别失败或形态没有工作区（裸仓库、.git 内部）时清空列表，
+  // 不能留着上一个仓库的条目。
+  if (state_.RepoUsable()) {
+    RequestWorkspaceLoad(window);
+  } else {
+    ClearWorkspace();
+  }
+  RefreshTexts(window);
+}
+
+void MainWindow::ClearWorkspace() {
+  // 未发起读取或读取前提消失：状态回到 unloaded，模型为空，列表显示“尚未选择可用仓库”。
+  state_.SetWorkspace(git::WorkspaceSnapshot{});
+}
+
+void MainWindow::RequestWorkspaceLoad(HWND window) {
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    ClearWorkspace();
+    return;
+  }
+  platform::WorkspaceStatusRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kWorkspaceStatusTimeoutMs;
+
+  git::WorkspaceSnapshot loading;
+  loading.status = git::WorkspaceLoadStatus::loading;
+  state_.SetWorkspace(std::move(loading));
+  state_.SetStatusNote(L"正在后台读取工作区状态（git status，只读，不改动仓库）…");
+  RefreshTexts(window);
+
+  workspaceWorker_.Request(window, kWorkspaceStatusCompleted, std::move(request),
+                           [](const platform::WorkspaceStatusRequest& pending) {
+                             return platform::RunWorkspaceStatusLoad(pending);
+                           });
+}
+
+void MainWindow::OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial) {
+  git::WorkspaceSnapshot snapshot;
+  if (!workspaceWorker_.FetchLatest(completionSerial, &snapshot)) {
+    return;  // 旧结果：期间用户已切换仓库或重新识别，丢弃，绝不覆盖当前列表。
+  }
+  state_.SetWorkspace(std::move(snapshot));
+  state_.SetStatusNote(state_.Workspace().message);
   RefreshTexts(window);
 }
 
@@ -771,6 +828,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kRepoDetectCompleted:
       OnRepoDetectCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kWorkspaceStatusCompleted:
+      OnWorkspaceLoadCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -788,6 +848,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       // 先停掉后台线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
       gitWorker_.Shutdown();
       repoWorker_.Shutdown();
+      workspaceWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

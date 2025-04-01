@@ -44,10 +44,14 @@ int FailureCount() { return Failures(); }
 
 Registrar::Registrar(const char* name, CaseBody body) { Cases().push_back(RegisteredCase{name, body}); }
 
-int RunAll() {
+int RunAll(std::string_view nameFilter) {
   int failedCases = 0;
   int prerequisiteFailures = 0;
   for (const RegisteredCase& item : Cases()) {
+    // 可选的姓名片段过滤：诊断某个用例（尤其是弹真实 Git/命令窗口的集成用例）时不必全量重跑。
+    if (!nameFilter.empty() && item.name.find(nameFilter) == std::string::npos) {
+      continue;
+    }
     CurrentCaseFailures() = 0;
     std::fprintf(stdout, "[ 运行 ] %s\n", item.name.c_str());
     std::string abortReason;
@@ -87,4 +91,10 @@ int RunAll() {
 
 }  // namespace gc::test
 
-int main() { return gc::test::RunAll(); }
+int main(int argc, char** argv) {
+  // 行缓冲：重定向到文件时也能即时看到进度，不会把最后几行憋在块缓冲区里。
+  // MSVC 调试版 CRT 要求显式给出缓冲区大小（0 会触发断言对话框）。
+  std::setvbuf(stdout, nullptr, _IOLBF, 512);
+  const std::string_view filter = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+  return gc::test::RunAll(filter);
+}

@@ -116,14 +116,24 @@ void ChangesPane::Layout(const ChangesColumns& columns, const UiMetrics& metrics
 }
 
 void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::EmptyStateTexts& texts) {
-  const auto apply = [](HWND list, HWND hint, bool empty, const wchar_t* text) {
-    ::SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
+  // 行内容与模型下标一一对应：状态列与路径列都只是显示文本，
+  // 后续步骤按行号回到模型取原始路径与状态，绝不从单元格文字反解 Git 命令参数。
+  const auto apply = [](HWND list, HWND hint, const std::vector<git::ChangeItem>& items,
+                        const std::wstring& text) {
+    ClearListItems(list);
+    for (const git::ChangeItem& item : items) {
+      AddListRow(list, {item.StatusLabel(), item.PathLabel()});
+    }
     SetControlText(hint, text);
-    ::ShowWindow(hint, empty ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(hint, items.empty() ? SW_SHOW : SW_HIDE);
   };
-  apply(unstagedList_, unstagedHint_, model.unstaged.empty(), texts.unstaged);
-  apply(stagedList_, stagedHint_, model.staged.empty(), texts.staged);
-  apply(historyList_, historyHint_, model.recentCommits.empty(), texts.history);
+  apply(unstagedList_, unstagedHint_, model.unstaged, texts.unstaged);
+  apply(stagedList_, stagedHint_, model.staged, texts.staged);
+
+  // 提交历史仍属后续步骤：git log 未接入，这里只保留说明，不清成“没有提交”。
+  ClearListItems(historyList_);
+  SetControlText(historyHint_, texts.history);
+  ::ShowWindow(historyHint_, model.recentCommits.empty() ? SW_SHOW : SW_HIDE);
 }
 
 }  // namespace gc::ui
