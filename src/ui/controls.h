@@ -32,6 +32,13 @@ HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly);
 void SetControlText(HWND target, std::wstring_view text);
 [[nodiscard]] std::wstring GetControlText(HWND target);
 
+// 报表视图的行读写：行内容一律由调用方给出「单元格文本」，界面不从单元格文本反解操作参数。
+void ClearListItems(HWND list);
+// 追加一行（cells[0] 为主项文本，其余为子项文本）。行号等于插入顺序，
+// 因此「列表第 N 行」可以直接对应数据模型的第 N 个条目。
+void AddListRow(HWND list, const std::vector<std::wstring>& cells);
+[[nodiscard]] int GetListItemCount(HWND list);
+
 // 列表列宽按百分比在每次布局时重算，保证缩放时不出现横向截断。
 void ApplyListColumnWidths(HWND list, const std::vector<ListColumn>& columns, int width);
 

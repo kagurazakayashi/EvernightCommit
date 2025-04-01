@@ -29,7 +29,8 @@ struct Registrar {
   Registrar(const char* name, CaseBody body);
 };
 
-int RunAll();
+// 运行全部用例；nameFilter 非空时只运行用例名包含该片段的用例。
+int RunAll(std::string_view nameFilter = {});
 
 }  // namespace gc::test
 

@@ -52,4 +52,20 @@ std::wstring AppState::RepoTypeDisplay() const {
   return L"未设置";
 }
 
+git::EmptyStateTexts AppState::WorkspaceHintTexts() const {
+  // 讀取失敗時把已歸類的簡短原因作為第二行，界面才不會把「讀不到」顯示成「空倉庫」。
+  const std::wstring_view failure = workspace_.status == git::WorkspaceLoadStatus::failed
+                                        ? std::wstring_view(git::RepoErrorLabel(workspace_.error))
+                                        : std::wstring_view{};
+  return git::WorkspaceEmptyTexts(workspace_.status, failure, repo_.detection.headResolved);
+}
+
+std::wstring AppState::WorkspaceBanner() const {
+  if (workspace_.status != git::WorkspaceLoadStatus::loaded) {
+    return {};
+  }
+  // 只有真的读到子模块变化才占用底部说明；否则保留“哪些按钮尚未接入”的固定提示。
+  return git::SubmoduleExplanationText(workspace_.model);
+}
+
 }  // namespace gc::app

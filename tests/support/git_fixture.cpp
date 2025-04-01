@@ -530,4 +530,22 @@ platform::RepoDetectDeps GitFixture::MakeDetectDeps() {
   return deps;
 }
 
+platform::WorkspaceStatusDeps GitFixture::MakeStatusDeps() {
+  platform::WorkspaceStatusDeps deps;
+  deps.runner = [this](const std::wstring& exePath, const std::wstring& directory,
+                       const std::vector<std::wstring>& arguments) -> git::GitQueryResult {
+    // 走夹具的隔离执行器：工作目录仍受临时根守卫，环境块也不含用户配置。
+    GitRun run = RunWith(exePath.empty() ? gitExe_ : exePath, arguments, ResolveOwnedDirectory(directory));
+    git::GitQueryResult result;
+    result.started = run.started;
+    result.timedOut = run.timedOut;
+    result.exited = run.exited;
+    result.exitCode = static_cast<int>(run.exitCode);
+    result.utf16Output = std::move(run.out);
+    result.utf16Error = std::move(run.err);
+    return result;
+  };
+  return deps;
+}
+
 }  // namespace gc::test

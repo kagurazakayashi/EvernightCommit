@@ -59,7 +59,8 @@ add_library(gc_core STATIC
   src/git/git_locator.cpp
   src/git/git_probe.cpp
   src/git/repository.cpp
-  src/git/workspace_model.cpp)
+  src/git/workspace_model.cpp
+  src/git/workspace_status.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
 
@@ -75,7 +76,8 @@ add_library(gc_platform STATIC
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp
   src/platform/windows/utf_text.cpp
-  src/platform/windows/win_path.cpp)
+  src/platform/windows/win_path.cpp
+  src/platform/windows/workspace_status.cpp)
 target_include_directories(gc_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # 平台层在 Win32 能力之上复用 git/ 的纯逻辑（PATH 搜索、版本输出判定）。
 target_link_libraries(gc_platform PUBLIC gc_build_settings gc_core comctl32 ole32 shell32 uuid)

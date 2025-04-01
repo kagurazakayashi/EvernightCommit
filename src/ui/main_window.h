@@ -11,6 +11,7 @@
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
+#include "platform/windows/workspace_status.h"
 #include "ui/action_bar.h"
 #include "ui/changes_pane.h"
 #include "ui/commit_form.h"
@@ -46,8 +47,6 @@ private:
   void OnCreate(HWND window);
   void DoLayout(HWND window);
   void RefreshTexts(HWND window);
-  // 三块列表的空状态文案随识别结果变化（未加载 / 已识别但工作区读取未实现）。
-  [[nodiscard]] gc::git::EmptyStateTexts WorkspaceStateTexts() const;
   void UpdateCommandAvailability();
   void RegisterTooltips();
   void ApplyFonts(HWND window);
@@ -75,6 +74,11 @@ private:
   void OnRepoDetectCompleted(HWND window, uint64_t completionSerial);
   void ResumeRepoDetectionWhenGitReady(HWND window);
 
+  // 工作区状态解析（步骤 6）：识别成功后在后台读取 git status，填充两个更改列表。
+  void RequestWorkspaceLoad(HWND window);
+  void ClearWorkspace();
+  void OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial);
+
   // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
   void InitializeCommandWatching(HWND window);
   void LaunchStatusOperation(HWND window);
@@ -89,6 +93,7 @@ private:
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
+  platform::WorkspaceStatusWorker workspaceWorker_;
   platform::CommandWindowRunner commandRunner_;
   std::vector<uint64_t> activeOperations_;
   app::AppState state_;
