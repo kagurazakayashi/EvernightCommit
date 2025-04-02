@@ -136,19 +136,36 @@ int GetListItemCount(HWND list) {
   return static_cast<int>(::SendMessageW(list, LVM_GETITEMCOUNT, 0, 0));
 }
 
-void AddListRow(HWND list, const std::vector<std::wstring>& cells) {
-  if (list == nullptr || cells.empty()) {
+void SetListRowCells(HWND list, int row, const std::vector<std::wstring>& cells) {
+  if (list == nullptr || row < 0 || row >= GetListItemCount(list) || cells.empty()) {
     return;
   }
   // ListView 要求 pszText 指向可写缓冲区（控件不会保留指针），这里逐个单元格取本地副本。
+  for (size_t column = 0; column < cells.size(); ++column) {
+    std::wstring text(cells[column]);
+    LVITEMW cell{};
+    cell.mask = LVIF_TEXT;
+    cell.iItem = row;
+    cell.iSubItem = static_cast<int>(column);
+    cell.pszText = text.data();
+    ::SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row), reinterpret_cast<LPARAM>(&cell));
+  }
+}
+
+void InsertListRow(HWND list, int row, const std::vector<std::wstring>& cells) {
+  if (list == nullptr || cells.empty()) {
+    return;
+  }
+  const int count = GetListItemCount(list);
+  const int at = std::clamp(row, 0, count);  // 越界的插入点夹紧到尾部，控件不会因为算式失准而报错
   std::wstring primary(cells[0]);
   LVITEMW item{};
   item.mask = LVIF_TEXT;
-  item.iItem = GetListItemCount(list);
+  item.iItem = at;
   item.iSubItem = 0;
   item.pszText = primary.data();
-  const int inserted = static_cast<int>(::SendMessageW(list, LVM_INSERTITEMW, 0,
-                                                       reinterpret_cast<LPARAM>(&item)));
+  const int inserted =
+      static_cast<int>(::SendMessageW(list, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
   if (inserted < 0) {
     return;
   }
@@ -159,8 +176,69 @@ void AddListRow(HWND list, const std::vector<std::wstring>& cells) {
     cell.iItem = inserted;
     cell.iSubItem = static_cast<int>(column);
     cell.pszText = text.data();
-    ::SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(inserted),
-                   reinterpret_cast<LPARAM>(&cell));
+    ::SendMessageW(list, LVM_SETITEMTEXTW, static_cast<WPARAM>(inserted), reinterpret_cast<LPARAM>(&cell));
+  }
+}
+
+void RemoveListRow(HWND list, int row) {
+  if (list == nullptr || row < 0 || row >= GetListItemCount(list)) {
+    return;
+  }
+  ::SendMessageW(list, LVM_DELETEITEM, static_cast<WPARAM>(row), 0);
+}
+
+std::vector<int> GetListSelectedRows(HWND list) {
+  std::vector<int> rows;
+  if (list == nullptr) {
+    return rows;
+  }
+  // 多选：从 -1 起逐个取下一个带 LVNI_SELECTED 的行，控件自己维护顺序。
+  int row = static_cast<int>(::SendMessageW(list, LVM_GETNEXTITEM, static_cast<WPARAM>(-1),
+                                            MAKELPARAM(LVNI_SELECTED, 0)));
+  while (row >= 0) {
+    rows.push_back(row);
+    row = static_cast<int>(::SendMessageW(list, LVM_GETNEXTITEM, static_cast<WPARAM>(row),
+                                          MAKELPARAM(LVNI_SELECTED, 0)));
+  }
+  return rows;
+}
+
+void RestoreListSelection(HWND list, const std::vector<int>& rows) {
+  if (list == nullptr || GetListItemCount(list) == 0) {
+    return;
+  }
+  // iItem = -1 且 stateMask 含 LVIS_SELECTED：清空所有行的选中状态（控件支持这种批量写法）。
+  // 真正决定“改哪几位状态”的是 stateMask，只填 mask 不会改动任何状态位。
+  LVITEMW clear{};
+  clear.stateMask = LVIS_SELECTED;
+  clear.state = 0;
+  ::SendMessageW(list, LVM_SETITEMSTATE, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(&clear));
+  const int count = GetListItemCount(list);
+  for (const int row : rows) {
+    if (row < 0 || row >= count) {
+      continue;  // 刷新后条目数变少：这一行已不存在，记忆的其他行照常恢复。
+    }
+    // 只改 LVIS_SELECTED：不碰 LVIS_STATEIMAGEMASK（那是复选框用的位），也不设焦点，
+    // 设焦点会把控件视口拉到该行，覆盖随后要恢复的滚动位置。
+    LVITEMW item{};
+    item.iItem = row;
+    item.stateMask = LVIS_SELECTED;
+    item.state = LVIS_SELECTED;
+    ::SendMessageW(list, LVM_SETITEMSTATE, static_cast<WPARAM>(row), reinterpret_cast<LPARAM>(&item));
+  }
+}
+
+ListRedrawPause::ListRedrawPause(HWND list) : list_(list) {
+  if (list_ != nullptr) {
+    // 返回 TRUE 表示原本开启，析构时才能只在这里恢复，不把别人关掉的重绘打开。
+    paused_ = ::SendMessageW(list_, WM_SETREDRAW, FALSE, 0) == TRUE;
+  }
+}
+
+ListRedrawPause::~ListRedrawPause() {
+  if (paused_) {
+    ::SendMessageW(list_, WM_SETREDRAW, TRUE, 0);
+    ::InvalidateRect(list_, nullptr, TRUE);
   }
 }
 

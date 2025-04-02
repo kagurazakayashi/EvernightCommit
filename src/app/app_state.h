@@ -46,8 +46,9 @@ struct RepoState {
 // 界面与后续服务层之间的状态持有者：界面只读写这里，不直接访问 Git。
 class AppState {
 public:
-  // 依赖 Git 的功能（status/暂存/提交/历史/fetch/pull/push）是否已接通；后续步骤逐项打开。
-  // 打开前按钮保持禁用；打开后还要 GitUsable() 且 RepoUsable() 才允许触发。
+  // 依赖 Git 的“写操作”（暂存/提交/撤回/fetch/pull/push）是否已接通；后续步骤逐项打开。
+  // 打开前按钮保持禁用；打开后还要 GitUsable() 且 RepoUsable() 并无其他操作在跑才允许触发。
+  // 只读路径（仓库识别、工作区读取、手动刷新）不受本开关约束，已各自接入。
   static constexpr bool kGitOperationsImplemented = false;
 
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }

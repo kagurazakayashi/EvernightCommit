@@ -115,20 +115,80 @@ void ChangesPane::Layout(const ChangesColumns& columns, const UiMetrics& metrics
   Place(stageRemove_, Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
 }
 
+app::ListViewMemory ChangesPane::CaptureMemory(HWND list, const std::vector<git::ChangeItem>& shown) {
+  app::ListViewMemory memory;
+  for (const int row : GetListSelectedRows(list)) {
+    if (row >= 0 && static_cast<size_t>(row) < shown.size()) {
+      memory.selectedKeys.push_back(app::ViewKeyForItem(shown[static_cast<size_t>(row)]));
+    }
+  }
+  return memory;
+}
+
+void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::ChangeItem>& shown,
+                              const app::ListViewMemory& memory, const std::vector<git::ChangeItem>& items,
+                              const std::wstring& hintText) {
+  // 按差异就地更新，不整列清空：报表视图不响应 LVM_SCROLL，一旦清空重建，
+  // 用户正在看的滚动位置就再也放不回去，只剩顶部一个选择。
+  // 行与条目的对应关系由下面这份 keys 维护，全程不从单元格文本反查。
+  const ListRedrawPause pause(list);  // 中间态不绘制，更新完一次性重绘，避免闪一下。
+  std::vector<std::wstring> keys;
+  keys.reserve(shown.size());
+  for (const git::ChangeItem& item : shown) {
+    keys.push_back(app::ViewKeyForItem(item));
+  }
+  std::vector<std::wstring> wanted;
+  wanted.reserve(items.size());
+  for (const git::ChangeItem& item : items) {
+    wanted.push_back(app::ViewKeyForItem(item));
+  }
+
+  // 先认头部与尾部的公共段：绝大多数刷新只是中间有一两条进出，两端根本不用动。
+  size_t head = 0;
+  while (head < keys.size() && head < wanted.size() && keys[head] == wanted[head]) {
+    ++head;
+  }
+  size_t oldTail = keys.size();
+  size_t newTail = wanted.size();
+  while (oldTail > head && newTail > head && keys[oldTail - 1] == wanted[newTail - 1]) {
+    --oldTail;
+    --newTail;
+  }
+  // 中段：旧的多余行自后往前删掉（删除不会让前面已算好的行号失准）。
+  for (int row = static_cast<int>(oldTail) - 1; row >= static_cast<int>(head); --row) {
+    RemoveListRow(list, row);
+  }
+  keys.erase(keys.begin() + static_cast<ptrdiff_t>(head), keys.begin() + static_cast<ptrdiff_t>(oldTail));
+  // 中段：新的条目按顺序插在各自的位置上。
+  for (size_t index = head; index < newTail; ++index) {
+    const git::ChangeItem& item = items[index];
+    InsertListRow(list, static_cast<int>(index), {item.StatusLabel(), item.PathLabel()});
+    keys.insert(keys.begin() + static_cast<ptrdiff_t>(index), wanted[index]);
+  }
+  // 结构对齐以后，逐行刷新显示文本：同一路径的状态可能已经变了（修改→删除、状态字改变）。
+  for (size_t index = 0; index < items.size(); ++index) {
+    const git::ChangeItem& item = items[index];
+    SetListRowCells(list, static_cast<int>(index), {item.StatusLabel(), item.PathLabel()});
+  }
+  // 选中项按条目身份恢复：行可能已经上移、下移或整条消失，消失的那条不会凭空选到别人。
+  RestoreListSelection(list, app::MapListViewMemory(items, memory).selectedRows);
+
+  // 空状态说明只在确实没有条目时占用列表区域；有条目时隐藏，避免叠在行上。
+  SetControlText(hint, hintText);
+  ::ShowWindow(hint, items.empty() ? SW_SHOW : SW_HIDE);
+}
+
 void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::EmptyStateTexts& texts) {
   // 行内容与模型下标一一对应：状态列与路径列都只是显示文本，
   // 后续步骤按行号回到模型取原始路径与状态，绝不从单元格文字反解 Git 命令参数。
-  const auto apply = [](HWND list, HWND hint, const std::vector<git::ChangeItem>& items,
-                        const std::wstring& text) {
-    ClearListItems(list);
-    for (const git::ChangeItem& item : items) {
-      AddListRow(list, {item.StatusLabel(), item.PathLabel()});
-    }
-    SetControlText(hint, text);
-    ::ShowWindow(hint, items.empty() ? SW_SHOW : SW_HIDE);
-  };
-  apply(unstagedList_, unstagedHint_, model.unstaged, texts.unstaged);
-  apply(stagedList_, stagedHint_, model.staged, texts.staged);
+  // 记忆必须在改动行之前取：行号一旦移动，原来的选择就对不上条目了。
+  const app::ListViewMemory unstagedMemory = CaptureMemory(unstagedList_, shown_.unstaged);
+  const app::ListViewMemory stagedMemory = CaptureMemory(stagedList_, shown_.staged);
+
+  RebuildList(unstagedList_, unstagedHint_, shown_.unstaged, unstagedMemory, model.unstaged, texts.unstaged);
+  RebuildList(stagedList_, stagedHint_, shown_.staged, stagedMemory, model.staged, texts.staged);
+  shown_.unstaged = model.unstaged;
+  shown_.staged = model.staged;
 
   // 提交历史仍属后续步骤：git log 未接入，这里只保留说明，不清成“没有提交”。
   ClearListItems(historyList_);

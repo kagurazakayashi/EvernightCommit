@@ -74,8 +74,13 @@ WorkspaceStatusDeps MakeWorkspaceStatusDeps(unsigned long timeoutMilliseconds) {
   return deps;
 }
 
-git::WorkspaceSnapshot RunWorkspaceStatusLoad(const WorkspaceStatusRequest& request) {
-  return LoadWorkspaceStatus(request, MakeWorkspaceStatusDeps(request.timeoutMilliseconds));
+WorkspaceLoadOutcome RunWorkspaceStatusLoad(const WorkspaceStatusRequest& request) {
+  // 身份回顯必須原樣帶回：判定「這份結果還算不算數」的是界面執行緒，而它只看得到這裡帶回的值。
+  WorkspaceLoadOutcome outcome;
+  outcome.readSerial = request.readSerial;
+  outcome.bindingGeneration = request.bindingGeneration;
+  outcome.snapshot = LoadWorkspaceStatus(request, MakeWorkspaceStatusDeps(request.timeoutMilliseconds));
+  return outcome;
 }
 
 }  // namespace gc::platform

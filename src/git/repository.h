@@ -54,6 +54,7 @@ enum class RepoError {
   notRepository,
   dubiousOwnership,   // Git 的 safe.directory 安全检查拦截
   accessDenied,       // 权限不足
+  indexLocked,        // 索引等锁文件已存在：另一个 Git 进程正在改动该仓库
   gitTimeout,
   gitLaunchFailed,
   gitFailed,  // 其他非 0 退出
