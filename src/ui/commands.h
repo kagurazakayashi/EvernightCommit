@@ -76,6 +76,11 @@ inline constexpr UINT kGitOperationTickMs = 500;
 // 工作区状态（git status）后台读取完成通知；wParam 为请求序号。
 inline constexpr UINT kWorkspaceStatusCompleted = WM_APP + 5;
 
+// 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
+// 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
+inline constexpr UINT_PTR kRefreshTimer = 0x4714;
+inline constexpr UINT kRefreshDebounceMs = 300;
+
 // “Git 程序”输入防抖：连续键入只在停顿后验证一次。
 inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;
 inline constexpr UINT kGitVerifyDebounceMs = 500;

@@ -37,7 +37,8 @@ constexpr std::wstring_view kTipStageAdd = L"该操作尚未实现，按钮保�
 constexpr std::wstring_view kTipStageRemove =
     L"该操作尚未实现，按钮保持禁用。对应命令：git restore --staged <所选文件>";
 constexpr std::wstring_view kTipRefresh =
-    L"手动刷新尚未接入：当前在识别仓库成功后自动读取一次 git status，统一的自动刷新将在下一步接入。";
+    L"重新读取当前仓库的摘要与两个更改列表：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
+    L"在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。";
 constexpr std::wstring_view kTipCreateCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git commit";
 constexpr std::wstring_view kTipUndoCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git reset --soft HEAD^";
 constexpr std::wstring_view kTipPush = L"该操作尚未实现，按钮保持禁用。对应命令：git push";
@@ -57,7 +58,8 @@ constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
 constexpr std::wstring_view kPendingNotice =
     L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
-    L"未暂存/已暂存列表已按只读 git status 填充；"
+    L"未暂存/已暂存列表已按只读 git status 填充，“刷新”可随时重读且不弹命令窗口，"
+    L"命令窗口里的 Git 结束后也会自动重读一次；"
     L"暂存/提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
@@ -154,6 +156,7 @@ void MainWindow::OnCreate(HWND window) {
   UpdateCommandAvailability();
   InitializeRepoInput(window);
   RefreshTexts(window);
+  ApplyWorkspaceLists();  // 首屏的空状态说明：列表不在 RefreshTexts 里重建，这里显式填一次。
   InitializeGitDetection(window);
   InitializeCommandWatching(window);
 }
@@ -185,39 +188,52 @@ void MainWindow::RegisterTooltips() {
 void MainWindow::UpdateCommandAvailability() {
   // 依赖 Git 的控件要同时满足：功能已接通（后续步骤）、Git 程序验证可用、仓库已识别为可用工作区；
   // 任一条件失效（改正路径、切换仓库、识别失败、裸仓库）都会立即重新禁用。
+  // 写操作还要再加一条：同一工作区同时只允许一个由本程序发起的操作，否则会互相抢仓库锁。
   const BOOL gitReady =
-      (app::AppState::kGitOperationsImplemented && state_.GitUsable() && state_.RepoUsable()) ? TRUE : FALSE;
+      (app::AppState::kGitOperationsImplemented && state_.GitUsable() && state_.RepoUsable() &&
+       !tasks_.OperationInFlight())
+          ? TRUE
+          : FALSE;
   for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(),
                       changesPane_.stageAddButton(), changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
-                      commitForm_.CoauthorRemove(), actionBar_.refreshButton(), actionBar_.createCommitButton(),
+                      commitForm_.CoauthorRemove(), actionBar_.createCommitButton(),
                       actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
+  // 刷新是内部只读重读，不占用命令窗口、也不写仓库，因此在有操作在跑时依然可用：
+  // 外部终端改了仓库、或某个操作的输出看不清时，用户总要能恢复真实状态。
+  // 上一次识别失败也保持可用：仓库在外部被修好（或改回原样）后，点刷新就能恢复，
+  // 不必先把路径清空再重选。
+  const BOOL refreshReady = (state_.GitUsable() && !state_.Info().repoPath.empty()) ? TRUE : FALSE;
+  ::EnableWindow(actionBar_.refreshButton(), refreshReady);
   // status 是首个接入命令窗口执行器的操作：除上述条件外，同一时刻只允许一个操作在跑，
   // 避免并发提交让“哪个窗口对应哪次操作”变得含糊。
   const BOOL statusReady =
-      (state_.GitUsable() && state_.RepoUsable() && commandRunner_.ActiveCount() == 0) ? TRUE : FALSE;
+      (state_.GitUsable() && state_.RepoUsable() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
   ::EnableWindow(repoBar_.statusButton(), statusReady);
 }
 
 std::wstring MainWindow::TaskStatusNote() const {
   // 进行中/已完成的操作说明优先于常规任务状态：用户必须能看到“命令窗口里正在跑什么”。
-  for (uint64_t operationId : activeOperations_) {
+  if (activeOperation_.serial != 0) {
     std::wstring status;
-    if (commandRunner_.DescribeOperation(operationId, &status, nullptr)) {
+    if (commandRunner_.DescribeOperation(activeOperation_.runnerId, &status, nullptr)) {
       return L"命令窗口操作：" + status;
     }
+    // 执行器已经不认识这个 ID：完成通知丢了或被别处回收。这里只说明状态无法确认，
+    // 真正的结案（释放槽位 + 安排刷新）由 TickActiveOperations 负责。
+    return L"命令窗口操作：" + activeOperation_.displayName + L" 的结果已无法确认，将重新读取仓库状态…";
+  }
+  if (tasks_.ReadInFlight()) {
+    return tasks_.ReadStartedText();
   }
   return state_.StatusNote();
 }
 
 std::wstring MainWindow::OperationBanner() const {
-  // 底部状态条：有操作在进行时用实时状态取代“功能未接入”的固定说明。
-  for (uint64_t operationId : activeOperations_) {
-    std::wstring status;
-    if (commandRunner_.DescribeOperation(operationId, &status, nullptr)) {
-      return L"命令窗口操作：" + status;
-    }
+  // 底部状态条：有任务在进行时用实时状态取代“功能未接入”的固定说明。
+  if (activeOperation_.serial != 0 || tasks_.ReadInFlight()) {
+    return TaskStatusNote();
   }
   // 读到子模块变化时，这条说明比固定提示更有价值：父仓库暂存的范围必须当场讲清楚。
   const std::wstring submoduleNote = state_.WorkspaceBanner();
@@ -252,9 +268,14 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
 void MainWindow::RefreshTexts(HWND window) {
   infoBar_.Refresh(L"仓库类型：" + state_.RepoTypeDisplay(), L"当前分支：" + state_.BranchDisplay(),
                    L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + TaskStatusNote(), programInfo_);
-  changesPane_.ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
+  // 两个列表不在这里重建：本函数每 500 毫秒的状态轮询也会被调用，
+  // 逐次清空再填入会让列表反复闪、选中项被冲掉。内容真正变化时由 ApplyWorkspaceLists 落地。
   actionBar_.SetStatus(OperationBanner());
   DoLayout(window);
+}
+
+void MainWindow::ApplyWorkspaceLists() {
+  changesPane_.ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
 }
 
 void MainWindow::ApplyFonts(HWND window) {
@@ -322,6 +343,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStatusButton:
       if (notifyCode == BN_CLICKED) {
         LaunchStatusOperation(window);
+      }
+      break;
+    case kIdRefreshButton:
+      if (notifyCode == BN_CLICKED) {
+        ScheduleRefresh(window);
       }
       break;
     default:
@@ -488,6 +514,8 @@ void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
   if (!gitWorker_.FetchLatest(completionSerial, &verification)) {
     return;  // 较慢完成的旧结果：已被更新的选择取代，丢弃。
   }
+  // 换 Git 程序同样是一次身份变化：旧 Git 读回来的摘要与列表都要作废。
+  const std::wstring previousGitPath = state_.Git().path;
   app::GitToolState tool;
   tool.path = verification.path;
   tool.version = verification.version;
@@ -497,8 +525,17 @@ void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
   state_.SetGitTool(std::move(tool));
   state_.SetStatusNote(verification.message);
   UpdateCommandAvailability();
-  // Git 一开始不可用、随后才验证通过的场合：自动补一次仓库识别，用户无需重选路径。
-  ResumeRepoDetectionWhenGitReady(window);
+  const bool switchedGit = verification.outcome == git::GitProbeOutcome::verified &&
+                           !previousGitPath.empty() && previousGitPath != verification.path &&
+                           !state_.Info().repoPath.empty();
+  if (switchedGit) {
+    // 用另一个 Git 程序重新识别同一个仓库路径：识别成功后会接着重读工作区，
+    // 在途的旧结果由身份版本判为过期。
+    RequestRepoDetection(window, state_.Info().repoPath, RepoDetectMode::initial);
+  } else {
+    // Git 一开始不可用、随后才验证通过的场合：自动补一次仓库识别，用户无需重选路径。
+    ResumeRepoDetectionWhenGitReady(window);
+  }
   RefreshTexts(window);
 }
 
@@ -519,21 +556,30 @@ void MainWindow::CommitRepoInput(HWND window) {
   if (state_.Repo().status == app::RepoLoadStatus::detecting) {
     return;  // 上一次识别还在进行：它会以最新一次提交为准，无需重复排队。
   }
-  RequestRepoDetection(window, normalized);
+  RequestRepoDetection(window, normalized, RepoDetectMode::initial);
 }
 
-void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalizedPath) {
+void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalizedPath, RepoDetectMode mode) {
   if (!state_.GitUsable()) {
     SetRepoFailed(window, normalizedPath, git::RepoError::gitUnavailable, {});
     return;
   }
-  app::RepoState repo;
-  repo.status = app::RepoLoadStatus::detecting;
-  state_.SetRepo(std::move(repo));
-  // 换仓库的第一步就是把旧列表清空：识别还没回来时宁可看到“正在读取”，
-  // 也不能让上一个仓库的未暂存/已暂存条目留在屏上被当成当前状态。
-  ClearWorkspace();
-  state_.SetStatusNote(L"正在后台识别仓库（只读查询，不会改动仓库）：" + normalizedPath);
+  if (mode == RepoDetectMode::initial) {
+    app::RepoState repo;
+    repo.status = app::RepoLoadStatus::detecting;
+    state_.SetRepo(std::move(repo));
+    // 换仓库的第一步就是作废旧身份并清空旧列表：识别还没回来时宁可看到“正在读取”，
+    // 也不能让上一个仓库的未暂存/已暂存条目留在屏上被当成当前状态。
+    refreshCycleActive_ = false;
+    tasks_.UnbindRepository();
+    ClearWorkspace();
+    state_.SetStatusNote(L"正在后台识别仓库（只读查询，不会改动仓库）：" + normalizedPath);
+  } else {
+    // 刷新：仓库身份没变，摘要与列表都留在原位，等新结果回来再就地替换，
+    // 免得每点一次刷新就整屏空一下、选中项也没了。
+    refreshCycleActive_ = true;
+    state_.SetStatusNote(tasks_.ReadStartedText());
+  }
   UpdateCommandAvailability();
   RefreshTexts(window);
 
@@ -559,6 +605,9 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   repo.detection.root = normalizedPath;
   repo.detection.message = message;
   state_.SetRepo(std::move(repo));
+  // 没有可用的工作区身份，就没有任何安全的查询落点：在途结果一律作废，列表清空。
+  tasks_.UnbindRepository();
+  refreshCycleActive_ = false;
   ClearWorkspace();
   // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
   state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
@@ -572,45 +621,95 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
   if (!repoWorker_.FetchLatest(completionSerial, &detection)) {
     return;  // 较慢完成的旧结果：已被更新的仓库选择取代，丢弃。
   }
+  const bool wasRefresh = refreshCycleActive_;
   app::RepoState repo;
   const bool answeredByGit =
       detection.error == git::RepoError::none || detection.kind == git::RepoKind::notRepository;
   repo.status = answeredByGit ? app::RepoLoadStatus::loaded : app::RepoLoadStatus::failed;
   repo.detection = std::move(detection);
   state_.SetRepo(std::move(repo));
-  state_.SetStatusNote(state_.Repo().detection.message);
-  UpdateCommandAvailability();
-  // 识别成功后立刻接着读工作区；识别失败或形态没有工作区（裸仓库、.git 内部）时清空列表，
-  // 不能留着上一个仓库的条目。
-  if (state_.RepoUsable()) {
-    RequestWorkspaceLoad(window);
-  } else {
+
+  if (!state_.RepoUsable()) {
+    // 识别失败，或形态根本没有工作区（裸仓库、.git 内部、非仓库）：
+    // 旧身份必须作废，否则之前发出的读取结果会被当成当前状态留在屏上。
+    state_.SetStatusNote(state_.Repo().detection.message);
+    tasks_.UnbindRepository();
+    refreshCycleActive_ = false;
     ClearWorkspace();
+    UpdateCommandAvailability();
+    RefreshTexts(window);
+    return;
   }
+
+  // 刷新链路：识别成功后接着读工作区；识别本身失败时不会走到这里。
+  const bool identityChanged = tasks_.BindRepository(state_.Git().path, state_.Repo().detection.root);
+  if (identityChanged) {
+    // 工作区根与上次不同（选了另一个仓库，或同一 Git 程序解析出不同的根）：
+    // 上一个仓库的条目一律作废，等新的读取结果重新填。
+    state_.SetStatusNote(state_.Repo().detection.message);
+    ClearWorkspace();
+  } else if (!wasRefresh) {
+    state_.SetStatusNote(state_.Repo().detection.message);
+  }
+  UpdateCommandAvailability();
+  StartWorkspaceRead(window);
   RefreshTexts(window);
 }
 
 void MainWindow::ClearWorkspace() {
   // 未发起读取或读取前提消失：状态回到 unloaded，模型为空，列表显示“尚未选择可用仓库”。
   state_.SetWorkspace(git::WorkspaceSnapshot{});
+  ApplyWorkspaceLists();
 }
 
-void MainWindow::RequestWorkspaceLoad(HWND window) {
-  if (!state_.GitUsable() || !state_.RepoUsable()) {
-    ClearWorkspace();
+void MainWindow::ScheduleRefresh(HWND window) {
+  if (!state_.GitUsable() || state_.Info().repoPath.empty()) {
+    return;  // 连要刷新哪个仓库都不知道（此时“刷新”按钮也已禁用）。
+  }
+  // 短时间内的多次触发——连点“刷新”、几个操作接连结束——共用同一个定时器，到点只跑一轮。
+  ::KillTimer(window, kRefreshTimer);
+  ::SetTimer(window, kRefreshTimer, kRefreshDebounceMs, nullptr);
+  state_.SetStatusNote(tasks_.ReadStartedText());
+  RefreshTexts(window);
+}
+
+void MainWindow::RunRefreshCycle(HWND window) {
+  if (!state_.GitUsable() || state_.Info().repoPath.empty()) {
+    refreshCycleActive_ = false;
+    return;
+  }
+  // 一次刷新同时覆盖顶部摘要与两个列表：在外部终端里切分支、提交、拉取之后，
+  // 分支与上游也一样会变，只重读 git status 会留下半新半旧的界面。
+  // 上一次识别失败时，这一趟同时也是“外部把仓库修好了”之后的恢复入口。
+  RequestRepoDetection(window, state_.Info().repoPath,
+                       state_.RepoUsable() ? RepoDetectMode::refresh : RepoDetectMode::initial);
+}
+
+void MainWindow::StartWorkspaceRead(HWND window) {
+  if (tasks_.RequestRefresh() != app::RefreshSchedule::start) {
+    return;  // merged：已有读取在途，读完会补这一次；ignored：身份不再可用。
+  }
+  const app::ReadTicket ticket = tasks_.BeginRead();
+  if (ticket.serial == 0) {
+    refreshCycleActive_ = false;
     return;
   }
   platform::WorkspaceStatusRequest request;
   request.exePath = state_.Git().path;
   request.repositoryDirectory = state_.Repo().detection.root;
   request.timeoutMilliseconds = kWorkspaceStatusTimeoutMs;
+  // 凭据随请求交给工作线程，完成通知原样带回：界面只看它来决定这份结果还算不算数。
+  request.readSerial = ticket.serial;
+  request.bindingGeneration = ticket.generation;
 
-  git::WorkspaceSnapshot loading;
-  loading.status = git::WorkspaceLoadStatus::loading;
-  state_.SetWorkspace(std::move(loading));
-  state_.SetStatusNote(L"正在后台读取工作区状态（git status，只读，不改动仓库）…");
-  RefreshTexts(window);
-
+  if (!refreshCycleActive_) {
+    // 换仓库或首次识别：先把列表置成“正在读取”，旧仓库的行不留。
+    git::WorkspaceSnapshot loading;
+    loading.status = git::WorkspaceLoadStatus::loading;
+    state_.SetWorkspace(std::move(loading));
+    ApplyWorkspaceLists();
+  }
+  state_.SetStatusNote(tasks_.ReadStartedText());
   workspaceWorker_.Request(window, kWorkspaceStatusCompleted, std::move(request),
                            [](const platform::WorkspaceStatusRequest& pending) {
                              return platform::RunWorkspaceStatusLoad(pending);
@@ -618,13 +717,26 @@ void MainWindow::RequestWorkspaceLoad(HWND window) {
 }
 
 void MainWindow::OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial) {
-  git::WorkspaceSnapshot snapshot;
-  if (!workspaceWorker_.FetchLatest(completionSerial, &snapshot)) {
-    return;  // 旧结果：期间用户已切换仓库或重新识别，丢弃，绝不覆盖当前列表。
+  platform::WorkspaceLoadOutcome outcome;
+  if (!workspaceWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 后台控制器层：期间已提交更晚的读取，这份结果不再有意义。
   }
-  state_.SetWorkspace(std::move(snapshot));
-  state_.SetStatusNote(state_.Workspace().message);
+  refreshCycleActive_ = false;
+  if (tasks_.CompleteRead(outcome.readSerial) != app::ReadDisposition::accepted) {
+    // 期间切换了仓库或换了 Git 程序：属于旧身份的快照绝不落地，
+    // 当前列表保持原样，等属于新身份的那一次读取来填。
+    return;
+  }
+  state_.SetWorkspace(std::move(outcome.snapshot));
+  state_.SetStatusNote(tasks_.ReadFinishedText(state_.Workspace().message));
+  // 成功摘要与非 0 失败原因都原样带上：失败时列表回到“读取失败 + 原因”，
+  // 而不是保留一份看不准的旧内容；用户改正情况后再点刷新即可恢复。
+  ApplyWorkspaceLists();
+  UpdateCommandAvailability();
   RefreshTexts(window);
+  if (tasks_.RefreshStillQueued()) {
+    ScheduleRefresh(window);  // 在途期间又请求过刷新：合并成这一趟补读。
+  }
 }
 
 void MainWindow::ResumeRepoDetectionWhenGitReady(HWND window) {
@@ -643,7 +755,7 @@ void MainWindow::ResumeRepoDetectionWhenGitReady(HWND window) {
   if (!waitingForGit) {
     return;  // 只补因为“Git 不可用”而没能识别的场合，其他失败原因不该被反复重试。
   }
-  RequestRepoDetection(window, path);
+  RequestRepoDetection(window, path, RepoDetectMode::initial);
 }
 
 void MainWindow::InitializeCommandWatching(HWND window) {
@@ -655,7 +767,8 @@ void MainWindow::LaunchStatusOperation(HWND window) {
   if (!state_.GitUsable() || !state_.RepoUsable()) {
     return;
   }
-  if (commandRunner_.ActiveCount() > 0) {
+  unsigned long long serial = 0;
+  if (!tasks_.BeginOperation(L"status", &serial)) {
     return;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
   }
   const std::wstring gitExe = state_.Git().path;
@@ -675,61 +788,64 @@ void MainWindow::LaunchStatusOperation(HWND window) {
   uint64_t operationId = 0;
   platform::CommandWindowResult failure;
   if (!commandRunner_.Start(operation, &operationId, &failure)) {
-    std::wstring note = L"status 启动失败：" + failure.failureReason;
-    if (failure.completion != git::CommandCompletion::launchFailed) {
-      note += L"（状态：" + std::wstring(git::CommandCompletionLabel(failure.completion)) + L"）";
-    }
-    state_.SetStatusNote(note);
+    // 连 Git 都没启动起来：立刻释放槽位，别让一次没跑起来的启动把界面永久锁住。
+    const app::OperationOutcome outcome =
+        tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
+    state_.SetStatusNote(outcome.note);
     UpdateCommandAvailability();
     RefreshTexts(window);
     return;
   }
-  activeOperations_.push_back(operationId);
+  activeOperation_ = ActiveOperation{serial, operationId, operation.displayName};
   state_.SetStatusNote(L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…");
   UpdateCommandAvailability();
   RefreshTexts(window);
 }
 
 void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
-  const auto position = std::find(activeOperations_.begin(), activeOperations_.end(), operationId);
-  if (position == activeOperations_.end()) {
-    return;  // 不认识的操作 ID：本窗口不拥有它（例如通知在销毁后到达），直接忽略。
+  if (activeOperation_.serial == 0 || activeOperation_.runnerId != operationId) {
+    return;  // 不是本窗口当前拥有的操作（保留的旧窗口、或已按通知丢失结案的迟到通知）。
   }
   platform::CommandWindowResult result;
   if (!commandRunner_.TakeResult(operationId, &result)) {
     return;  // 理论上不会发生：结果在通知之前登记；这里不删除 ID，等下一次通知或退出确认。
   }
-  activeOperations_.erase(position);
-
-  std::wstring note = L"status " + std::wstring(git::CommandCompletionLabel(result.completion));
-  if (result.completion == git::CommandCompletion::finished ||
-      result.completion == git::CommandCompletion::gitNotStarted) {
-    note += L"，Git 退出码 " + std::to_wstring(result.exitCode);
-    if (result.exitCode == 0) {
-      note += L"（成功）。命令窗口仍保持打开，可继续查看输出。";
-    } else {
-      note += L"（非 0，请在命令窗口查看 Git 原始输出）。";
-    }
-  } else {
-    note += L"：" + result.failureReason;
+  const unsigned long long serial = activeOperation_.serial;
+  activeOperation_ = ActiveOperation{};
+  const app::OperationOutcome outcome =
+      tasks_.FinishOperation(serial, result.completion, result.exitCode, result.failureReason);
+  if (!outcome.recognised) {
+    return;
   }
-  state_.SetStatusNote(note);
+  // 结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
+  tasks_.RememberOperationConclusion(outcome.note);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
   commandRunner_.ClearAllResults();
   UpdateCommandAvailability();
+  // 无论成功还是失败都要重读一次：失败的操作同样可能已经改动仓库
+  // （提交到一半、push 被拒、合并留下冲突），只有退出码决定要不要报成功。
+  ScheduleRefresh(window);
   RefreshTexts(window);
 }
 
 void MainWindow::TickActiveOperations(HWND window) {
-  // 轮询只负责把“执行中”刷成最新可见文本，并清理执行器里已不存在的操作 ID
+  // 轮询只负责把“执行中”刷成最新可见文本，并兜住完成通知丢失的场合
   // （真正的完成判定来自观察线程的通知，不靠这里的文案匹配）。
-  const size_t before = activeOperations_.size();
-  std::erase_if(activeOperations_, [this](uint64_t operationId) {
-    std::wstring status;
-    return !commandRunner_.DescribeOperation(operationId, &status, nullptr);
-  });
-  if (activeOperations_.size() != before) {
-    UpdateCommandAvailability();
+  if (activeOperation_.serial != 0 &&
+      !commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
+    const unsigned long long serial = activeOperation_.serial;
+    const std::wstring name = activeOperation_.displayName;
+    activeOperation_ = ActiveOperation{};
+    // 执行器已经不记得这个操作：按“结果未知”结案并释放槽位，
+    // 否则一个再也等不到通知的操作会把后续写操作永久锁住。
+    const app::OperationOutcome outcome =
+        tasks_.ForgetOperation(serial, L"本程序没有收到「" + name + L"」的完成通知");
+    if (outcome.recognised) {
+      tasks_.RememberOperationConclusion(outcome.note);
+      state_.SetStatusNote(outcome.note);
+      UpdateCommandAvailability();
+      ScheduleRefresh(window);  // 结果未知时更要重读：仓库究竟被改到什么程度只有 Git 自己知道。
+    }
   }
   RefreshTexts(window);
 }
@@ -737,8 +853,9 @@ void MainWindow::TickActiveOperations(HWND window) {
 void MainWindow::StopOperationWatching() {
   if (window_.get() != nullptr) {
     ::KillTimer(window_.get(), kGitOperationTimer);
+    ::KillTimer(window_.get(), kRefreshTimer);
   }
-  activeOperations_.clear();
+  activeOperation_ = ActiveOperation{};
   commandRunner_.Shutdown();
 }
 
@@ -820,6 +937,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         CommitRepoInput(window);
       } else if (wParam == kGitOperationTimer) {
         TickActiveOperations(window);
+      } else if (wParam == kRefreshTimer) {
+        ::KillTimer(window, kRefreshTimer);
+        RunRefreshCycle(window);
       }
       return 0;
     case kGitProbeCompleted:

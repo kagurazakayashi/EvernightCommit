@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "app/app_state.h"
+#include "app/task_coordinator.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
@@ -68,15 +69,26 @@ private:
   // 仓库路径选择与识别（步骤 3）。
   void InitializeRepoInput(HWND window);
   void CommitRepoInput(HWND window);
-  void RequestRepoDetection(HWND window, const std::wstring& normalizedPath);
+  // 识别有两种来路：换仓库/换 Git 程序（initial，先清空列表）与刷新（refresh，
+  // 保留现有列表与摘要，等新结果回来再就地替换，避免整屏闪一下）。
+  enum class RepoDetectMode {
+    initial,
+    refresh,
+  };
+  void RequestRepoDetection(HWND window, const std::wstring& normalizedPath, RepoDetectMode mode);
   void SetRepoFailed(HWND window, const std::wstring& normalizedPath, gc::git::RepoError error,
                      std::wstring_view detail);
   void OnRepoDetectCompleted(HWND window, uint64_t completionSerial);
   void ResumeRepoDetectionWhenGitReady(HWND window);
 
-  // 工作区状态解析（步骤 6）：识别成功后在后台读取 git status，填充两个更改列表。
-  void RequestWorkspaceLoad(HWND window);
+  // 工作区状态解析（步骤 6）与刷新调度（步骤 7）：
+  // 一次刷新 = 重新读取仓库摘要 + 重新读取两个文件列表，全部走内部只读后台查询，不弹命令窗口。
+  // 以后接入“最近提交”时，只需在同一次刷新里再排一项读取，不需要新增一套触发机制。
+  void ScheduleRefresh(HWND window);
+  void RunRefreshCycle(HWND window);
+  void StartWorkspaceRead(HWND window);
   void ClearWorkspace();
+  void ApplyWorkspaceLists();
   void OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial);
 
   // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
@@ -90,16 +102,26 @@ private:
   // 关闭前确认：仍有操作在命令窗口里执行时，不静默离开。
   bool ConfirmCloseWithActiveOperations(HWND window);
 
+  // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
+  // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
+  struct ActiveOperation {
+    unsigned long long serial = 0;  // 协调器序号；0 表示没有在途操作
+    unsigned long long runnerId = 0;
+    std::wstring displayName;
+  };
+
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::CommandWindowRunner commandRunner_;
-  std::vector<uint64_t> activeOperations_;
+  app::TaskCoordinator tasks_;
+  ActiveOperation activeOperation_;
   app::AppState state_;
   UiMetrics metrics_;
   std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别
+  bool refreshCycleActive_ = false;      // 本次识别/读取属于刷新，不重置列表
 
   BandSpec bandSpec_{};
   ChangesSpec changesSpec_{};

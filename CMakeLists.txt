@@ -55,6 +55,8 @@ endif()
 # ---------- 应用状态与 Git 数据模型（不依赖窗口系统） ----------
 add_library(gc_core STATIC
   src/app/app_state.cpp
+  src/app/list_view_memory.cpp
+  src/app/task_coordinator.cpp
   src/git/command_window.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp

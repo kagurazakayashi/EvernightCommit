@@ -217,6 +217,14 @@ RepoError ClassifyGitFailure(const GitQueryResult& result, std::wstring& detail)
              L"本程序不会改动你的 Git 配置";
     return RepoError::dubiousOwnership;
   }
+  if (ContainsFolded(haystack, L"index.lock") &&
+      (ContainsFolded(haystack, L"file exists") || ContainsFolded(haystack, L"already exists"))) {
+    // 锁文件是 Git 自己的并发保护：另一个 Git 进程（可能是用户在外部终端里跑的，
+    // 也可能是本程序的命令窗口操作）正持有它。这里只转述并等它结束，绝不删除锁文件——
+    // 擅自删除正在被使用的 index.lock 会破坏别人尚未写完的索引。
+    detail = L"仓库的锁文件（.git/index.lock）已存在，说明另一个 Git 进程正在改动这个仓库";
+    return RepoError::indexLocked;
+  }
   if (ContainsFolded(haystack, L"permission denied") || ContainsFolded(haystack, L"access is denied") ||
       ContainsFolded(haystack, L"unable to access")) {
     detail = L"Git 无法读取该目录";
@@ -346,6 +354,8 @@ std::wstring_view RepoErrorLabel(RepoError error) noexcept {
       return L"被 Git 安全检查拦截";
     case RepoError::accessDenied:
       return L"权限不足";
+    case RepoError::indexLocked:
+      return L"仓库正被其他 Git 操作占用";
     case RepoError::gitTimeout:
       return L"Git 查询超时";
     case RepoError::gitLaunchFailed:
@@ -378,6 +388,9 @@ std::wstring BuildRepoErrorDetail(RepoError error, std::wstring_view detail) {
       break;
     case RepoError::accessDenied:
       text += L"。请检查目录权限或占用情况后重试。";
+      break;
+    case RepoError::indexLocked:
+      text += L"。请等待那个 Git 进程结束后再点“刷新”；本程序不会替你删除 Git 的锁文件。";
       break;
     case RepoError::badOutput:
       text += L"。请确认 Git 版本较新（建议 2.30 以上）后重试。";
