@@ -55,9 +55,19 @@ struct OperationOutcome {
   git::CommandCompletion completion = git::CommandCompletion::launchFailed;
   long exitCode = 0;
   bool recognised = false;   // 是否就是本槽當前在途的那次操作
-  bool succeeded = false;    // 只有拿到 Git 退出碼且為 0 才算成功
+  bool succeeded = false;    // 按退出碼策略判定（見 OperationExitPolicy）
   bool refreshRequested = false;  // 成敗都要重讀工作區
   std::wstring note;         // 面向狀態欄的結論說明
+};
+
+// 退出碼策略：寫操作與「查看」類操作的成败語義不同，不能共用一句文案。
+//   requireZeroExit —— 只有 0 算成功（status/commit/push 等會改動倉庫的操作）；
+//   readOnlyView   —— 0 與 1 都是正常完成：`git diff --no-index` 用退出碼 1 表示
+//     「存在差異」，`git diff` 則有差異也返回 0。把 1 解釋成失敗會讓使用者以為
+//     自己點的「查看差異」出錯了，而實際上窗口里正躺著要看的內容。
+enum class OperationExitPolicy {
+  requireZeroExit = 0,
+  readOnlyView,
 };
 
 class TaskCoordinator {
@@ -91,7 +101,9 @@ public:
   // ---- 外部命令窗口操作（同一時刻只允許一個）----
 
   // 佔用操作槽；返回 false 表示已有操作在跑，調用方不得啟動第二個。
-  [[nodiscard]] bool BeginOperation(std::wstring_view displayName, unsigned long long* outSerial);
+  // 退出碼策略與操作一起登記：只有「拿到終態」時的文案需要它，介面不必再自己解釋一遍。
+  [[nodiscard]] bool BeginOperation(std::wstring_view displayName, unsigned long long* outSerial,
+                                   OperationExitPolicy policy = OperationExitPolicy::requireZeroExit);
   [[nodiscard]] bool OperationInFlight() const noexcept { return operationInFlight_; }
   // 拿到執行器的最終判定後結案：釋放槽位（保留的命令窗口不會把界面鎖住），
   // 並总是安排一次刷新。
@@ -120,6 +132,7 @@ private:
   bool queuedRefresh_ = false;
   bool operationInFlight_ = false;
   std::wstring operationName_;
+  OperationExitPolicy operationExitPolicy_ = OperationExitPolicy::requireZeroExit;
   std::wstring followUpConclusion_;  // 尚未隨刷新一起展示的操作結論
 };
 

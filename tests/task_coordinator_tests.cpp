@@ -11,6 +11,7 @@
 
 namespace {
 
+using gc::app::OperationExitPolicy;
 using gc::app::OperationOutcome;
 using gc::app::ReadDisposition;
 using gc::app::RefreshSchedule;
@@ -181,6 +182,64 @@ GC_TEST(operation_outcomes_follow_git_exit_code) {
     GC_CHECK(!outcome.note.empty());
     GC_CHECK(!tasks.OperationInFlight());
   }
+}
+
+// 「查看差异/内容」类操作：Git 的退出码语义与写操作不同，成败判定必须按发起时登记的策略走。
+// 实测依据：`git diff` 有差异时也返回 0；`git diff --no-index` 用 1 表示“有差异”，
+// 而它读不到路径时同样返回 1 —— 所以 0/1 都算正常完成，别的码才是问题。
+GC_TEST(read_only_view_operation_accepts_differences_exit_code) {
+  struct Expectation {
+    long exitCode;
+    bool succeeded;
+    std::wstring_view forbidden;  // 文案里不该出现的说法
+  };
+  const std::vector<Expectation> cases{
+      {0, true, L"失败"},
+      {1, true, L"失败"},
+      {2, false, L"正常完成"},
+      {129, false, L"（成功）"},
+  };
+  for (const Expectation& item : cases) {
+    TaskCoordinator tasks;
+    LoadOnce(tasks, kGitA, kRepoA);
+    unsigned long long serial = 0;
+    GC_REQUIRE_MESSAGE(tasks.BeginOperation(L"已暂存差异 both.txt", &serial,
+                                            OperationExitPolicy::readOnlyView),
+                       "查看类操作应能占用槽位");
+    const OperationOutcome outcome = tasks.FinishOperation(
+        serial, gc::git::CommandCompletion::finished, item.exitCode, std::wstring_view{});
+    GC_CHECK(outcome.recognised);
+    GC_CHECK_MESSAGE(outcome.succeeded == item.succeeded,
+                     "view exit code " + std::to_string(item.exitCode) + " judged wrongly");
+    // 查看类操作的文案不能说“失败”（0/1 都是正常完成），也不能擅自说“正常完成”
+    // —— 那句语义解释由发起方按 diff 形态补上，协调器只在不正常时开口。
+    GC_CHECK_MESSAGE(outcome.note.find(item.forbidden) == std::wstring::npos,
+                     "view note wording unexpected for exit code " + std::to_string(item.exitCode));
+    // 查看是只读的，但界面仍然要重读一次：万一档案在窗口打开期间被外部改动。
+    GC_CHECK(outcome.refreshRequested);
+    GC_CHECK(!tasks.OperationInFlight());
+  }
+}
+
+GC_TEST(view_operation_still_refuses_a_second_concurrent_operation) {
+  TaskCoordinator tasks;
+  LoadOnce(tasks, kGitA, kRepoA);
+  unsigned long long first = 0;
+  GC_CHECK(tasks.BeginOperation(L"工作区差异 a.txt", &first, OperationExitPolicy::readOnlyView));
+  unsigned long long second = 0;
+  // 双击第二条不能并发开出第二个窗口：单槽规则对查看类操作同样成立。
+  GC_CHECK(!tasks.BeginOperation(L"工作区差异 b.txt", &second, OperationExitPolicy::readOnlyView));
+  // 默认策略仍是“只有 0 算成功”：status/commit/push 的行为不受新枚举影响。
+  unsigned long long status = 0;
+  GC_CHECK(!tasks.BeginOperation(L"status", &status));
+  const OperationOutcome done =
+      tasks.FinishOperation(first, gc::git::CommandCompletion::finished, 1, std::wstring_view{});
+  GC_CHECK(done.succeeded);
+  unsigned long long afterClose = 0;
+  GC_CHECK(tasks.BeginOperation(L"status", &afterClose));
+  const OperationOutcome statusOutcome =
+      tasks.FinishOperation(afterClose, gc::git::CommandCompletion::finished, 1, std::wstring_view{});
+  GC_CHECK_MESSAGE(!statusOutcome.succeeded, "写操作的退出码 1 仍然算失败");
 }
 
 GC_TEST(operation_conclusion_untouched_by_other_operation_ids) {

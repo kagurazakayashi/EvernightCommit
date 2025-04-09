@@ -96,13 +96,15 @@ ReadDisposition TaskCoordinator::CompleteRead(unsigned long long serial) {
   return ReadDisposition::accepted;
 }
 
-bool TaskCoordinator::BeginOperation(std::wstring_view displayName, unsigned long long* outSerial) {
+bool TaskCoordinator::BeginOperation(std::wstring_view displayName, unsigned long long* outSerial,
+                                    OperationExitPolicy policy) {
   if (operationInFlight_) {
     return false;
   }
   ++operationSerial_;
   operationInFlight_ = true;
   operationName_ = std::wstring(displayName);
+  operationExitPolicy_ = policy;
   if (outSerial != nullptr) {
     *outSerial = operationSerial_;
   }
@@ -121,8 +123,10 @@ OperationOutcome TaskCoordinator::FinishOperation(unsigned long long serial, git
   operationInFlight_ = false;
   outcome.recognised = true;
   outcome.displayName = operationName_;
-  // 成功只認 Git 自己的退出碼：cmd 窗口起得再好、窗口一直開著都不算。
-  outcome.succeeded = completion == git::CommandCompletion::finished && exitCode == 0;
+  const bool viewOperation = operationExitPolicy_ == OperationExitPolicy::readOnlyView;
+  // 成功與否只認 Git 自己的退出碼：cmd 窗口起得再好、窗口一直開著都不算。
+  outcome.succeeded = completion == git::CommandCompletion::finished &&
+                      (exitCode == 0 || (viewOperation && exitCode == 1));
   // 失敗的操作同樣可能已經改動倉庫（提交到一半、push 被拒、合併留下衝突），
   // 因此成敗都要重讀一次工作區。
   outcome.refreshRequested = true;
@@ -132,6 +136,13 @@ OperationOutcome TaskCoordinator::FinishOperation(unsigned long long serial, git
     note += L"，Git 退出码 " + Number(static_cast<unsigned long long>(exitCode));
     if (completion == git::CommandCompletion::gitNotStarted) {
       note += L"（Git 进程未被创建，命令窗口里的输出可核对原因）";
+    } else if (viewOperation) {
+      // 查看类操作的 0/1 含义由发起方（git::DescribeDiffViewExitCode）解释：
+      // `git diff` 与 `git diff --no-index` 对「有没有差异」用的退出码并不一样，
+      // 协调器只知道“这两种都算正常完成”，不该替它下结论。
+      if (!outcome.succeeded) {
+        note += L"（既不是 0 也不是 1，Git 报了错误，详细输出在命令窗口里查看）";
+      }
     } else {
       note += outcome.succeeded ? L"（成功）" : L"（非 0，失败。详细输出在命令窗口里查看）";
     }

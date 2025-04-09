@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,15 @@ namespace gc::ui {
 
 inline constexpr const wchar_t* kMainWindowWindowClass = L"EvernightCommit.MainWindow";
 inline constexpr const wchar_t* kWindowTitle = L"Git 提交工具";
+
+// 一次命令窗口操作的发起参数。查看类操作（viewKind 有值）与写操作在“退出码算什么”上
+// 语义不同，所以这里带的不是文案，而是判定所需的类别。
+struct CommandLaunchOptions {
+  app::OperationExitPolicy policy = app::OperationExitPolicy::requireZeroExit;
+  std::wstring startedNote;   // 启动成功后立刻写进“任务状态”的说明
+  std::wstring scopeNotice;   // 随状态一起显示的范围说明（子模块指针/二进制/摘要上限）
+  std::optional<git::DiffViewKind> viewKind;
+};
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
 class MainWindow {
@@ -93,7 +103,17 @@ private:
 
   // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
   void InitializeCommandWatching(HWND window);
+  // 提交一次命令窗口操作：状态登记、槽位占用与失败结案都在这里，
+  // status 按钮与“双击查看差异”共用同一条路径，两种入口的行为完全一致。
+  [[nodiscard]] bool LaunchCommandWindowOperation(HWND window,
+                                                 const git::CommandWindowOperation& operation,
+                                                 const CommandLaunchOptions& options);
   void LaunchStatusOperation(HWND window);
+
+  // 双击“未暂存的更改/已暂存的更改”的某一行：按所在侧与条目类别构造差异/内容查看命令，
+  // 仍走上面的命令窗口执行器（不打开外部编辑器，也不在本进程里静默跑 Git）。
+  void OnChangesListDoubleClicked(HWND window, HWND list, int row);
+
   void OnCommandWindowCompleted(HWND window, uint64_t operationId);
   void TickActiveOperations(HWND window);
   void StopOperationWatching();
@@ -108,6 +128,11 @@ private:
     unsigned long long serial = 0;  // 协调器序号；0 表示没有在途操作
     unsigned long long runnerId = 0;
     std::wstring displayName;
+    // 这次查看的范围说明（子模块只给指针差异、二进制不输出内容、大文件只给摘要）。
+    // 命令窗口打开期间一直跟着状态一起显示，否则用户只剩一句“执行中”可看。
+    std::wstring scopeNotice;
+    // 查看类操作的退出码含义由 git::DescribeDiffViewExitCode 解释（协调器只判定成败）。
+    std::optional<git::DiffViewKind> viewKind;
   };
 
   platform::UniqueWindow window_;

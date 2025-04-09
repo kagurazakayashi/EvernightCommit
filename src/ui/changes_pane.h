@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "app/list_view_memory.h"
+#include "git/diff_view.h"
 #include "git/workspace_model.h"
 #include "ui/controls.h"
 #include "ui/layout.h"
@@ -28,6 +29,15 @@ public:
   // 两个更改列表本身：主窗口只取句柄挂说明性工具提示，不直接操作条目内容。
   [[nodiscard]] HWND unstagedList() const noexcept { return unstagedList_; }
   [[nodiscard]] HWND stagedList() const noexcept { return stagedList_; }
+
+  // 按列表句柄与行号取回"当前显示的那一条"条目，并给出它属于哪一侧。
+  // 行号与条目的对应关系只在本面板最后一次 ShowWorkspace 落地的内容上成立，
+  // 因此"双击某行去查看差异"这类按行发起的操作必须经这里取条目，
+  // 绝不从单元格的显示文本反解路径（重命名行是"旧 → 新"，反解必然出错）。
+  // 句柄不是两块更改列表之一、或行号越界时返回 nullptr。
+  [[nodiscard]] const git::ChangeItem* ItemAt(HWND list, int row, git::ChangeSide* side) const;
+  // 该列表当前的行数：用于核对"显示的行数"与"模型条数"是否还一致。
+  [[nodiscard]] int ListRowCount(HWND list) const;
 
 private:
   [[nodiscard]] static RECT InnerRect(const RECT& group, const UiMetrics& metrics) noexcept;

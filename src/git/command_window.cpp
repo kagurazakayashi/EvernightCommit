@@ -130,6 +130,31 @@ std::wstring TrimTrailingSpaces(std::wstring_view text) {
   return std::wstring(text.substr(0, end));
 }
 
+// 把行里每个 `%` 写成 2^n 个百分号，使 cmd 展开 n 轮之后正好还原成字面 `%`。
+// cmd 的百分号展开与引号无关（实測："x%FOO%y" 在引号内同样被展开成变量值；
+// 单个 `%.` 也会被当成 `%`+首字符的位置参数引用而整段消失），因此路径里的 `%` 必须转义，
+// 否则双击一个名为 `100%.txt` 的档案时送達 Git 的是被改写过的名字。
+// 转义份数按「这行还要经历几轮展开」决定：
+//   * echo 行只经历批处理读取这一轮  -> 每个 `%` 写成 `%%`；
+//   * `call` 行会额外经历 CALL 自己的第二轮展开 -> 每个 `%` 写成 `%%%%`。
+// 两者都只增加 `%` 本身，不引入引号或 `& | < > ^`，因此不影响引号区域校验。
+[[nodiscard]] std::string ExpandPercentSigns(std::string_view text, size_t rounds) {
+  std::string result;
+  result.reserve(text.size());
+  size_t repeats = 1;
+  for (size_t index = 0; index < rounds; ++index) {
+    repeats *= 2;
+  }
+  for (const char c : text) {
+    if (c == '%') {
+      result.append(repeats, '%');
+      continue;
+    }
+    result.push_back(c);
+  }
+  return result;
+}
+
 std::vector<std::wstring> SplitAsciiWords(std::string_view line) {
   std::vector<std::wstring> words;
   size_t start = 0;
@@ -314,6 +339,10 @@ bool AssembleCommandWindowScript(std::wstring_view operationId, std::string_view
     gitLine.push_back(' ');
     gitLine.append(argumentsAnsi);
   }
+  // 回显行与执行行都要转义 `%`，但份数不同（见 ExpandPercentSigns）：
+  // 转义后的回显行显示出来正好是真实命令本身，用户在窗口里看到的与被执行的是一致的。
+  const std::string echoLine = ExpandPercentSigns(gitLine, 1);
+  const std::string callLine = ExpandPercentSigns(gitLine, 2);
 
   std::string script;
   script.reserve(gitLine.size() + directory.size() + 512);
@@ -324,10 +353,12 @@ bool AssembleCommandWindowScript(std::wstring_view operationId, std::string_view
   // 实测会让 cmd 报“找不到路径”且不建文件；数字紧邻 > 又会被当成句柄重定向。
   script += ">\"" + directory + "\\" + kStartMarkerFileName + "\" echo start\r\n";
   // 回显即将执行的真实命令，让用户在窗口里看到程序做了什么；下一行才是真正执行。
-  script += "echo " + gitLine + "\r\n";
+  script += "echo " + echoLine + "\r\n";
   // Git 进程调用。程序路径与参数都已通过引号区域校验，
   // 因此这一行的引号区域与 cmd 的解析一致，不存在元字符二次解释的空间。
-  script += "call " + gitLine + "\r\n";
+  // `call` 会对自己的参数多做一轮百分号展开，所以这一行的 `%` 已按两轮份数转义，
+  // 送達 Git 的是原样路径；也因为转义到位，这一行不会再发生任何变量展开。
+  script += "call " + callLine + "\r\n";
   // %ERRORLEVEL% 在同一物理行会在解析期展开，拿不到刚执行完的 Git 退出码，
   // 所以这一行必须与 call 分成两条物理命令（cmd 逐行解析）。
   // 重定向必须写在行首：`echo %ERRORLEVEL%>"file"` 展开成 `echo 0>"file"` 后，
