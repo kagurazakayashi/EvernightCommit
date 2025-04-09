@@ -210,6 +210,43 @@ GC_TEST(command_window_reports_real_failure_exit_code) {
   GC_CHECK(result.commandLine.find(L"--definitely-not-an-option") != std::wstring::npos);
 }
 
+GC_TEST(command_window_delivers_percent_in_names_to_git) {
+  // 引号挡不住 cmd 的百分号展开（实测：`"x%FOO%y.txt"` 在引号内照样被换成变量值，
+  // 单个 `%.` 会被当成位置参数引用而整段消失），所以脚本里必须按展开轮数转义。
+  // 判据不能靠读窗口输出：--no-index 的「有差异」与「读不到」都是退出码 1。
+  // 这里比较**同一个档案两次**：转义正确 -> 没有差异 -> 退出码 0；名字被改写 -> 1。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+  fixture.WriteFile(L"100%.txt", "percent dot name\n");           // 落单的 %：与本机环境无关
+  fixture.WriteFile(L"x%COMSPEC%y.txt", "percent pair name\n");   // 成对的 %：引用一个必然存在的变量
+
+  gc::platform::CommandWindowRunner runner;
+  std::vector<uint64_t> opened;
+  RunnerGuard guard{&runner, &opened};
+  runner.Startup(nullptr);
+
+  const std::vector<std::wstring> names = {L"100%.txt", L"x%COMSPEC%y.txt"};
+  for (const std::wstring& name : names) {
+    // 两个路徑指向同一个档案：Git 报告「没有差异」的唯一前提是两个名字都原样送到。
+    uint64_t id = 0;
+    CommandWindowResult failure;
+    const bool started =
+        runner.Start(MakeOperation(fixture, {L"diff", L"--no-index", L"--", name, name}), &id, &failure);
+    GC_REQUIRE_MESSAGE(started, "命令窗口启动失败：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+    opened.push_back(id);
+
+    CommandWindowResult result;
+    ExpectResult(runner, id, &result, "含 % 的档名");
+    GC_CHECK_MESSAGE(result.completion == CommandCompletion::finished, Describe(result));
+    GC_CHECK_MESSAGE(result.exitCode == 0,
+                    "档名里的 % 没有原样送達 Git（被 cmd 改写过）：" + Describe(result));
+    // 界面展示用的命令行保留原始形态，不显示转义后的模样。
+    GC_CHECK_MESSAGE(result.commandLine.find(name) != std::wstring::npos,
+                     "展示的命令行应含原始档名：" + gc::platform::Utf16ToUtf8(result.commandLine));
+  }
+}
+
 GC_TEST(command_window_handles_chinese_and_space_paths) {
   GitFixture fixture;
   PrepareFixture(fixture);

@@ -13,6 +13,44 @@ namespace {
 using gc::git::CommandPlanReject;
 using gc::git::CommandWindowOperation;
 
+// 取脚本里以某段文字开头的那一行（去掉行尾 \r），用于逐行检查转义形态。
+std::string FirstLineStartingWith(const std::string& script, std::string_view prefix) {
+  size_t lineStart = 0;
+  while (lineStart < script.size()) {
+    const size_t lineEnd = script.find('\n', lineStart);
+    const size_t stop = lineEnd == std::string::npos ? script.size() : lineEnd;
+    std::string line(script, lineStart, stop - lineStart);
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.starts_with(prefix)) {
+      return line;
+    }
+    lineStart = stop + 1;
+  }
+  return {};
+}
+
+// 统计“落单的 %”：cmd 的百分号展开按成对 `%` 还原，长度奇数的连续 % 段意味着有引用会真的发生。
+size_t OddPercentRuns(const std::string& line) {
+  size_t odd = 0;
+  for (size_t index = 0; index < line.size();) {
+    if (line[index] != '%') {
+      ++index;
+      continue;
+    }
+    size_t run = 0;
+    while (index + run < line.size() && line[index + run] == '%') {
+      ++run;
+    }
+    if (run % 2 != 0) {
+      ++odd;
+    }
+    index += run;
+  }
+  return odd;
+}
+
 CommandWindowOperation MakeOperation(std::wstring executable, std::vector<std::wstring> arguments,
                                      std::wstring repository = L"C:\\repo") {
   CommandWindowOperation operation;
@@ -250,6 +288,51 @@ GC_TEST(command_script_rejects_corrupted_command_line_after_round_trip) {
   const bool assembled = gc::git::AssembleCommandWindowScript(
       L"GcOp7", "C:\\Temp\\GcOp7", L"Git status", "Git status", "\"C:\\git.exe\"", "\"unclosed", &plan);
   GC_CHECK(!assembled);
+}
+
+GC_TEST(command_script_escapes_percent_for_echo_and_call_lines) {
+  // 实测：引号保护不了 `%`。批处理读取时 `%FOO%` 会被环境变量取代，单个 `%.` 会被当成
+  // 位置参数引用而整段消失；`call` 还要再多经历一轮展开。因此含 `%` 的档名必须按
+  // 每行实际经历的展开轮数转义，否则送達 Git 的是被改写过的路径。
+  gc::git::CommandWindowPlan plan;
+  const bool assembled = gc::git::AssembleCommandWindowScript(
+      L"GcOp7", "C:\\Temp\\GcOp7", L"Git diff", "Git diff", "\"C:\\git.exe\"",
+      "\"diff\" \"--\" \"100%.txt\" \"x%FOO%y.txt\"", &plan);
+  GC_REQUIRE(assembled, "含 % 的参数应被接受（转义后交给 cmd）");
+
+  const std::string& script = plan.scriptAnsi;
+  // 回显行经历一轮展开：写 `%%`，显示出来正好是真实命令本身。
+  GC_CHECK_MESSAGE(script.find("echo \"C:\\git.exe\" \"diff\" \"--\" \"100%%.txt\" \"x%%FOO%%y.txt\"") !=
+                       std::string::npos,
+                   "回显行应按一轮转义：" + script);
+  // 执行行经历两轮（批处理读取 + call 自身）：写 `%%%%`，送達 Git 的才是原样路径。
+  GC_CHECK_MESSAGE(script.find("call \"C:\\git.exe\" \"diff\" \"--\" \"100%%%%.txt\" "
+                               "\"x%%%%FOO%%%%y.txt\"") != std::string::npos,
+                   "执行行应按两轮转义：" + script);
+  // 单串 `%` 一个都不该残留：未转义的 `%FOO%`/`%.` 会被 cmd 改写。
+  // 只看这两行本身（结果行里的 %ERRORLEVEL% 是有意保留的变量引用，不在检查范围）。
+  const std::string echoGitLine = FirstLineStartingWith(script, "echo \"C:\\git.exe\"");
+  const std::string callGitLine = FirstLineStartingWith(script, "call \"C:\\git.exe\"");
+  GC_REQUIRE(!echoGitLine.empty(), "回显行缺失：" + script);
+  GC_REQUIRE(!callGitLine.empty(), "执行行缺失：" + script);
+  GC_CHECK_MESSAGE(OddPercentRuns(echoGitLine) == 0, "回显行有落单的 %：" + echoGitLine);
+  GC_CHECK_MESSAGE(OddPercentRuns(callGitLine) == 0, "执行行有落单的 %：" + callGitLine);
+  // 结果行仍要用真实的 %ERRORLEVEL%：转义绝不能把它一起改掉。
+  GC_CHECK_MESSAGE(script.find("echo %ERRORLEVEL%") != std::string::npos,
+                   "%ERRORLEVEL% 必须保持可用：" + script);
+  // 标记与结果文件的重定向路径是纯 ASCII 目录，不该被动过。
+  GC_CHECK_MESSAGE(script.find(">\"C:\\Temp\\GcOp7\\start.txt\" echo start") != std::string::npos, script);
+}
+
+GC_TEST(command_script_leaves_percent_free_lines_untouched) {
+  gc::git::CommandWindowPlan plan;
+  const bool assembled = gc::git::AssembleCommandWindowScript(
+      L"GcOp8", "C:\\Temp\\GcOp8", L"Git status", "Git status", "\"C:\\git.exe\"", "\"status\"", &plan);
+  GC_REQUIRE(assembled, "常规命令应被接受");
+  GC_CHECK_MESSAGE(plan.scriptAnsi.find("call \"C:\\git.exe\" \"status\"") != std::string::npos,
+                   plan.scriptAnsi);
+  GC_CHECK_MESSAGE(plan.scriptAnsi.find("echo \"C:\\git.exe\" \"status\"") != std::string::npos,
+                   plan.scriptAnsi);
 }
 
 GC_TEST(command_result_parsing_accepts_only_complete_lines) {

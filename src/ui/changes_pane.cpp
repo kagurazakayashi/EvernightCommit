@@ -179,6 +179,7 @@ void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::Chang
 }
 
 void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::EmptyStateTexts& texts) {
+
   // 行内容与模型下标一一对应：状态列与路径列都只是显示文本，
   // 后续步骤按行号回到模型取原始路径与状态，绝不从单元格文字反解 Git 命令参数。
   // 记忆必须在改动行之前取：行号一旦移动，原来的选择就对不上条目了。
@@ -194,6 +195,34 @@ void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::Emp
   ClearListItems(historyList_);
   SetControlText(historyHint_, texts.history);
   ::ShowWindow(historyHint_, model.recentCommits.empty() ? SW_SHOW : SW_HIDE);
+}
+
+const git::ChangeItem* ChangesPane::ItemAt(HWND list, int row, git::ChangeSide* side) const {
+  const std::vector<git::ChangeItem>* items = nullptr;
+  if (list == unstagedList_) {
+    items = &shown_.unstaged;
+    if (side != nullptr) {
+      *side = git::ChangeSide::unstaged;
+    }
+  } else if (list == stagedList_) {
+    items = &shown_.staged;
+    if (side != nullptr) {
+      *side = git::ChangeSide::staged;
+    }
+  } else {
+    return nullptr;  // 提交历史或陌生句柄：本步骤没有可按行查看的内容。
+  }
+  if (row < 0 || static_cast<size_t>(row) >= items->size()) {
+    return nullptr;  // 行已不在当前显示内容里（外部改动后被刷新移除）。
+  }
+  return &(*items)[static_cast<size_t>(row)];
+}
+
+int ChangesPane::ListRowCount(HWND list) const {
+  if (list != unstagedList_ && list != stagedList_) {
+    return -1;
+  }
+  return GetListItemCount(list);
 }
 
 }  // namespace gc::ui

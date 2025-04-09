@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "git/diff_view.h"
 #include "git/workspace_model.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/locale_text.h"
@@ -47,11 +48,20 @@ constexpr std::wstring_view kTipUnstagedList =
     L"包含已跟踪文件的修改/删除/重命名、未跟踪文件（目录已展开为单个文件），以及待解决的冲突项。\r\n"
     L"被 Git 忽略的文件不列出，也不会被强制加入。\r\n"
     L"同一文件可以同时出现在左右两侧：暂存一次修改后继续编辑，两侧各显示自己的状态。\r\n"
-    L"“子模块”条目只表示父仓库记录的提交指针与子模块内部状态；在父仓库暂存子模块不会提交它内部的任何文件。";
+    L"“子模块”条目只表示父仓库记录的提交指针与子模块内部状态；在父仓库暂存子模块不会提交它内部的任何文件。\r\n"
+    L"\r\n"
+    L"双击某一行：在命令窗口里执行 git diff（工作区相对索引），只用这一条路径限定范围。\r\n"
+    L"未跟踪文件没有正常差异，改用 git diff --no-index 对照 /dev/null 直接把内容显示在窗口里；"
+    L"二进制文件由 Git 给出“Binary files differ”的说明，不会把字节当文本倒出来。";
 constexpr std::wstring_view kTipStagedList =
     L"已暂存的更改是索引相对最近一次提交的差异，同样来自只读的 git status。\r\n"
     L"创建提交时只会写入这里的内容；未暂存那一侧的改动仍留在工作区。\r\n"
-    L"“重命名”条目会显示“旧路径 → 新路径”，内部同时保留两个原始路径。";
+    L"“重命名”条目会显示“旧路径 → 新路径”，内部同时保留两个原始路径。\r\n"
+    L"\r\n"
+    L"双击某一行：在命令窗口里执行 git diff --cached（索引相对 HEAD），只用这一条路径限定范围；"
+    L"重命名条目会同时带上旧路径，否则 Git 只能把它显示成“新增文件”。\r\n"
+    L"同一个文件在左右两侧的同名条目各对应自己那一份改动，两边看到的内容不一样。"
+    L"仓库还没有任何提交时以空树为基准，暂存的新文件照样能看。";
 constexpr std::wstring_view kTipCoauthor = L"合作者条目的增删尚未实现，按钮保持禁用。";
 constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月、日。";
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
@@ -60,6 +70,8 @@ constexpr std::wstring_view kPendingNotice =
     L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
     L"未暂存/已暂存列表已按只读 git status 填充，“刷新”可随时重读且不弹命令窗口，"
     L"命令窗口里的 Git 结束后也会自动重读一次；"
+    L"双击列表某一行会在命令窗口里显示该条目的差异（未跟踪文件显示内容，二进制只给说明，超大文件给 --stat 摘要），"
+    L"查看过程不改动索引与工作区；"
     L"暂存/提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
@@ -218,7 +230,13 @@ std::wstring MainWindow::TaskStatusNote() const {
   if (activeOperation_.serial != 0) {
     std::wstring status;
     if (commandRunner_.DescribeOperation(activeOperation_.runnerId, &status, nullptr)) {
-      return L"命令窗口操作：" + status;
+      std::wstring text = L"命令窗口操作：" + status;
+      // 查看类操作的范围说明要跟着一起显示：窗口里的输出可能只有“Binary files differ”，
+      // 为什么不是全文、子模块为什么只显示指针，都靠这一句交代。
+      if (!activeOperation_.scopeNotice.empty()) {
+        text += L"｜" + activeOperation_.scopeNotice;
+      }
+      return text;
     }
     // 执行器已经不认识这个 ID：完成通知丢了或被别处回收。这里只说明状态无法确认，
     // 真正的结案（释放槽位 + 安排刷新）由 TickActiveOperations 负责。
@@ -763,13 +781,35 @@ void MainWindow::InitializeCommandWatching(HWND window) {
   ::SetTimer(window, kGitOperationTimer, kGitOperationTickMs, nullptr);
 }
 
+bool MainWindow::LaunchCommandWindowOperation(HWND window,
+                                             const git::CommandWindowOperation& operation,
+                                             const CommandLaunchOptions& options) {
+  unsigned long long serial = 0;
+  if (!tasks_.BeginOperation(operation.displayName, &serial, options.policy)) {
+    return false;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
+  }
+  uint64_t operationId = 0;
+  platform::CommandWindowResult failure;
+  if (!commandRunner_.Start(operation, &operationId, &failure)) {
+    // 连 Git 都没启动起来：立刻释放槽位，别让一次没跑起来的启动把界面永久锁住。
+    const app::OperationOutcome outcome =
+        tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
+    state_.SetStatusNote(outcome.note);
+    UpdateCommandAvailability();
+    RefreshTexts(window);
+    return false;
+  }
+  activeOperation_ = ActiveOperation{serial, operationId, operation.displayName, options.scopeNotice,
+                                     options.viewKind};
+  state_.SetStatusNote(options.startedNote);
+  UpdateCommandAvailability();
+  RefreshTexts(window);
+  return true;
+}
+
 void MainWindow::LaunchStatusOperation(HWND window) {
   if (!state_.GitUsable() || !state_.RepoUsable()) {
     return;
-  }
-  unsigned long long serial = 0;
-  if (!tasks_.BeginOperation(L"status", &serial)) {
-    return;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
   }
   const std::wstring gitExe = state_.Git().path;
   std::wstring repository = state_.Repo().detection.root;
@@ -785,21 +825,88 @@ void MainWindow::LaunchStatusOperation(HWND window) {
   // 只读地查看工作区状态；参数按数组提交，不进任何 shell 字符串。
   operation.arguments = {L"status"};
 
-  uint64_t operationId = 0;
-  platform::CommandWindowResult failure;
-  if (!commandRunner_.Start(operation, &operationId, &failure)) {
-    // 连 Git 都没启动起来：立刻释放槽位，别让一次没跑起来的启动把界面永久锁住。
-    const app::OperationOutcome outcome =
-        tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
-    state_.SetStatusNote(outcome.note);
-    UpdateCommandAvailability();
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…";
+  static_cast<void>(LaunchCommandWindowOperation(window, operation, options));
+}
+
+void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
     RefreshTexts(window);
+  };
+
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    refuse(L"Git 或仓库当前不可用，无法查看差异。请先确认路径并点“刷新”。");
     return;
   }
-  activeOperation_ = ActiveOperation{serial, operationId, operation.displayName};
-  state_.SetStatusNote(L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…");
-  UpdateCommandAvailability();
-  RefreshTexts(window);
+  if (tasks_.OperationInFlight()) {
+    // 命令窗口操作是单槽的：并发发起两次会让“哪个窗口对应哪一行”变得含糊。
+    refuse(L"已有一个命令窗口操作在进行，请等它结束后再双击查看。");
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
+    // 界面显示的条目属于“已经绑定过的那个工作区”：根目录与协调器里的身份不一致时，
+    // 哪怕只读命令也不能发出去，否则可能把上一个仓库的路径用到新仓库上。
+    refuse(L"仓库工作区已改变，请先点“刷新”再查看差异。");
+    return;
+  }
+
+  git::ChangeSide side = git::ChangeSide::unstaged;
+  const git::ChangeItem* shown = changesPane_.ItemAt(list, row, &side);
+  if (shown == nullptr) {
+    refuse(L"这一行已不在当前列表里（内容刚被刷新），请重新选择后再双击。");
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  const std::vector<git::ChangeItem>& items =
+      side == git::ChangeSide::staged ? model.staged : model.unstaged;
+  if (changesPane_.ListRowCount(list) != static_cast<int>(items.size()) ||
+      static_cast<size_t>(row) >= items.size()) {
+    refuse(L"列表行数与已读取的仓库状态对不上，为避免看错文件，本次没有执行任何命令。点“刷新”后重试。");
+    return;
+  }
+  const git::ChangeItem& item = items[static_cast<size_t>(row)];
+  if (item.path != shown->path || item.kind != shown->kind) {
+    refuse(L"这一行已经换成另一个文件，为避免看错文件，本次没有执行任何命令。请重新双击。");
+    return;
+  }
+
+  // 未跟踪文件没有“正常差异”，要先把档案本身问清楚（存在？可读？二进制？多大？）再决定显示什么。
+  // 已跟踪条目（含删除项）不需要这一步：差异由 Git 自己给出，程序不会去打开已不存在的路径。
+  git::WorktreeFileFacts facts;
+  if (item.kind == git::ChangeKind::untracked) {
+    facts = platform::ProbeWorktreeFileForPreview(
+        git::JoinWorktreeFilePath(repositoryRoot, item.path));
+  }
+  const git::DiffViewPlan plan = git::BuildDiffViewPlan(side, item, facts);
+  if (plan.kind == git::DiffViewKind::blocked) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason + L"\n\n条目：" +
+        item.PathLabel();
+    ::MessageBoxW(window, message.c_str(), L"无法查看该条目", MB_OK | MB_ICONINFORMATION);
+    refuse(L"未查看 " + item.PathLabel() + L"：" + plan.blockedReason);
+    return;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = repositoryRoot;
+  operation.arguments = plan.arguments;
+
+  CommandLaunchOptions options;
+  options.policy = app::OperationExitPolicy::readOnlyView;
+  options.viewKind = plan.kind;
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 " + std::wstring(git::DiffViewKindLabel(plan.kind)) +
+                        L"（" + repositoryRoot + L"）：" + item.PathLabel() + L"，等待 Git 退出码…";
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    refuse(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+  }
 }
 
 void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
@@ -811,6 +918,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     return;  // 理论上不会发生：结果在通知之前登记；这里不删除 ID，等下一次通知或退出确认。
   }
   const unsigned long long serial = activeOperation_.serial;
+  const std::optional<git::DiffViewKind> viewKind = activeOperation_.viewKind;
   activeOperation_ = ActiveOperation{};
   const app::OperationOutcome outcome =
       tasks_.FinishOperation(serial, result.completion, result.exitCode, result.failureReason);
@@ -818,7 +926,14 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     return;
   }
   // 结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
-  tasks_.RememberOperationConclusion(outcome.note);
+  std::wstring conclusion = outcome.note;
+  if (viewKind.has_value() && (result.completion == git::CommandCompletion::finished ||
+                               result.completion == git::CommandCompletion::gitNotStarted)) {
+    // 查看类操作的退出码语义在这里补完整：`git diff` 有差异时也是 0，
+    // `git diff --no-index` 则用 1 表示“有差异”。不解释就会被读成“操作失败”。
+    conclusion += git::DescribeDiffViewExitCode(*viewKind, result.exitCode);
+  }
+  tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
   commandRunner_.ClearAllResults();
   UpdateCommandAvailability();
@@ -928,6 +1043,21 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case WM_COMMAND:
       OnCommand(window, wParam);
       return 0;
+    case WM_NOTIFY: {
+      // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认这两块更改列表，
+      // 其余通知（包括提交表单里的控件）一律交回默认处理，不替别人吞掉消息。
+      const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+      if (header != nullptr && header->code == NM_DBLCLK &&
+          (header->idFrom == kIdUnstagedList || header->idFrom == kIdStagedList)) {
+        const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
+        // iItem 是命中测试得到的行号：点在空白处为 -1。多选时也只查看被双击的这一行，
+        // 不把选中的其它文件一起塞进同一个窗口（一次一条才看得清，命令也只限定一条路径）。
+        OnChangesListDoubleClicked(window, header->hwndFrom,
+                                  activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      return ::DefWindowProcW(window, message, wParam, lParam);
+    }
     case WM_TIMER:
       if (wParam == kGitVerifyTimer) {
         ::KillTimer(window, kGitVerifyTimer);

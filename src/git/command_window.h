@@ -100,6 +100,9 @@ struct CommandWindowPlan {
 // 因为多字节码页（如 GBK）的第二字节可能落在 ASCII 区间，直接检查字节会误判；
 // 而写进脚本的必须是码页字节。标题不合格时退回含操作 ID 的 ASCII 占位标题，
 // 绝不因为“展示文字不好”而拒绝一次合法的操作。
+// 引号保护不了 `%`：cmd 的百分号展开与引号无关，且 `call` 比 `echo` 多经历一轮展开，
+// 因此脚本里按各行实际经历的轮数转义（`%` -> `%%` / `%%%%`），
+// 使送達 Git 的路径与界面显示的真实命令都保持原样（含 `%` 的档名不再被变量取代）。
 [[nodiscard]] bool AssembleCommandWindowScript(std::wstring_view operationId,
                                                std::string_view scriptDirectoryAnsi,
                                                std::wstring_view titleWide, std::string_view titleAnsi,

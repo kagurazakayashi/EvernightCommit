@@ -58,6 +58,7 @@ add_library(gc_core STATIC
   src/app/list_view_memory.cpp
   src/app/task_coordinator.cpp
   src/git/command_window.cpp
+  src/git/diff_view.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp
   src/git/repository.cpp
