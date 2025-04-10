@@ -225,4 +225,6 @@ int ChangesPane::ListRowCount(HWND list) const {
   return GetListItemCount(list);
 }
 
+std::vector<int> ChangesPane::SelectedUnstagedRows() const { return GetListSelectedRows(unstagedList_); }
+
 }  // namespace gc::ui

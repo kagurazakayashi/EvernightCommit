@@ -38,6 +38,10 @@ public:
   [[nodiscard]] const git::ChangeItem* ItemAt(HWND list, int row, git::ChangeSide* side) const;
   // 该列表当前的行数：用于核对"显示的行数"与"模型条数"是否还一致。
   [[nodiscard]] int ListRowCount(HWND list) const;
+  // “未暂存的更改”里当前选中的行号（升序，可多选）。
+  // 只给行号，不给条目：调用方必须逐行经 ItemAt 取条目，再与模型核对，
+  // 这样“点击瞬间的选择范围”与“界面显示的那一条”是同一件事，不会拿到已被刷新换掉的行。
+  [[nodiscard]] std::vector<int> SelectedUnstagedRows() const;
 
 private:
   [[nodiscard]] static RECT InnerRect(const RECT& group, const UiMetrics& metrics) noexcept;

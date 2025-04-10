@@ -62,6 +62,7 @@ add_library(gc_core STATIC
   src/git/git_locator.cpp
   src/git/git_probe.cpp
   src/git/repository.cpp
+  src/git/staging_plan.cpp
   src/git/workspace_model.cpp
   src/git/workspace_status.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -75,6 +76,7 @@ add_library(gc_platform STATIC
   src/platform/windows/git_toolchain.cpp
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
+  src/platform/windows/pathspec_file.cpp
   src/platform/windows/platform_init.cpp
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp

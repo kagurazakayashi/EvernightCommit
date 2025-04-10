@@ -10,10 +10,12 @@
 #include <vector>
 
 #include "git/diff_view.h"
+#include "git/staging_plan.h"
 #include "git/workspace_model.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
+#include "platform/windows/pathspec_file.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
 #include "ui/commands.h"
@@ -34,7 +36,15 @@ constexpr std::wstring_view kTipFetch = L"该仓库级操作尚未实现，按�
 constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
 constexpr std::wstring_view kTipStatus =
     L"在新命令窗口里执行 git status：显示真实命令与输出，Git 结束窗口仍保留；本程序通过结果文件获知退出码。";
-constexpr std::wstring_view kTipStageAdd = L"该操作尚未实现，按钮保持禁用。对应命令：git add <所选文件>";
+constexpr std::wstring_view kTipStageAdd =
+    L"把“未暂存的更改”里选中的条目交给 git add：在新命令窗口里显示真实命令与 Git 的完整输出，"
+    L"执行结束后窗口保留，本程序自动重读两个列表。\r\n"
+    L"只处理选中的行（可多选）：没有选中就是“什么都不做”，绝不会代为暂存全部改动，"
+    L"也不会用 git add . 或 git add -A。\r\n"
+    L"选中条目按字面路径传给 Git（清单文件以 NUL 分隔，每条都带 :(literal) 标记），文件名里的 [ ] # ! % "
+    L"与空格、中文都不会被当成通配、取反或选项，因此不会顺带改动没选中的文件。\r\n"
+    L"“重命名”在工作区里是“旧路径已删除 + 新路径未跟踪”两条记录，要暂存这次重命名请把两条一起选中。\r\n"
+    L"子模块条目只会让父仓库记录提交指针：子模块内部尚未提交的文件必须由那个仓库自己暂存并提交。";
 constexpr std::wstring_view kTipStageRemove =
     L"该操作尚未实现，按钮保持禁用。对应命令：git restore --staged <所选文件>";
 constexpr std::wstring_view kTipRefresh =
@@ -72,9 +82,16 @@ constexpr std::wstring_view kPendingNotice =
     L"命令窗口里的 Git 结束后也会自动重读一次；"
     L"双击列表某一行会在命令窗口里显示该条目的差异（未跟踪文件显示内容，二进制只给说明，超大文件给 --stat 摘要），"
     L"查看过程不改动索引与工作区；"
-    L"暂存/提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
+    L"“加入暂存区 →”已接入：只把选中的未暂存条目交给命令窗口里的 git add，执行后自动重读；"
+    L"提交/撤回/fetch/pull/push 与“移出暂存区”将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
+
+// 没有选中任何条目时的说明。这一句必须把「没有选中 ≠ 暂存全部」讲明白，
+// 否则用户会以为空选择是一次“全量暂存”的快捷写法。
+constexpr std::wstring_view kNoSelectionHint =
+    L"没有选中任何条目，因此没有执行任何 Git 命令。“加入暂存区 →”只处理选中的行，"
+    L"绝不会代为暂存整个仓库。请在“未暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击。";
 
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
@@ -207,11 +224,17 @@ void MainWindow::UpdateCommandAvailability() {
           ? TRUE
           : FALSE;
   for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(),
-                      changesPane_.stageAddButton(), changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
+                      changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
                       commitForm_.CoauthorRemove(), actionBar_.createCommitButton(),
                       actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
+  // “加入暂存区 →”已接通（步骤 8），条件与 status 一致：Git 可用 + 仓库已识别 + 没有别的操作在跑。
+  // 这里不要求“已选中条目”：没选中也要能点，点了才会得到那句“没有选中就是什么都不做”的说明；
+  // 把按钮 disabled 掉反而让用户以为功能坏了。
+  const BOOL stageAddReady =
+      (state_.GitUsable() && state_.RepoUsable() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
+  ::EnableWindow(changesPane_.stageAddButton(), stageAddReady);
   // 刷新是内部只读重读，不占用命令窗口、也不写仓库，因此在有操作在跑时依然可用：
   // 外部终端改了仓库、或某个操作的输出看不清时，用户总要能恢复真实状态。
   // 上一次识别失败也保持可用：仓库在外部被修好（或改回原样）后，点刷新就能恢复，
@@ -366,6 +389,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdRefreshButton:
       if (notifyCode == BN_CLICKED) {
         ScheduleRefresh(window);
+      }
+      break;
+    case kIdStageAddButton:
+      if (notifyCode == BN_CLICKED) {
+        StageSelectedUnstaged(window);
       }
       break;
     default:
@@ -786,6 +814,8 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                              const CommandLaunchOptions& options) {
   unsigned long long serial = 0;
   if (!tasks_.BeginOperation(operation.displayName, &serial, options.policy)) {
+    // 槽位被占：这次根本没跑起来，清单文件也就没人会去读，立刻回收。
+    platform::RemoveNulPathspecFile(options.pathspecFile);
     return false;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
   }
   uint64_t operationId = 0;
@@ -794,13 +824,14 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
     // 连 Git 都没启动起来：立刻释放槽位，别让一次没跑起来的启动把界面永久锁住。
     const app::OperationOutcome outcome =
         tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
+    platform::RemoveNulPathspecFile(options.pathspecFile);  // Git 从未运行，文件同样没人要读了。
     state_.SetStatusNote(outcome.note);
     UpdateCommandAvailability();
     RefreshTexts(window);
     return false;
   }
-  activeOperation_ = ActiveOperation{serial, operationId, operation.displayName, options.scopeNotice,
-                                     options.viewKind};
+  activeOperation_ = ActiveOperation{serial,  operationId,           operation.displayName,
+                                     options.scopeNotice, options.viewKind, options.pathspecFile};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -828,6 +859,121 @@ void MainWindow::LaunchStatusOperation(HWND window) {
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…";
   static_cast<void>(LaunchCommandWindowOperation(window, operation, options));
+}
+
+void MainWindow::StageSelectedUnstaged(HWND window) {
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    refuse(L"Git 或仓库当前不可用，无法暂存。请先确认路径并点“刷新”。");
+    return;
+  }
+  if (tasks_.OperationInFlight()) {
+    // 命令窗口操作是单槽的：并发两次 git add 会互相抢 index.lock，
+    // 也会让“哪个窗口对应哪一次暂存”变得含糊。
+    refuse(L"已有一个命令窗口操作在进行，请等它结束后再暂存。");
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
+    // 列表里的路径是“那一个工作区”的相对路径：根目录与协调器身份一旦不一致，
+    // 这些路径就可能属于上一个仓库，绝不能拿去对新仓库执行写操作。
+    refuse(L"仓库工作区已改变，请先点“刷新”再暂存。");
+    return;
+  }
+
+  // 逐行核对：显示的行数、行号对应的条目、条目的路径与状态，都要和刚读回来的模型一致。
+  // 任何一处对不上都拒绝执行 —— 宁可让用户重新点一次，也不能把暂存发到别的文件上。
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  const std::vector<int> rows = changesPane_.SelectedUnstagedRows();
+  if (rows.empty()) {
+    refuse(kNoSelectionHint);
+    return;
+  }
+  const HWND unstagedList = changesPane_.unstagedList();
+  if (changesPane_.ListRowCount(unstagedList) != static_cast<int>(model.unstaged.size())) {
+    refuse(L"列表行数与已读取的仓库状态对不上，为避免暂存错文件，本次没有执行任何命令。点“刷新”后重试。");
+    return;
+  }
+  std::vector<git::ChangeItem> selection;
+  selection.reserve(rows.size());
+  for (const int row : rows) {
+    git::ChangeSide side = git::ChangeSide::unstaged;
+    const git::ChangeItem* shown = changesPane_.ItemAt(unstagedList, row, &side);
+    if (shown == nullptr || side != git::ChangeSide::unstaged || row < 0 ||
+        static_cast<size_t>(row) >= model.unstaged.size()) {
+      refuse(L"选中的行已不在当前列表里（内容刚被刷新），请重新选择后再点“加入暂存区”。");
+      return;
+    }
+    const git::ChangeItem& item = model.unstaged[static_cast<size_t>(row)];
+    if (item.path != shown->path || item.kind != shown->kind) {
+      refuse(L"选中的某一行已经换成另一个文件，为避免暂存错文件，本次没有执行任何命令。请重新选择。");
+      return;
+    }
+    // 拷贝一份：点击之后哪怕列表被刷新掉，本次执行的范围也已固定。
+    selection.push_back(item);
+  }
+
+  git::StagingPlanOptions planOptions;
+  // 传递方式按这个 Git 程序实际报出的版本号判定（不是猜，也不是写死本机版本）。
+  planOptions.pathspecFileSupported = git::SupportsPathspecFileDelivery(state_.Git().version);
+  planOptions.totalUnstagedItems = model.unstaged.size();
+  const git::StagingPlan plan = git::BuildStagingAddPlan(selection, planOptions);
+  if (plan.delivery == git::StagingDelivery::blocked) {
+    const std::wstring message = L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason;
+    ::MessageBoxW(window, message.c_str(), L"无法加入暂存区", MB_OK | MB_ICONINFORMATION);
+    refuse(L"未执行 git add：" + plan.blockedReason);
+    return;
+  }
+
+  // 未合并条目与子模块条目的语义与“普通改动”不同，而且 Git 不会替用户解释，
+  // 所以执行前把话说清楚，由用户决定继续还是取消（取消不碰仓库）。
+  if (!plan.confirmationText.empty()) {
+    const std::wstring message =
+        L"这次暂存涉及需要特别说明的条目：\n\n" + plan.confirmationText;
+    const int answer = ::MessageBoxW(window, message.c_str(), L"加入暂存区前请确认",
+                                     MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDOK) {
+      refuse(L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。");
+      return;
+    }
+  }
+
+  std::vector<std::wstring> arguments = plan.arguments;
+  std::wstring pathspecFile;
+  if (plan.delivery == git::StagingDelivery::pathspecFile) {
+    const platform::PathspecFileWrite written = platform::WriteNulPathspecFile(plan.pathspecEntries);
+    if (!written.written) {
+      refuse(L"没有打开命令窗口，也没有对仓库做任何改动。写路径清单失败：" + written.failureReason);
+      return;
+    }
+    pathspecFile = written.path;
+    if (!git::AppendPathspecFileOptions(&arguments, pathspecFile)) {
+      platform::RemoveNulPathspecFile(pathspecFile);
+      refuse(L"没有打开命令窗口：清单文件的路径无法安全交给命令窗口（含引号或控制字符）。");
+      return;
+    }
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = repositoryRoot;
+  operation.arguments = std::move(arguments);
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 git add（" + repositoryRoot + L"），本次暂存 " +
+                        std::to_wstring(plan.selectedItems) + L" 项，等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.pathspecFile = pathspecFile;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    refuse(L"这次暂存没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+  }
 }
 
 void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
@@ -919,7 +1065,19 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   }
   const unsigned long long serial = activeOperation_.serial;
   const std::optional<git::DiffViewKind> viewKind = activeOperation_.viewKind;
+  const std::wstring pathspecFile = activeOperation_.pathspecFile;
   activeOperation_ = ActiveOperation{};
+  // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
+  // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/scriptNeverRan 里
+  // Git 从未运行；而 terminated、stillUnknown 表示 Git 可能还活着，此时宁可让 %TEMP% 留一个
+  // 几百字节的清单文件，也绝不能把 Git 正在读的那份删掉。
+  const bool gitWillNotRead = result.completion == git::CommandCompletion::finished ||
+                              result.completion == git::CommandCompletion::launchFailed ||
+                              result.completion == git::CommandCompletion::gitNotStarted ||
+                              result.completion == git::CommandCompletion::scriptNeverRan;
+  if (gitWillNotRead) {
+    platform::RemoveNulPathspecFile(pathspecFile);
+  }
   const app::OperationOutcome outcome =
       tasks_.FinishOperation(serial, result.completion, result.exitCode, result.failureReason);
   if (!outcome.recognised) {
@@ -950,6 +1108,8 @@ void MainWindow::TickActiveOperations(HWND window) {
       !commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
     const unsigned long long serial = activeOperation_.serial;
     const std::wstring name = activeOperation_.displayName;
+    // 这里不删清单文件：通知丢失意味着 Git 可能还在命令窗口里跑，删掉正在被读的文件
+    // 会让一次合法的 git add 变成 Git 的报错。%TEMP% 里留下几百字节的清单远小于那个代价。
     activeOperation_ = ActiveOperation{};
     // 执行器已经不记得这个操作：按“结果未知”结案并释放槽位，
     // 否则一个再也等不到通知的操作会把后续写操作永久锁住。
