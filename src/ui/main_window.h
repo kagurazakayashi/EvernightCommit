@@ -35,6 +35,9 @@ struct CommandLaunchOptions {
   std::wstring startedNote;   // 启动成功后立刻写进“任务状态”的说明
   std::wstring scopeNotice;   // 随状态一起显示的范围说明（子模块指针/二进制/摘要上限）
   std::optional<git::DiffViewKind> viewKind;
+  // 本次操作独占的路径清单临时文件（git add 用）。Git 还在读它的时候绝不能删，
+  // 因此所有权随操作一起交给 ActiveOperation，只在拿到终态或启动失败时回收。
+  std::wstring pathspecFile;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -110,6 +113,10 @@ private:
                                                  const CommandLaunchOptions& options);
   void LaunchStatusOperation(HWND window);
 
+  // “加入暂存区 →”：把未暂存列表里选中的条目交给命令窗口里的 git add（步骤 8）。
+  // 选择范围在点击瞬间按行号核对后拷成快照，之后的刷新/迟到结果都不会改变本次执行的范围。
+  void StageSelectedUnstaged(HWND window);
+
   // 双击“未暂存的更改/已暂存的更改”的某一行：按所在侧与条目类别构造差异/内容查看命令，
   // 仍走上面的命令窗口执行器（不打开外部编辑器，也不在本进程里静默跑 Git）。
   void OnChangesListDoubleClicked(HWND window, HWND list, int row);
@@ -133,6 +140,9 @@ private:
     std::wstring scopeNotice;
     // 查看类操作的退出码含义由 git::DescribeDiffViewExitCode 解释（协调器只判定成败）。
     std::optional<git::DiffViewKind> viewKind;
+    // 本次操作独占的路径清单临时文件（写操作把选中的路径交给它）。
+    // 只能在拿到终态之后删除：命令窗口里的 Git 可能还在读它。
+    std::wstring pathspecFile;
   };
 
   platform::UniqueWindow window_;

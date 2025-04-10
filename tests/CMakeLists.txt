@@ -16,6 +16,8 @@ add_executable(gc_tests
   repo_detect_fixture_tests.cpp
   repository_tests.cpp
   subprocess_command_line_tests.cpp
+  staging_plan_fixture_tests.cpp
+  staging_plan_tests.cpp
   task_coordinator_tests.cpp
   ui_metrics_tests.cpp
   utf_text_tests.cpp
