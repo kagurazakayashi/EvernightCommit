@@ -42,6 +42,8 @@ public:
   // 只给行号，不给条目：调用方必须逐行经 ItemAt 取条目，再与模型核对，
   // 这样“点击瞬间的选择范围”与“界面显示的那一条”是同一件事，不会拿到已被刷新换掉的行。
   [[nodiscard]] std::vector<int> SelectedUnstagedRows() const;
+  // “已暂存的更改”里当前选中的行号，约定与上面完全相同（“← 移出暂存区”按这一侧发起）。
+  [[nodiscard]] std::vector<int> SelectedStagedRows() const;
 
 private:
   [[nodiscard]] static RECT InnerRect(const RECT& group, const UiMetrics& metrics) noexcept;

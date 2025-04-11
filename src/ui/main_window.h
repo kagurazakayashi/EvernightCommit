@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "app/app_state.h"
 #include "app/task_coordinator.h"
+#include "git/staging_plan.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/raii.h"
@@ -113,9 +115,35 @@ private:
                                                  const CommandLaunchOptions& options);
   void LaunchStatusOperation(HWND window);
 
-  // “加入暂存区 →”：把未暂存列表里选中的条目交给命令窗口里的 git add（步骤 8）。
+  // “加入暂存区 →”：把未暂存列表里选中的条目交给命令窗口里的 git add。
+  // “← 移出暂存区”：把已暂存列表里选中的条目从索引撤回（只写索引），两个方向共用下面这套核对与启动流程。
   // 选择范围在点击瞬间按行号核对后拷成快照，之后的刷新/迟到结果都不会改变本次执行的范围。
   void StageSelectedUnstaged(HWND window);
+  void UnstageSelectedStaged(HWND window);
+
+  // 一次「按选中条目执行的暂存方向操作」的界面措辞与形态参数：两个方向只差文案与清单文件名前缀，
+  // 共同的流程（拒绝说明、确认框、清单写出、命令窗口启动）只实现一遍，避免两处各自漂移。
+  struct StagingLaunchWords {
+    std::wstring_view objectLabel;        // 「暂存」/「取消暂存」：前提核对与行数不符时的说明用
+    std::wstring_view buttonTitle;        // 行核对失败时提醒用户重新点击的按钮名
+    std::wstring_view blockedTitle;       // 方案被拒绝时说明框的标题
+    std::wstring_view confirmTitle;       // 确认框标题
+    std::wstring_view cancelledHint;      // 用户取消后的状态栏说明
+    std::wstring_view pathspecFilePrefix; // 清单文件名开头（gc-add / gc-unstage）
+    std::wstring_view rangeVerb;          // 「暂存」/「移出暂存区」：启动说明里对本次改动范围的称呼
+  };
+
+  // 写操作共同的执行前提核对：Git 与仓库可用、没有别的命令窗口操作在跑、
+  // 界面显示的工作区根仍然是协调器绑定的那一个。不通过时写好状态栏并返回 false。
+  [[nodiscard]] bool RequireWritePrerequisites(HWND window, std::wstring_view actionLabel);
+  // 把选中的行号逐行核对成条目快照：行数、行号对应的条目、路径与状态都要和刚读回来的模型一致，
+  // 任何一处对不上就整份拒绝（*refusal 给出要显示的原因，此时返回空）。
+  [[nodiscard]] std::vector<git::ChangeItem> CaptureCheckedSelection(
+      HWND list, const std::vector<int>& rows, const std::vector<git::ChangeItem>& items, git::ChangeSide side,
+      std::wstring_view objectLabel, std::wstring_view buttonTitle, std::wstring* refusal) const;
+  // 按方案的传递形态写出清单文件（需要时）并在命令窗口里执行；拒绝与确认框也在这里处理。
+  // 返回 false 表示没有跑起来（仓库未被改动，原因已写进状态栏或说明框）。
+  [[nodiscard]] bool RunStagingPlan(HWND window, const git::StagingPlan& plan, const StagingLaunchWords& words);
 
   // 双击“未暂存的更改/已暂存的更改”的某一行：按所在侧与条目类别构造差异/内容查看命令，
   // 仍走上面的命令窗口执行器（不打开外部编辑器，也不在本进程里静默跑 Git）。

@@ -46,7 +46,18 @@ constexpr std::wstring_view kTipStageAdd =
     L"“重命名”在工作区里是“旧路径已删除 + 新路径未跟踪”两条记录，要暂存这次重命名请把两条一起选中。\r\n"
     L"子模块条目只会让父仓库记录提交指针：子模块内部尚未提交的文件必须由那个仓库自己暂存并提交。";
 constexpr std::wstring_view kTipStageRemove =
-    L"该操作尚未实现，按钮保持禁用。对应命令：git restore --staged <所选文件>";
+    L"把“已暂存的更改”里选中的条目从索引撤回：在新命令窗口里显示真实命令与 Git 的完整输出，"
+    L"执行结束后窗口保留，本程序自动重读两个列表。\r\n"
+    L"这一步只写索引，绝不改写工作区：磁盘上的文件内容原样保留，不会用 git restore 工作区、"
+    L"git reset --hard 或 git clean 这类会丢弃改动的命令。\r\n"
+    L"只处理选中的行（可多选）：没有选中就是“什么都不做”，绝不会代为取消整个仓库的暂存，"
+    L"也不会执行不带路径的 git reset（只有那种形态才会改动 HEAD）。\r\n"
+    L"有最近一次提交时命令是 git restore --staged；仓库还没有任何提交时没有可退回的 HEAD，"
+    L"改用同样只写索引的 git reset -q -- <所选路径>：选中的条目从索引移除，文件留在磁盘上、回到未跟踪状态。\r\n"
+    L"“重命名”条目会同时撤回旧路径与新路径两条索引记录，只撤一条会留下半套暂存。\r\n"
+    L"同一文件左右两侧各有一份改动时，这里只取消已暂存的那一份，工作区里的最新内容不受影响。\r\n"
+    L"冲突（未合并）条目不会被取消暂存：那不等于解决冲突，程序会拒绝并说明原因；"
+    L"内容只存在于索引里（磁盘上已没有那个文件）的条目会先弹出确认。";
 constexpr std::wstring_view kTipRefresh =
     L"重新读取当前仓库的摘要与两个更改列表：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
     L"在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。";
@@ -83,15 +94,21 @@ constexpr std::wstring_view kPendingNotice =
     L"双击列表某一行会在命令窗口里显示该条目的差异（未跟踪文件显示内容，二进制只给说明，超大文件给 --stat 摘要），"
     L"查看过程不改动索引与工作区；"
     L"“加入暂存区 →”已接入：只把选中的未暂存条目交给命令窗口里的 git add，执行后自动重读；"
-    L"提交/撤回/fetch/pull/push 与“移出暂存区”将在后续步骤接入，按钮当前保持禁用。";
+    L"“← 移出暂存区”也已接入：只把选中的已暂存条目从索引撤回（git restore --staged，尚无提交时改用"
+    L"同样只写索引的 git reset -q --），绝不改动工作区文件，执行后自动重读；"
+    L"提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
 
-// 没有选中任何条目时的说明。这一句必须把「没有选中 ≠ 暂存全部」讲明白，
-// 否则用户会以为空选择是一次“全量暂存”的快捷写法。
+// 没有选中任何条目时的说明。这一句必须把「没有选中 ≠ 处理全部」讲明白，
+// 否则用户会以为空选择是一次“全量暂存/全量取消暂存”的快捷写法。
 constexpr std::wstring_view kNoSelectionHint =
     L"没有选中任何条目，因此没有执行任何 Git 命令。“加入暂存区 →”只处理选中的行，"
     L"绝不会代为暂存整个仓库。请在“未暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击。";
+constexpr std::wstring_view kNoSelectionHintUnstage =
+    L"没有选中任何条目，因此没有执行任何 Git 命令。“← 移出暂存区”只处理选中的行，"
+    L"绝不会代为取消整个仓库的暂存（不带路径的 git reset 会连 HEAD 一起动，本程序不使用）。"
+    L"请在“已暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击。";
 
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
@@ -223,18 +240,18 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(),
-                      changesPane_.stageRemoveButton(), commitForm_.CoauthorAdd(),
+  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), commitForm_.CoauthorAdd(),
                       commitForm_.CoauthorRemove(), actionBar_.createCommitButton(),
                       actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
-  // “加入暂存区 →”已接通（步骤 8），条件与 status 一致：Git 可用 + 仓库已识别 + 没有别的操作在跑。
+  // 两个暂存方向都已接通，条件与 status 一致：Git 可用 + 仓库已识别 + 没有别的操作在跑。
   // 这里不要求“已选中条目”：没选中也要能点，点了才会得到那句“没有选中就是什么都不做”的说明；
   // 把按钮 disabled 掉反而让用户以为功能坏了。
-  const BOOL stageAddReady =
+  const BOOL stagingReady =
       (state_.GitUsable() && state_.RepoUsable() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
-  ::EnableWindow(changesPane_.stageAddButton(), stageAddReady);
+  ::EnableWindow(changesPane_.stageAddButton(), stagingReady);
+  ::EnableWindow(changesPane_.stageRemoveButton(), stagingReady);
   // 刷新是内部只读重读，不占用命令窗口、也不写仓库，因此在有操作在跑时依然可用：
   // 外部终端改了仓库、或某个操作的输出看不清时，用户总要能恢复真实状态。
   // 上一次识别失败也保持可用：仓库在外部被修好（或改回原样）后，点刷新就能恢复，
@@ -394,6 +411,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStageAddButton:
       if (notifyCode == BN_CLICKED) {
         StageSelectedUnstaged(window);
+      }
+      break;
+    case kIdStageRemoveButton:
+      if (notifyCode == BN_CLICKED) {
+        UnstageSelectedStaged(window);
       }
       break;
     default:
@@ -861,101 +883,107 @@ void MainWindow::LaunchStatusOperation(HWND window) {
   static_cast<void>(LaunchCommandWindowOperation(window, operation, options));
 }
 
-void MainWindow::StageSelectedUnstaged(HWND window) {
+bool MainWindow::RequireWritePrerequisites(HWND window, std::wstring_view actionLabel) {
   const auto refuse = [&](std::wstring_view message) {
     state_.SetStatusNote(std::wstring(message));
     RefreshTexts(window);
   };
 
   if (!state_.GitUsable() || !state_.RepoUsable()) {
-    refuse(L"Git 或仓库当前不可用，无法暂存。请先确认路径并点“刷新”。");
-    return;
+    refuse(L"Git 或仓库当前不可用，无法" + std::wstring(actionLabel) + L"。请先确认路径并点“刷新”。");
+    return false;
   }
   if (tasks_.OperationInFlight()) {
-    // 命令窗口操作是单槽的：并发两次 git add 会互相抢 index.lock，
-    // 也会让“哪个窗口对应哪一次暂存”变得含糊。
-    refuse(L"已有一个命令窗口操作在进行，请等它结束后再暂存。");
-    return;
+    // 命令窗口操作是单槽的：并发两次写操作会互相抢 index.lock，
+    // 也会让“哪个窗口对应哪一次改动”变得含糊。
+    refuse(L"已有一个命令窗口操作在进行，请等它结束后再" + std::wstring(actionLabel) + L"。");
+    return false;
   }
   const std::wstring repositoryRoot = state_.Repo().detection.root;
   if (repositoryRoot.empty() ||
       !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
     // 列表里的路径是“那一个工作区”的相对路径：根目录与协调器身份一旦不一致，
     // 这些路径就可能属于上一个仓库，绝不能拿去对新仓库执行写操作。
-    refuse(L"仓库工作区已改变，请先点“刷新”再暂存。");
-    return;
+    refuse(L"仓库工作区已改变，请先点“刷新”再" + std::wstring(actionLabel) + L"。");
+    return false;
   }
+  return true;
+}
 
+std::vector<git::ChangeItem> MainWindow::CaptureCheckedSelection(
+    HWND list, const std::vector<int>& rows, const std::vector<git::ChangeItem>& items, git::ChangeSide side,
+    std::wstring_view objectLabel, std::wstring_view buttonTitle, std::wstring* refusal) const {
   // 逐行核对：显示的行数、行号对应的条目、条目的路径与状态，都要和刚读回来的模型一致。
-  // 任何一处对不上都拒绝执行 —— 宁可让用户重新点一次，也不能把暂存发到别的文件上。
-  const git::WorkspaceModel& model = state_.WorkspaceModel();
-  const std::vector<int> rows = changesPane_.SelectedUnstagedRows();
-  if (rows.empty()) {
-    refuse(kNoSelectionHint);
-    return;
-  }
-  const HWND unstagedList = changesPane_.unstagedList();
-  if (changesPane_.ListRowCount(unstagedList) != static_cast<int>(model.unstaged.size())) {
-    refuse(L"列表行数与已读取的仓库状态对不上，为避免暂存错文件，本次没有执行任何命令。点“刷新”后重试。");
-    return;
+  // 任何一处对不上都拒绝执行 —— 宁可让用户重新点一次，也不能把写操作发到别的文件上。
+  *refusal = {};
+  if (changesPane_.ListRowCount(list) != static_cast<int>(items.size())) {
+    *refusal = L"列表行数与已读取的仓库状态对不上，为避免" + std::wstring(objectLabel) +
+               L"错文件，本次没有执行任何命令。点“刷新”后重试。";
+    return {};
   }
   std::vector<git::ChangeItem> selection;
   selection.reserve(rows.size());
   for (const int row : rows) {
-    git::ChangeSide side = git::ChangeSide::unstaged;
-    const git::ChangeItem* shown = changesPane_.ItemAt(unstagedList, row, &side);
-    if (shown == nullptr || side != git::ChangeSide::unstaged || row < 0 ||
-        static_cast<size_t>(row) >= model.unstaged.size()) {
-      refuse(L"选中的行已不在当前列表里（内容刚被刷新），请重新选择后再点“加入暂存区”。");
-      return;
+    git::ChangeSide shownSide = git::ChangeSide::unstaged;
+    const git::ChangeItem* shown = changesPane_.ItemAt(list, row, &shownSide);
+    if (shown == nullptr || shownSide != side || row < 0 || static_cast<size_t>(row) >= items.size()) {
+      *refusal = L"选中的行已不在当前列表里（内容刚被刷新），请重新选择后再点“" + std::wstring(buttonTitle) +
+                 L"”。";
+      return {};
     }
-    const git::ChangeItem& item = model.unstaged[static_cast<size_t>(row)];
+    const git::ChangeItem& item = items[static_cast<size_t>(row)];
     if (item.path != shown->path || item.kind != shown->kind) {
-      refuse(L"选中的某一行已经换成另一个文件，为避免暂存错文件，本次没有执行任何命令。请重新选择。");
-      return;
+      *refusal = L"选中的某一行已经换成另一个文件，为避免" + std::wstring(objectLabel) +
+                 L"错文件，本次没有执行任何命令。请重新选择。";
+      return {};
     }
     // 拷贝一份：点击之后哪怕列表被刷新掉，本次执行的范围也已固定。
     selection.push_back(item);
   }
+  return selection;
+}
 
-  git::StagingPlanOptions planOptions;
-  // 传递方式按这个 Git 程序实际报出的版本号判定（不是猜，也不是写死本机版本）。
-  planOptions.pathspecFileSupported = git::SupportsPathspecFileDelivery(state_.Git().version);
-  planOptions.totalUnstagedItems = model.unstaged.size();
-  const git::StagingPlan plan = git::BuildStagingAddPlan(selection, planOptions);
+bool MainWindow::RunStagingPlan(HWND window, const git::StagingPlan& plan, const StagingLaunchWords& words) {
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+
   if (plan.delivery == git::StagingDelivery::blocked) {
     const std::wstring message = L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason;
-    ::MessageBoxW(window, message.c_str(), L"无法加入暂存区", MB_OK | MB_ICONINFORMATION);
-    refuse(L"未执行 git add：" + plan.blockedReason);
-    return;
+    ::MessageBoxW(window, message.c_str(), std::wstring(words.blockedTitle).c_str(), MB_OK | MB_ICONINFORMATION);
+    refuse(L"未执行 " + plan.commandLabel + L"：" + plan.blockedReason);
+    return false;
   }
 
-  // 未合并条目与子模块条目的语义与“普通改动”不同，而且 Git 不会替用户解释，
-  // 所以执行前把话说清楚，由用户决定继续还是取消（取消不碰仓库）。
+  // 未合并条目、子模块条目与「内容只剩索引里那一份」的条目，语义都与“普通改动”不同，
+  // 而且 Git 不会替用户解释，所以执行前把话说清楚，由用户决定继续还是取消（取消不碰仓库）。
   if (!plan.confirmationText.empty()) {
     const std::wstring message =
-        L"这次暂存涉及需要特别说明的条目：\n\n" + plan.confirmationText;
-    const int answer = ::MessageBoxW(window, message.c_str(), L"加入暂存区前请确认",
+        L"这次" + std::wstring(words.objectLabel) + L"涉及需要特别说明的条目：\n\n" + plan.confirmationText;
+    const int answer = ::MessageBoxW(window, message.c_str(), std::wstring(words.confirmTitle).c_str(),
                                      MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
     if (answer != IDOK) {
-      refuse(L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。");
-      return;
+      refuse(words.cancelledHint);
+      return false;
     }
   }
 
   std::vector<std::wstring> arguments = plan.arguments;
   std::wstring pathspecFile;
   if (plan.delivery == git::StagingDelivery::pathspecFile) {
-    const platform::PathspecFileWrite written = platform::WriteNulPathspecFile(plan.pathspecEntries);
+    const platform::PathspecFileWrite written =
+        platform::WriteNulPathspecFile(plan.pathspecEntries, words.pathspecFilePrefix);
     if (!written.written) {
       refuse(L"没有打开命令窗口，也没有对仓库做任何改动。写路径清单失败：" + written.failureReason);
-      return;
+      return false;
     }
     pathspecFile = written.path;
     if (!git::AppendPathspecFileOptions(&arguments, pathspecFile)) {
       platform::RemoveNulPathspecFile(pathspecFile);
       refuse(L"没有打开命令窗口：清单文件的路径无法安全交给命令窗口（含引号或控制字符）。");
-      return;
+      return false;
     }
   }
 
@@ -967,13 +995,98 @@ void MainWindow::StageSelectedUnstaged(HWND window) {
   operation.arguments = std::move(arguments);
 
   CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 git add（" + repositoryRoot + L"），本次暂存 " +
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" + repositoryRoot +
+                        L"），本次" + std::wstring(words.rangeVerb) + L" " +
                         std::to_wstring(plan.selectedItems) + L" 项，等待 Git 退出码…";
   options.scopeNotice = plan.notice;
   options.pathspecFile = pathspecFile;
   if (!LaunchCommandWindowOperation(window, operation, options)) {
-    refuse(L"这次暂存没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    refuse(L"这次" + std::wstring(words.rangeVerb) +
+           L"没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    return false;
   }
+  return true;
+}
+
+void MainWindow::StageSelectedUnstaged(HWND window) {
+  if (!RequireWritePrerequisites(window, L"暂存")) {
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  const std::vector<int> rows = changesPane_.SelectedUnstagedRows();
+  if (rows.empty()) {
+    state_.SetStatusNote(std::wstring(kNoSelectionHint));
+    RefreshTexts(window);
+    return;
+  }
+  std::wstring refusal;
+  const std::vector<git::ChangeItem> selection = CaptureCheckedSelection(
+      changesPane_.unstagedList(), rows, model.unstaged, git::ChangeSide::unstaged, L"暂存", L"加入暂存区 →",
+      &refusal);
+  if (!refusal.empty()) {
+    state_.SetStatusNote(refusal);
+    RefreshTexts(window);
+    return;
+  }
+
+  git::StagingPlanOptions planOptions;
+  // 传递方式按这个 Git 程序实际报出的版本号判定（不是猜，也不是写死本机版本）。
+  planOptions.pathspecFileSupported = git::SupportsPathspecFileDelivery(state_.Git().version);
+  planOptions.totalUnstagedItems = model.unstaged.size();
+  const git::StagingPlan plan = git::BuildStagingAddPlan(selection, planOptions);
+
+  StagingLaunchWords words;
+  words.objectLabel = L"暂存";
+  words.buttonTitle = L"加入暂存区 →";
+  words.blockedTitle = L"无法加入暂存区";
+  words.confirmTitle = L"加入暂存区前请确认";
+  words.cancelledHint = L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。";
+  words.pathspecFilePrefix = L"gc-add";
+  words.rangeVerb = L"暂存";
+  static_cast<void>(RunStagingPlan(window, plan, words));
+}
+
+void MainWindow::UnstageSelectedStaged(HWND window) {
+  if (!RequireWritePrerequisites(window, L"取消暂存")) {
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  const std::vector<int> rows = changesPane_.SelectedStagedRows();
+  if (rows.empty()) {
+    state_.SetStatusNote(std::wstring(kNoSelectionHintUnstage));
+    RefreshTexts(window);
+    return;
+  }
+  std::wstring refusal;
+  const std::vector<git::ChangeItem> selection = CaptureCheckedSelection(
+      changesPane_.stagedList(), rows, model.staged, git::ChangeSide::staged, L"取消暂存", L"← 移出暂存区",
+      &refusal);
+  if (!refusal.empty()) {
+    state_.SetStatusNote(refusal);
+    RefreshTexts(window);
+    return;
+  }
+
+  git::StagingPlanOptions planOptions;
+  planOptions.pathspecFileSupported = git::SupportsPathspecFileDelivery(state_.Git().version);
+  planOptions.totalStagedItems = model.staged.size();
+  // 有没有 HEAD 由仓库识别时 Git 自己的回答决定（headResolved）：尚无任何提交时
+  // git restore --staged 会当场失败，方案层据此改用同样只写索引的 git reset -q -- <所选路径>。
+  // 同理，restore 这个子命令也是 2.23 起才有的，太旧的 Git 一律走 reset 形态。
+  // 这两句判断即使因为外部操作而过期，两条命令都不会改动工作区，失败后紧跟的刷新会给出真实状态。
+  planOptions.repositoryHasHead = state_.Repo().detection.headResolved;
+  planOptions.restoreCommandSupported = git::SupportsRestoreCommand(state_.Git().version);
+  const git::StagingPlan plan = git::BuildStagingUnstagePlan(selection, planOptions);
+
+  StagingLaunchWords words;
+  words.objectLabel = L"取消暂存";
+  words.buttonTitle = L"← 移出暂存区";
+  words.blockedTitle = L"无法移出暂存区";
+  words.confirmTitle = L"移出暂存区前请确认";
+  words.cancelledHint = L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。";
+  words.pathspecFilePrefix = L"gc-unstage";
+  words.rangeVerb = L"移出暂存区";
+  static_cast<void>(RunStagingPlan(window, plan, words));
 }
 
 void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
