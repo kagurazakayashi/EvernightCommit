@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 
 #include "platform/windows/raii.h"
@@ -54,7 +55,8 @@ unsigned long NextSequence() {
 
 }  // namespace
 
-PathspecFileWrite WriteNulPathspecFile(const std::vector<std::wstring>& pathspecElements) {
+PathspecFileWrite WriteNulPathspecFile(const std::vector<std::wstring>& pathspecElements,
+                                      std::wstring_view filePrefix) {
   PathspecFileWrite result;
   if (pathspecElements.empty()) {
     result.failureReason = L"路径清单为空：没有范围的可执行命令一律拒绝，不写清单文件。";
@@ -68,7 +70,7 @@ PathspecFileWrite WriteNulPathspecFile(const std::vector<std::wstring>& pathspec
   }
 
   // 字节形态一次拼好再写：每条 pathspec 元素按 UTF-8 原样编码、结尾一个 NUL。
-  // 元素已由 git::staging_plan 带上 :(literal) 字面前缀，这里不补前缀、也不做任何转义。
+  // 元素已由 git/staging_plan 带上 :(literal) 字面前缀，这里不补前缀、也不做任何转义。
   std::string payload;
   for (const std::wstring& element : pathspecElements) {
     if (element.empty()) {
@@ -79,9 +81,19 @@ PathspecFileWrite WriteNulPathspecFile(const std::vector<std::wstring>& pathspec
     payload.push_back('\0');
   }
 
+  // 文件名前缀也要能安全进命令行（清单路径会出现在 cmd 脚本的 call 行里）：
+  // 调用方给的是本模块内写死的 ASCII 前缀，这里仍然复核一次，不接受意外形态。
+  std::wstring prefix(filePrefix);
+  if (prefix.empty() || prefix.size() > 16 ||
+      !std::all_of(prefix.begin(), prefix.end(),
+                   [](wchar_t c) { return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || c == L'-'; })) {
+    result.failureReason = L"清单文件名前缀不符合纯字母与减号的约定，已拒绝写出。";
+    return result;
+  }
+
   const unsigned long pid = ::GetCurrentProcessId();
   for (int attempt = 0; attempt < kCreateRetryLimit; ++attempt) {
-    const std::wstring path = directory + L"\\gc-add-" + std::to_wstring(pid) + L"-" +
+    const std::wstring path = directory + L"\\" + prefix + L"-" + std::to_wstring(pid) + L"-" +
                               std::to_wstring(NextSequence()) + L".nul";
     UniqueHandle handle(::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                       FILE_ATTRIBUTE_TEMPORARY, nullptr));
