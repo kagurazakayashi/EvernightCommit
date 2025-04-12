@@ -9,10 +9,14 @@
 #include <vector>
 
 #include "app/app_state.h"
+#include "app/commit_form_session.h"
 #include "app/task_coordinator.h"
+#include "git/commit_message.h"
 #include "git/staging_plan.h"
+#include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
+#include "platform/windows/identity_prompt.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/workspace_status.h"
@@ -157,6 +161,32 @@ private:
   // 关闭前确认：仍有操作在命令窗口里执行时，不静默离开。
   bool ConfirmCloseWithActiveOperations(HWND window);
 
+  // 提交表单（标题/描述/作者/合作者）的数据与校验：只做表单，不创建提交。
+  // 格式规则一律在 git/commit_identity 与 git/commit_message 里，这里只负责搬运与显示结论。
+  void OnCommitFormEdit(HWND window, int controlId);
+  // 依当前表单内容重跑一次校验，并把结论写进「任务状态」。
+  // prefixNote 是给同一行的前因（例如「仓库配置里的身份没有覆盖你输入的内容」）：
+  // 校验结论与前因必须显示在同一行里，否则用户只来得及看到其中一句。
+  void RunFormValidation(HWND window, std::wstring_view prefixNote = {});
+  void AddCoauthor(HWND window);
+  void RemoveSelectedCoauthors(HWND window);
+  void EditCoauthorAt(HWND window, int row);
+  // 合作者输入框的尺寸与文案：尺寸全部取自主窗口的 DPI 度量，保持与界面其它地方一致。
+  [[nodiscard]] platform::IdentityPromptSpec MakeCoauthorPrompt(const std::wstring& title,
+                                                                const std::wstring& initial,
+                                                                int editingRow) const;
+  // 表单内容属于哪一个工作区（按折叠后的工作区根比较，换 Git 程序不算换仓库）。
+  [[nodiscard]] std::wstring FormRepositoryKey() const;
+  // 切换仓库时对已有表单内容的处理：有用户内容就问「保留还是放弃」，程序不替人猜。
+  void ResolveFormOnRepositorySwitch(HWND window, const std::wstring& key);
+
+  // 「作者」初值：向 Git 问这个仓库的有效身份配置（user.name / user.email），
+  // 优先序完全交给 Git；本程序只读，绝不写回任何配置。
+  void RequestAuthorConfig(HWND window);
+  void OnAuthorConfigCompleted(HWND window, uint64_t completionSerial);
+  // 编程式改写「作者」输入框：期间抑制 EN_CHANGE，免得把程序填的值记成用户输入。
+  void SetAuthorField(HWND window, const std::wstring& text);
+
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
   struct ActiveOperation {
@@ -177,14 +207,18 @@ private:
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
+  platform::AuthorConfigWorker authorWorker_;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;
   app::AppState state_;
+  app::CommitFormSession formSession_;
   UiMetrics metrics_;
   std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别
+  bool suppressCommitFormNotify_ = false;  // 程序改写表单文字时不算作用户编辑
   bool refreshCycleActive_ = false;      // 本次识别/读取属于刷新，不重置列表
+  unsigned long long authorReadSerial_ = 0;  // 作者身份查询的序号：迟到的旧结果按它作废
 
   BandSpec bandSpec_{};
   ChangesSpec changesSpec_{};

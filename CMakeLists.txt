@@ -55,9 +55,13 @@ endif()
 # ---------- 应用状态与 Git 数据模型（不依赖窗口系统） ----------
 add_library(gc_core STATIC
   src/app/app_state.cpp
+  src/app/commit_form_session.cpp
   src/app/list_view_memory.cpp
   src/app/task_coordinator.cpp
+  src/git/author_config.cpp
   src/git/command_window.cpp
+  src/git/commit_identity.cpp
+  src/git/commit_message.cpp
   src/git/diff_view.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp
@@ -71,9 +75,11 @@ target_link_libraries(gc_core PUBLIC gc_build_settings)
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
   src/platform/windows/ansi_text.cpp
+  src/platform/windows/author_config.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/environment_block.cpp
   src/platform/windows/git_toolchain.cpp
+  src/platform/windows/identity_prompt.cpp
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp

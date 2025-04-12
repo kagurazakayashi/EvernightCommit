@@ -93,6 +93,52 @@ void CommitForm::SetTimes(const SYSTEMTIME& authorTime, const SYSTEMTIME& commit
   SetDate(committerClock_, committerTime);
 }
 
+git::CommitFormData CommitForm::Capture() const {
+  git::CommitFormData data;
+  data.subject = GetControlText(summary_);
+  data.description = GetControlText(description_);
+  data.author = GetControlText(author_);
+  // 合作者一律取内部模型，不从单元格文本反解：控件里的文字只是它的显示形态。
+  data.coauthors = coauthors_;
+  return data;
+}
+
+void CommitForm::SetSummaryText(std::wstring_view text) { SetControlText(summary_, text); }
+
+void CommitForm::SetDescriptionText(std::wstring_view text) { SetControlText(description_, text); }
+
+void CommitForm::SetAuthorText(std::wstring_view text) { SetControlText(author_, text); }
+
+void CommitForm::ClearFields() {
+  SetControlText(summary_, L"");
+  SetControlText(description_, L"");
+  SetControlText(author_, L"");
+  SetCoauthors({});
+}
+
+void CommitForm::SetCoauthors(std::vector<std::wstring> entries) {
+  coauthors_ = std::move(entries);
+  RebuildCoauthorList();
+}
+
+std::vector<int> CommitForm::SelectedCoauthorRows() const { return GetListSelectedRows(coauthorList_); }
+
+void CommitForm::SelectCoauthorRows(const std::vector<int>& rows) {
+  RestoreListSelection(coauthorList_, rows);
+}
+
+void CommitForm::RebuildCoauthorList() {
+  const ListRedrawPause pause(coauthorList_);
+  ClearListItems(coauthorList_);
+  int row = 0;
+  for (const std::wstring& entry : coauthors_) {
+    InsertListRow(coauthorList_, row, {entry});
+    ++row;
+  }
+  // 「暂无合作者」只是占位说明：有条目时必须藏起来，否则提示会压在列表上。
+  ::ShowWindow(coauthorHint_, coauthors_.empty() ? SW_SHOW : SW_HIDE);
+}
+
 void CommitForm::Layout(const RECT& area, const UiMetrics& metrics) {
   Place(group_, area);
 

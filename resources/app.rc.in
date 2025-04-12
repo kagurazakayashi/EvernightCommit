@@ -1,4 +1,21 @@
+#include <windows.h>
 #include "resource_ids.h"
 
 1 24 "@GC_APP_MANIFEST_RC@"
 IDI_APP_ICON ICON "@GC_APP_ICON_RC@"
+
+// Co-author identity input box. The geometry here is only a placeholder: the real positions and
+// the window size are laid out in pixels inside WM_INITDIALOG, so the dialog scales exactly like
+// the rest of the UI. All texts (caption, labels, buttons) are left empty on purpose and are set
+// from C++ as UTF-16, which keeps this script free of non-ASCII bytes.
+IDD_COMMIT_IDENTITY_DIALOG DIALOGEX 0, 0, 250, 78
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION ""
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "", IDC_IDENTITY_LABEL, 7, 7, 236, 8
+    EDITTEXT        IDC_IDENTITY_EDIT, 7, 18, 236, 12, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_IDENTITY_NOTE, 7, 34, 236, 16
+    DEFPUSHBUTTON   "", IDOK, 183, 58, 60, 14
+    PUSHBUTTON      "", IDCANCEL, 117, 58, 60, 14
+END

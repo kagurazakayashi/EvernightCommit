@@ -3,6 +3,7 @@
 #include <string>
 #include <utility>
 
+#include "git/author_config.h"
 #include "git/repository.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
@@ -43,6 +44,21 @@ struct RepoState {
   git::RepoDetection detection;
 };
 
+// 「作者默認身份」的讀取生命週期。作者初值取自這個倉庫的有效 Git 配置，由 Git 自己按優先序回答。
+enum class AuthorLoadStatus {
+  unloaded,  // 還沒有可讀的倉庫
+  loading,   // 背景只讀查詢進行中
+  loaded,    // Git 已回答（配置是否完整看 config，不完整時由界面提示需要填寫）
+  failed,    // 查不到（Git 啟動失敗、設定檔損壞等），原因在 config 的細節裡
+};
+
+// 一個倉庫的有效身份讀取結果。界面只讀它來填「作者」與判定提交者身份是否可用，
+// 絕不把它寫回任何設定檔——改配置是用戶在 Git 裡的事。
+struct AuthorState {
+  AuthorLoadStatus status = AuthorLoadStatus::unloaded;
+  git::AuthorIdentityConfig config;
+};
+
 // 界面与后续服务层之间的状态持有者：界面只读写这里，不直接访问 Git。
 class AppState {
 public:
@@ -54,17 +70,25 @@ public:
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }
   void SetGitExePath(std::wstring path) { info_.gitExePath = std::move(path); }
   void SetStatusNote(std::wstring note) { statusNote_ = std::move(note); }
+  // 提交表单自己的说明（校验结论、合作者增删的回报、作者默认值的来源）。
+  // 它與 statusNote_ 分開兩條通道：後者是「任務/倉庫現在怎麼樣」，會随刷新不断刷新；
+  // 表单那句属于使用者正在做的事，不能被紧随其后的读取结论抹掉，也不该反过来盖掉操作结论。
+  void SetFormNote(std::wstring note) { formNote_ = std::move(note); }
   void SetGitTool(GitToolState state) { gitTool_ = std::move(state); }
   void SetRepo(RepoState state) { repo_ = std::move(state); }
   // 工作區快照整体替換：切換倉庫或讀取失敗時不會留下上一次的列表內容。
   void SetWorkspace(git::WorkspaceSnapshot snapshot) { workspace_ = std::move(snapshot); }
+  // 作者默認身份同樣整體替換：換倉庫後絕不把上個倉庫的配置當成當前默認值。
+  void SetAuthor(AuthorState author) { author_ = std::move(author); }
 
   [[nodiscard]] const RepoInfo& Info() const noexcept { return info_; }
   [[nodiscard]] const std::wstring& StatusNote() const noexcept { return statusNote_; }
+  [[nodiscard]] const std::wstring& FormNote() const noexcept { return formNote_; }
   [[nodiscard]] const GitToolState& Git() const noexcept { return gitTool_; }
   [[nodiscard]] const RepoState& Repo() const noexcept { return repo_; }
   [[nodiscard]] const git::WorkspaceSnapshot& Workspace() const noexcept { return workspace_; }
   [[nodiscard]] const git::WorkspaceModel& WorkspaceModel() const noexcept { return workspace_.model; }
+  [[nodiscard]] const AuthorState& Author() const noexcept { return author_; }
 
   // Git 程序经 --version 验证可用；这是后续所有 Git 功能的前置条件。
   [[nodiscard]] bool GitUsable() const noexcept { return gitTool_.status == GitExeStatus::verified; }
@@ -87,9 +111,11 @@ public:
 private:
   RepoInfo info_;
   std::wstring statusNote_{L"未执行任何操作。"};
+  std::wstring formNote_;
   GitToolState gitTool_;
   RepoState repo_;
   git::WorkspaceSnapshot workspace_;
+  AuthorState author_;
 };
 
 }  // namespace gc::app

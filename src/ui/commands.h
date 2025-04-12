@@ -75,6 +75,8 @@ inline constexpr UINT_PTR kGitOperationTimer = 0x4713;
 inline constexpr UINT kGitOperationTickMs = 500;
 // 工作区状态（git status）后台读取完成通知；wParam 为请求序号。
 inline constexpr UINT kWorkspaceStatusCompleted = WM_APP + 5;
+// 作者默认身份（git config --get user.name/user.email）后台读取完成通知；wParam 为请求序号。
+inline constexpr UINT kAuthorConfigCompleted = WM_APP + 6;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -94,5 +96,7 @@ inline constexpr unsigned long kRepoDetectTimeoutMs = 8000;
 // 工作区读取同样是本地只读查询，但 --untracked-files=all 要把未跟踪目录展开到每个文件，
 // 大型仓库首次读取明显更慢；放宽到 20 秒，超时后界面报告“Git 查询超时”而不是无限等待。
 inline constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
+// 读作者默认身份同样是本地只读查询（而且一次刷新里要问两句），沿用识别的 8 秒放宽值。
+inline constexpr unsigned long kAuthorConfigTimeoutMs = 8000;
 
 }  // namespace gc::ui
