@@ -2,8 +2,13 @@ add_executable(gc_tests
   support/test_main.cpp
   support/git_fixture.cpp
   app_state_tests.cpp
+  author_config_tests.cpp
+  author_config_fixture_tests.cpp
   command_window_fixture_tests.cpp
   command_window_plan_tests.cpp
+  commit_form_session_tests.cpp
+  commit_identity_tests.cpp
+  commit_message_tests.cpp
   diff_view_fixture_tests.cpp
   diff_view_tests.cpp
   environment_block_tests.cpp

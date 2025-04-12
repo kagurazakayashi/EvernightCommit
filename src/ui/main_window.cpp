@@ -9,10 +9,12 @@
 #include <utility>
 #include <vector>
 
+#include "git/commit_identity.h"
 #include "git/diff_view.h"
 #include "git/staging_plan.h"
 #include "git/workspace_model.h"
 #include "platform/windows/git_toolchain.h"
+#include "platform/windows/identity_prompt.h"
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
 #include "platform/windows/pathspec_file.h"
@@ -61,7 +63,10 @@ constexpr std::wstring_view kTipStageRemove =
 constexpr std::wstring_view kTipRefresh =
     L"重新读取当前仓库的摘要与两个更改列表：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
     L"在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。";
-constexpr std::wstring_view kTipCreateCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git commit";
+constexpr std::wstring_view kTipCreateCommit =
+    L"该操作尚未实现，按钮保持禁用。对应命令：git commit\r\n"
+    L"表单里的标题、描述、作者与合作者已经接入校验与消息合成：这里的文字怎么拼成提交信息、"
+    L"哪些写法会被拒绝，都会即时写在“任务状态”那一行。";
 constexpr std::wstring_view kTipUndoCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git reset --soft HEAD^";
 constexpr std::wstring_view kTipPush = L"该操作尚未实现，按钮保持禁用。对应命令：git push";
 constexpr std::wstring_view kTipUnstagedList =
@@ -83,7 +88,31 @@ constexpr std::wstring_view kTipStagedList =
     L"重命名条目会同时带上旧路径，否则 Git 只能把它显示成“新增文件”。\r\n"
     L"同一个文件在左右两侧的同名条目各对应自己那一份改动，两边看到的内容不一样。"
     L"仓库还没有任何提交时以空树为基准，暂存的新文件照样能看。";
-constexpr std::wstring_view kTipCoauthor = L"合作者条目的增删尚未实现，按钮保持禁用。";
+constexpr std::wstring_view kTipSummary =
+    L"标题：单行、必填，不能全是空白。\r\n"
+    L"不要求任何前缀格式（feat:/fix: 之类一概不检查），程序也不会替你改写、翻译或润色文字。\r\n"
+    L"校验结论即时写在上方“任务状态”那一行。";
+constexpr std::wstring_view kTipDescription =
+    L"描述：可以空着，也可以多行（Enter 换行）。\r\n"
+    L"合成提交信息时的排版是：标题、空一行、描述、空一行、合作者 trailer；"
+    L"描述中间的空行与行尾文字原样保留。\r\n"
+    L"行尾统一按 LF 处理（界面里输入的是 CRLF，不会带进提交信息）。";
+constexpr std::wstring_view kTipAuthor =
+    L"作者：写成「姓名 <邮箱>」。\r\n"
+    L"初值取自这个仓库的有效 Git 配置（user.name / user.email），优先序由 Git 自己决定："
+    L"仓库本体的 .git/config 优先生效，其次才是用户与系统配置，includeIf 也一样认。\r\n"
+    L"在这里改动只影响这一次提交，本程序不会写回你的任何 Git 配置文件。\r\n"
+    L"提交者身份仍由有效 Git 配置决定，不在这里输入；配置凑不出完整身份时会在这里提示你。";
+constexpr std::wstring_view kTipCoauthor =
+    L"合作者：可以一条也没有，也可以多条。\r\n"
+    L"添加／修改用输入框（Enter 确定，Esc 取消），删除按列表里的选中项（可多选）。\r\n"
+    L"每条同样要写成「姓名 <邮箱>」；格式不对时输入框会说明原因并保持打开，"
+    L"不会把坏条目收进列表。\r\n"
+    L"每人一条标准 trailer：Co-authored-by: 姓名 <邮箱>，排在提交信息最末。";
+constexpr std::wstring_view kTipCoauthorList =
+    L"双击某一行可以修改那一条合作者。\r\n"
+    L"同一位（姓名相同、邮箱大小写不同也算同一位）在列表里重复添加会被拒绝；"
+    L"提交信息里的重复判定只看描述的最后一段，规则见“描述”的说明。";
 constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月、日。";
 constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
 constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
@@ -96,7 +125,18 @@ constexpr std::wstring_view kPendingNotice =
     L"“加入暂存区 →”已接入：只把选中的未暂存条目交给命令窗口里的 git add，执行后自动重读；"
     L"“← 移出暂存区”也已接入：只把选中的已暂存条目从索引撤回（git restore --staged，尚无提交时改用"
     L"同样只写索引的 git reset -q --），绝不改动工作区文件，执行后自动重读；"
-    L"提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
+    L"提交表单的标题/描述/作者/合作者已接入校验与消息合成（作者初值取自这个仓库的有效 Git 配置，只读不回写）；"
+    L"创建提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
+
+// 切換倉庫時表單內容的去留：只有明確選「否」才會丟棄使用者打過的字，
+// 「取消」與關窗口都按保留處理——丟棄是不可逆的，預設值必須落在安全的那一邊。
+constexpr std::wstring_view kFormSwitchTitle = L"切换仓库：提交表单里已有你输入的内容";
+constexpr std::wstring_view kFormSwitchQuestion =
+    L"仓库要换了，但标题/描述/作者/合作者里还有你输入的内容。\r\n"
+    L"\r\n"
+    L"是：保留这些内容（作者保留下来后不再被新仓库的默认值覆盖）\r\n"
+    L"否：放弃这些内容，改用新仓库的有效 Git 配置重新填作者（作者与提交者时间也回到此刻）\r\n"
+    L"取消：先什么都不改（内容同样保留，稍后自己调整）\r\n";
 
 constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库路径）";
 
@@ -131,6 +171,20 @@ public:
   SuppressRepoEditNotify(const SuppressRepoEditNotify&) = delete;
   SuppressRepoEditNotify& operator=(const SuppressRepoEditNotify&) = delete;
   ~SuppressRepoEditNotify() { flag_ = false; }
+
+private:
+  bool& flag_;
+};
+
+// 同一套抑制規則的提交表單版：程序把「作者」默認值填進輸入框時，EN_CHANGE 一樣會發上來，
+// 若不加抑制，這個自動填入的值就會被記成「使用者親手寫的內容」，
+// 之後換倉庫時既不會更新默認值、又會多問一次「要不要保留」。
+class SuppressCommitFormNotify {
+public:
+  explicit SuppressCommitFormNotify(bool& flag) : flag_(flag) { flag_ = true; }
+  SuppressCommitFormNotify(const SuppressCommitFormNotify&) = delete;
+  SuppressCommitFormNotify& operator=(const SuppressCommitFormNotify&) = delete;
+  ~SuppressCommitFormNotify() { flag_ = false; }
 
 private:
   bool& flag_;
@@ -218,6 +272,10 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(changesPane_.stageRemoveButton(), kTipStageRemove);
   tooltips_.Add(changesPane_.unstagedList(), kTipUnstagedList);
   tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
+  tooltips_.Add(commitForm_.SummaryEdit(), kTipSummary);
+  tooltips_.Add(commitForm_.DescriptionEdit(), kTipDescription);
+  tooltips_.Add(commitForm_.AuthorEdit(), kTipAuthor);
+  tooltips_.Add(commitForm_.CoauthorList(), kTipCoauthorList);
   tooltips_.Add(commitForm_.CoauthorAdd(), kTipCoauthor);
   tooltips_.Add(commitForm_.CoauthorRemove(), kTipCoauthor);
   tooltips_.Add(commitForm_.SyncCheckbox(), kTipTimeSync);
@@ -240,11 +298,14 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), commitForm_.CoauthorAdd(),
-                      commitForm_.CoauthorRemove(), actionBar_.createCommitButton(),
+  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.createCommitButton(),
                       actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
+  // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
+  // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
+  ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
+  ::EnableWindow(commitForm_.CoauthorRemove(), TRUE);
   // 两个暂存方向都已接通，条件与 status 一致：Git 可用 + 仓库已识别 + 没有别的操作在跑。
   // 这里不要求“已选中条目”：没选中也要能点，点了才会得到那句“没有选中就是什么都不做”的说明；
   // 把按钮 disabled 掉反而让用户以为功能坏了。
@@ -297,6 +358,11 @@ std::wstring MainWindow::OperationBanner() const {
   const std::wstring submoduleNote = state_.WorkspaceBanner();
   if (!submoduleNote.empty()) {
     return submoduleNote;
+  }
+  // 提交表单自己的说明（校验结论、合作者增删、作者默认值的来路）。放在这一条通道里，
+  // 是为了让它不和「任务状态」那行的操作结论互相覆盖：两边都是使用者要看的，但看的时机不同。
+  if (!state_.FormNote().empty()) {
+    return state_.FormNote();
   }
   if (app::AppState::kGitOperationsImplemented) {
     return state_.StatusNote();
@@ -416,6 +482,23 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStageRemoveButton:
       if (notifyCode == BN_CLICKED) {
         UnstageSelectedStaged(window);
+      }
+      break;
+    case kIdSummaryEdit:
+    case kIdDescriptionEdit:
+    case kIdAuthorEdit:
+      if (notifyCode == EN_CHANGE) {
+        OnCommitFormEdit(window, commandId);
+      }
+      break;
+    case kIdCoauthorAdd:
+      if (notifyCode == BN_CLICKED) {
+        AddCoauthor(window);
+      }
+      break;
+    case kIdCoauthorRemove:
+      if (notifyCode == BN_CLICKED) {
+        RemoveSelectedCoauthors(window);
       }
       break;
     default:
@@ -636,6 +719,9 @@ void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalize
     app::RepoState repo;
     repo.status = app::RepoLoadStatus::detecting;
     state_.SetRepo(std::move(repo));
+    // 上一个仓库读来的身份默认值同样要作废：新仓库的配置可能完全不同，
+    // 留着旧值会让界面把「旧仓库的默认作者」显示成新仓库的。
+    state_.SetAuthor(app::AuthorState{});
     // 换仓库的第一步就是作废旧身份并清空旧列表：识别还没回来时宁可看到“正在读取”，
     // 也不能让上一个仓库的未暂存/已暂存条目留在屏上被当成当前状态。
     refreshCycleActive_ = false;
@@ -677,6 +763,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   tasks_.UnbindRepository();
   refreshCycleActive_ = false;
   ClearWorkspace();
+  state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
   // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
   state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
                                               : message);
@@ -704,6 +791,7 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
     tasks_.UnbindRepository();
     refreshCycleActive_ = false;
     ClearWorkspace();
+    state_.SetAuthor(app::AuthorState{});
     UpdateCommandAvailability();
     RefreshTexts(window);
     return;
@@ -719,6 +807,11 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
   } else if (!wasRefresh) {
     state_.SetStatusNote(state_.Repo().detection.message);
   }
+  // 表单内容属于「哪一个工作区」在这里定案：换了仓库而表单里已有用户输入时，
+  // 由用户当场决定保留还是放弃，程序不替人猜，也不会让旧作者悄悄变成新仓库的默认值。
+  ResolveFormOnRepositorySwitch(window, FormRepositoryKey());
+  // 作者默认值与摘要、列表共用这一次刷新：识别成功后一起重读，不另建触发机制。
+  RequestAuthorConfig(window);
   UpdateCommandAvailability();
   StartWorkspaceRead(window);
   RefreshTexts(window);
@@ -1089,6 +1182,285 @@ void MainWindow::UnstageSelectedStaged(HWND window) {
   static_cast<void>(RunStagingPlan(window, plan, words));
 }
 
+void MainWindow::OnCommitFormEdit(HWND window, int controlId) {
+  if (suppressCommitFormNotify_) {
+    return;  // 程序回填的作者默認值不是使用者的編輯。
+  }
+  using Field = app::CommitFormSession::Field;
+  switch (controlId) {
+    case kIdSummaryEdit:
+      formSession_.NoteUserEdit(Field::subject);
+      break;
+    case kIdDescriptionEdit:
+      formSession_.NoteUserEdit(Field::description);
+      break;
+    case kIdAuthorEdit: {
+      const std::wstring text = GetControlText(commitForm_.AuthorEdit());
+      if (text.empty()) {
+        // 作者欄被清空＝「我要用倉庫配置裡的默認值」。不給這條退路，
+        // 用過一次作者欄就再也拿不到默認值，使用者只能反覆手打同一個身份。
+        formSession_.NoteAuthorCleared();
+        RunFormValidation(window, L"作者栏空着：下次读到这个仓库的有效配置时会自动填上，也可以直接写「姓名 <邮箱>」。");
+        return;
+      }
+      formSession_.NoteUserEdit(Field::author);
+      break;
+    }
+    default:
+      return;  // 表單裡其它控件的通知與本函數無關（時間控件不構成本表單的正文）。
+  }
+  RunFormValidation(window);
+}
+
+void MainWindow::RunFormValidation(HWND window, std::wstring_view prefixNote) {
+  // 校驗與合成規則全在 git/commit_message 裡；界面只負責把當前表單內容交給它、再把結論顯示出來。
+  // 一張沒人動過的空表單不值得佔用底部說明：那裡該顯示「哪些功能還沒接入」。
+  // 只有「讀配置讀出了問題」這一類前因，才允許在使用者還沒開始寫的時候顯形。
+  if (!formSession_.HasUserContent()) {
+    if (prefixNote.empty()) {
+      return;
+    }
+    state_.SetFormNote(std::wstring(prefixNote));
+    RefreshTexts(window);
+    return;
+  }
+  const git::CommitFormData data = commitForm_.Capture();
+  const git::CommitFormValidity validity =
+      git::ValidateCommitForm(data, state_.Author().config.CommitterState());
+  std::wstring note = validity.StatusText();
+  if (!prefixNote.empty()) {
+    note = std::wstring(prefixNote) + L" " + note;
+  }
+  state_.SetFormNote(note);
+  RefreshTexts(window);
+}
+
+platform::IdentityPromptSpec MainWindow::MakeCoauthorPrompt(const std::wstring& title,
+                                                           const std::wstring& initial,
+                                                           int editingRow) const {
+  platform::IdentityPromptSpec spec;
+  spec.title = title;
+  spec.label = L"合作者（姓名 <邮箱>）";
+  spec.initialValue = initial;
+  spec.font = metrics_.Font();
+  spec.layout.margin = metrics_.Margin();
+  spec.layout.gap = metrics_.RowGap();
+  spec.layout.width = metrics_.Scale(320);
+  spec.layout.labelHeight = metrics_.LabelHeight();
+  spec.layout.editHeight = metrics_.ControlHeight();
+  spec.layout.noteHeight = 2 * metrics_.LabelHeight();  // 校驗說明留兩行，長原因不被裁掉。
+  spec.layout.buttonWidth = metrics_.ButtonWidth(L"确定");
+  spec.layout.buttonHeight = metrics_.ControlHeight();
+
+  // 校驗在框裡跑：格式不對或與既有條目重複時不關閉、原地把原因寫給使用者。
+  // 比較鍵由 git/commit_identity 決定（姓名摺疊空白、郵箱只摺疊 ASCII 大小寫），界面不另立一套規則。
+  const std::vector<std::wstring> existing = commitForm_.Coauthors();
+  spec.validate = [existing, editingRow](const std::wstring& text) -> std::wstring {
+    const std::wstring formatIssue = git::ValidateGitIdentity(text, L"合作者");
+    if (!formatIssue.empty()) {
+      return formatIssue;
+    }
+    const std::wstring key = git::CanonicalIdentityKey(text);
+    for (size_t index = 0; index < existing.size(); ++index) {
+      if (static_cast<int>(index) == editingRow) {
+        continue;  // 修改自己那一條時不與自己重複。
+      }
+      if (git::CanonicalIdentityKey(existing[index]) == key) {
+        return L"第 " + std::to_wstring(index + 1) +
+               L" 条已经是同一位合作者（邮箱大小写不同也算同一位），不需要重复。";
+      }
+    }
+    return {};
+  };
+  return spec;
+}
+
+void MainWindow::AddCoauthor(HWND window) {
+  const platform::IdentityPromptResult entered =
+      platform::PromptForIdentity(window, MakeCoauthorPrompt(L"添加合作者", L"", -1));
+  if (!entered.accepted) {
+    state_.SetFormNote(L"没有添加合作者：输入框已取消，列表与表单内容都没改动。");
+    RefreshTexts(window);
+    return;
+  }
+  git::GitIdentity parsed;
+  std::wstring error;
+  if (!git::ParseGitIdentity(entered.value, &parsed, &error, L"合作者")) {
+    // 輸入框已經校過一次，走到這裡只能是環境異常；照實報告，不把壞條目收進列表。
+    state_.SetFormNote(L"这条合作者没有收进列表：" + error);
+    RefreshTexts(window);
+    return;
+  }
+  std::vector<std::wstring> entries = commitForm_.Coauthors();
+  // 收進模型的是修剪過的寫法：頭尾空白不會進提交信息，也不影響 Co-authored-by 的行數。
+  entries.push_back(parsed.Format());
+  commitForm_.SetCoauthors(std::move(entries));
+  formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  RunFormValidation(window);
+}
+
+void MainWindow::RemoveSelectedCoauthors(HWND window) {
+  const std::vector<int> rows = commitForm_.SelectedCoauthorRows();
+  if (rows.empty()) {
+    state_.SetFormNote(L"没有选中任何合作者条目，因此列表没有改动。请在“合作者”里点选要删除的行（可多选）。");
+    RefreshTexts(window);
+    return;
+  }
+  std::vector<std::wstring> entries = commitForm_.Coauthors();
+  // 倒序刪除：行號是模型下標，正序刪會讓後面的行號全部錯位。
+  for (auto it = rows.rbegin(); it != rows.rend(); ++it) {
+    const int row = *it;
+    if (row < 0 || static_cast<size_t>(row) >= entries.size()) {
+      continue;  // 列表剛被重建過的殘留行號：跳過，不憑空刪掉別的條目。
+    }
+    entries.erase(entries.begin() + row);
+  }
+  commitForm_.SetCoauthors(std::move(entries));
+  formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  RunFormValidation(window, L"已删除选中的合作者条目。");
+}
+
+void MainWindow::EditCoauthorAt(HWND window, int row) {
+  const std::vector<std::wstring> current = commitForm_.Coauthors();
+  if (row < 0 || static_cast<size_t>(row) >= current.size()) {
+    state_.SetFormNote(L"这一行已不在合作者列表里（列表刚被重建过），请重新双击。");
+    RefreshTexts(window);
+    return;
+  }
+  const platform::IdentityPromptResult entered =
+      platform::PromptForIdentity(window, MakeCoauthorPrompt(L"修改合作者", current[static_cast<size_t>(row)], row));
+  if (!entered.accepted) {
+    state_.SetFormNote(L"没有改动这条合作者：输入框已取消。");
+    RefreshTexts(window);
+    return;
+  }
+  git::GitIdentity parsed;
+  std::wstring error;
+  if (!git::ParseGitIdentity(entered.value, &parsed, &error, L"合作者")) {
+    state_.SetFormNote(L"这条合作者没有被改上去：" + error);
+    RefreshTexts(window);
+    return;
+  }
+  std::vector<std::wstring> entries = current;
+  entries[static_cast<size_t>(row)] = parsed.Format();
+  commitForm_.SetCoauthors(std::move(entries));
+  commitForm_.SelectCoauthorRows({row});  // 重建列表會丟掉選中項，改完還讓它停在原來那一行。
+  formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  RunFormValidation(window);
+}
+
+std::wstring MainWindow::FormRepositoryKey() const {
+  const std::wstring& root = state_.Repo().detection.root;
+  if (root.empty()) {
+    return {};
+  }
+  // 只按工作區根判「是不是同一個倉庫」：換 Git 程序不改變 user.name/user.email 的取值，
+  // 不該為此多問一次要不要保留表單。
+  return git::CanonicalPathKey(root);
+}
+
+void MainWindow::ResolveFormOnRepositorySwitch(HWND window, const std::wstring& key) {
+  if (key.empty()) {
+    return;  // 沒有可用的工作區根（識別失敗那條路已經把身份清掉），不動表單狀態。
+  }
+  if (!formSession_.NeedsSwitchDecision(key)) {
+    formSession_.BindRepository(key);
+    return;
+  }
+  // 這裡一定要讓使用者當場選：悄悄沿用會把舊倉庫的默認作者帶進新倉庫，
+  // 悄悄清空會把使用者打了幾百字的標題與描述丟掉——兩者都不可逆，程序無權取捨。
+  const int answer = ::MessageBoxW(window, std::wstring(kFormSwitchQuestion).c_str(),
+                                   std::wstring(kFormSwitchTitle).c_str(),
+                                   MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
+  if (answer == IDNO) {
+    {
+      const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+      commitForm_.ClearFields();
+      const SYSTEMTIME now = platform::CurrentLocalTime();
+      commitForm_.SetTimes(now, now);
+    }
+    formSession_.ChooseDiscard(key);
+    state_.SetFormNote(L"已放弃原来输入的表单内容；作者改用这个仓库的有效 Git 配置。");
+  } else {
+    // 「是」與「取消」都走保留：只有明確選「否」才丟棄。關閉對話框（等取消）不得吃掉使用者的字。
+    formSession_.ChooseKeep(key);
+    state_.SetFormNote(answer == IDYES
+                             ? L"已保留你输入的表单内容；这里的作者保留下来后不再被新仓库的默认值覆盖。"
+                             : L"表单内容一律没动。想改用新仓库的默认作者，清空“作者”那一栏即可。");
+  }
+  RefreshTexts(window);
+}
+
+void MainWindow::RequestAuthorConfig(HWND window) {
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    state_.SetAuthor(app::AuthorState{});
+    return;
+  }
+  app::AuthorState loading;
+  loading.status = app::AuthorLoadStatus::loading;
+  state_.SetAuthor(std::move(loading));
+
+  platform::AuthorConfigRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kAuthorConfigTimeoutMs;
+  // 只讀查詢：git config --get 不寫設定檔、不碰索引，也不需要命令窗口。
+  authorWorker_.Request(window, kAuthorConfigCompleted, std::move(request),
+                        [](const platform::AuthorConfigRequest& pending) {
+                          return platform::RunAuthorIdentityLoad(pending);
+                        });
+}
+
+void MainWindow::OnAuthorConfigCompleted(HWND window, uint64_t completionSerial) {
+  platform::AuthorConfigOutcome outcome;
+  if (!authorWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 期间又提交了更晚的读取：这份结果作废。
+  }
+  const std::wstring currentRoot = state_.Repo().detection.root;
+  if (currentRoot.empty() || !git::PathsEqualFolded(currentRoot, outcome.repositoryDirectory)) {
+    // 迟到的结果属于另一个工作区：既不落地，也绝不动作者输入框。
+    return;
+  }
+
+  app::AuthorState author;
+  author.status =
+      outcome.config.ReadFailed() ? app::AuthorLoadStatus::failed : app::AuthorLoadStatus::loaded;
+  author.config = std::move(outcome.config);
+  const git::AuthorIdentityConfig& config = author.config;
+  const std::wstring identity = config.Identity();
+  const std::wstring notice = git::BuildIdentityConfigNotice(config);
+  const git::CommitterIdentityState committer = config.CommitterState();
+  state_.SetAuthor(std::move(author));
+
+  if (committer != git::CommitterIdentityState::available) {
+    // 查不到或配置凑不出身份：作者欄一律不動（包括查詢失敗的那次），
+    // 否則界面會把「讀不到」顯示成「這個倉庫沒有作者」，使用者剛打的身份憑空消失。
+    RunFormValidation(window, notice);
+    return;
+  }
+  if (!formSession_.AcceptsAuthorDefault()) {
+    RunFormValidation(window, L"作者用的是你输入的内容，仓库配置里的身份（" + identity +
+                                  L"）没有覆盖它。");
+    return;
+  }
+  if (identity != formSession_.AppliedAuthorDefault()) {
+    // 只有值真的變了才重寫輸入框：原地重寫會抹掉光標與選區，而這裡每 0.3 秒的刷新都會走到。
+    SetAuthorField(window, identity);
+    RunFormValidation(window, L"作者已按这个仓库的有效 Git 配置填好。");
+    return;
+  }
+  RunFormValidation(window);
+}
+
+void MainWindow::SetAuthorField(HWND window, const std::wstring& text) {
+  static_cast<void>(window);
+  {
+    const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+    commitForm_.SetAuthorText(text);
+  }
+  formSession_.NoteAuthorDefaultApplied(text);
+}
+
 void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
   const auto refuse = [&](std::wstring_view message) {
     state_.SetStatusNote(std::wstring(message));
@@ -1317,8 +1689,8 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       OnCommand(window, wParam);
       return 0;
     case WM_NOTIFY: {
-      // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认这两块更改列表，
-      // 其余通知（包括提交表单里的控件）一律交回默认处理，不替别人吞掉消息。
+      // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认这两块更改列表与合作者列表，
+      // 其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
       const auto* header = reinterpret_cast<const NMHDR*>(lParam);
       if (header != nullptr && header->code == NM_DBLCLK &&
           (header->idFrom == kIdUnstagedList || header->idFrom == kIdStagedList)) {
@@ -1327,6 +1699,12 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         // 不把选中的其它文件一起塞进同一个窗口（一次一条才看得清，命令也只限定一条路径）。
         OnChangesListDoubleClicked(window, header->hwndFrom,
                                   activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      if (header != nullptr && header->code == NM_DBLCLK && header->idFrom == kIdCoauthorList) {
+        // 双击合作者那一行＝修改它（行号 == 模型下标，和更改列表同一套约定）。
+        const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
+        EditCoauthorAt(window, activated != nullptr ? activated->iItem : -1);
         return 0;
       }
       return ::DefWindowProcW(window, message, wParam, lParam);
@@ -1354,6 +1732,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kWorkspaceStatusCompleted:
       OnWorkspaceLoadCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kAuthorConfigCompleted:
+      OnAuthorConfigCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -1372,6 +1753,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       gitWorker_.Shutdown();
       repoWorker_.Shutdown();
       workspaceWorker_.Shutdown();
+      authorWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

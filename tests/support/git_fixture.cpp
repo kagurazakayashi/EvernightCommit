@@ -548,4 +548,34 @@ platform::WorkspaceStatusDeps GitFixture::MakeStatusDeps() {
   return deps;
 }
 
+platform::AuthorConfigDeps GitFixture::MakeAuthorConfigDepsForTest() {
+  platform::AuthorConfigDeps deps;
+  deps.runner = [this](const std::wstring& exePath, const std::wstring& directory,
+                       const std::vector<std::wstring>& arguments) -> git::GitQueryResult {
+    // 與工作區讀取同一把執行器：環境塊裡 GIT_CONFIG_GLOBAL 指向夾具檔案、NOSYSTEM 屏蔽系統設定，
+    // 因此這裡讀到的「有效身份」只可能是本次臨時倉庫與臨時用户設定湊出來的。
+    GitRun run = RunWith(exePath.empty() ? gitExe_ : exePath, arguments, ResolveOwnedDirectory(directory));
+    git::GitQueryResult result;
+    result.started = run.started;
+    result.timedOut = run.timedOut;
+    result.exited = run.exited;
+    result.exitCode = static_cast<int>(run.exitCode);
+    result.utf16Output = std::move(run.out);
+    result.utf16Error = std::move(run.err);
+    return result;
+  };
+  return deps;
+}
+
+void GitFixture::WriteUserConfig(const std::string& utf8Content) {
+  std::ofstream file(std::filesystem::path(emptyConfig_), std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) {
+    throw PrerequisiteFailure("无法写入夹具的用户配置文件：" + WideToUtf8(emptyConfig_));
+  }
+  file.write(utf8Content.data(), static_cast<std::streamsize>(utf8Content.size()));
+  if (file.fail()) {
+    throw PrerequisiteFailure("写入夹具的用户配置文件失败：" + WideToUtf8(emptyConfig_));
+  }
+}
+
 }  // namespace gc::test

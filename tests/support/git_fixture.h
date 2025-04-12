@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "platform/windows/author_config.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/workspace_status.h"
 
@@ -109,6 +110,13 @@ public:
   [[nodiscard]] platform::RepoDetectDeps MakeDetectDeps();
   // 同上，装配工作区状态读取（git status）的执行依赖。
   [[nodiscard]] platform::WorkspaceStatusDeps MakeStatusDeps();
+  // 同上，装配「读有效 Git 身份」（git config --get）的执行依赖。
+  // 隔离环境里 GIT_CONFIG_GLOBAL 指向夹具自己的档案、GIT_CONFIG_NOSYSTEM=1，
+  // 因此「使用者層」就是這個臨時檔案，絕不會讀到本机真实的用户与系统配置。
+  [[nodiscard]] platform::AuthorConfigDeps MakeAuthorConfigDepsForTest();
+
+  // 覆寫夾具的「使用者層」設定檔內容（UTF-8 原始位元組）。
+  void WriteUserConfig(const std::string& utf8Content);
 
 private:
   // 把 baseEnvironment_ 拼成 NULL 结尾的 Unicode 环境块。
