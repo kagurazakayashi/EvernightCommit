@@ -60,8 +60,10 @@ add_library(gc_core STATIC
   src/app/task_coordinator.cpp
   src/git/author_config.cpp
   src/git/command_window.cpp
+  src/git/commit_date.cpp
   src/git/commit_identity.cpp
   src/git/commit_message.cpp
+  src/git/commit_plan.cpp
   src/git/diff_view.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp
@@ -77,9 +79,11 @@ add_library(gc_platform STATIC
   src/platform/windows/ansi_text.cpp
   src/platform/windows/author_config.cpp
   src/platform/windows/command_window_runner.cpp
+  src/platform/windows/commit_message_file.cpp
   src/platform/windows/environment_block.cpp
   src/platform/windows/git_toolchain.cpp
   src/platform/windows/identity_prompt.cpp
+  src/platform/windows/local_time.cpp
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp

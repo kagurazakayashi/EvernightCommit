@@ -65,7 +65,12 @@ public:
   // 依赖 Git 的“写操作”（暂存/提交/撤回/fetch/pull/push）是否已接通；后续步骤逐项打开。
   // 打开前按钮保持禁用；打开后还要 GitUsable() 且 RepoUsable() 并无其他操作在跑才允许触发。
   // 只读路径（仓库识别、工作区读取、手动刷新）不受本开关约束，已各自接入。
+  // 剩下的写操作（撤回/fetch/pull/push）仍归本开关：本步骤只单独打开「创建提交」。
   static constexpr bool kGitOperationsImplemented = false;
+
+  // 「创建提交」是否已接通：只影响这一个按钮，
+  // 这样后续步骤接「撤回最近提交」时可以单独打开它，不必连带放开 fetch/pull/push。
+  static constexpr bool kCreateCommitImplemented = true;
 
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }
   void SetGitExePath(std::wstring path) { info_.gitExePath = std::move(path); }

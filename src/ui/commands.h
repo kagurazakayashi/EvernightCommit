@@ -62,6 +62,7 @@ enum ControlId : int {
   kIdUndoCommitButton = 192,
   kIdPushButton = 193,
   kIdBottomStatusLabel = 194,
+  kIdTimeResetButton = 195,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;

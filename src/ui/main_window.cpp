@@ -10,11 +10,14 @@
 #include <vector>
 
 #include "git/commit_identity.h"
+#include "git/commit_message.h"
 #include "git/diff_view.h"
 #include "git/staging_plan.h"
 #include "git/workspace_model.h"
+#include "platform/windows/commit_message_file.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/identity_prompt.h"
+#include "platform/windows/local_time.h"
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
 #include "platform/windows/pathspec_file.h"
@@ -64,9 +67,17 @@ constexpr std::wstring_view kTipRefresh =
     L"重新读取当前仓库的摘要与两个更改列表：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
     L"在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。";
 constexpr std::wstring_view kTipCreateCommit =
-    L"该操作尚未实现，按钮保持禁用。对应命令：git commit\r\n"
-    L"表单里的标题、描述、作者与合作者已经接入校验与消息合成：这里的文字怎么拼成提交信息、"
-    L"哪些写法会被拒绝，都会即时写在“任务状态”那一行。";
+    L"把“已暂存的更改”里现在的索引内容提交出去：在新命令窗口里执行 git commit，显示真实命令与输出，"
+    L"执行结束后窗口保留，本程序自动重读仓库状态。\r\n"
+    L"点击后先做一次只读重读（仓库摘要 + git status），确认框里摆出的是刚刚读回的现状："
+    L"提交范围、提交信息、两个身份与两个时间；界面原先显示的东西若已经变了，会先说明以刚读回的为准。\r\n"
+    L"只提交索引里那一份：绝不带 -a，也不会替你暂存任何文件；未暂存的改动留在工作区。\r\n"
+    L"提交信息走临时 UTF-8 文件（git commit -F），正文不进命令行；命令里带 --cleanup=verbatim，"
+    L"所以你写的空行与行尾文字不会被 Git 或任何 commit.cleanup 设置收拾掉。\r\n"
+    L"作者身份、作者时间与提交者时间只覆盖这一次 Git 子进程：不写你的环境变量，也不碰任何配置文件；"
+    L"提交者身份仍由这个仓库的有效 Git 配置决定。\r\n"
+    L"命令里没有 --no-verify：仓库的 hooks 与签名设置照常生效，需要口令时由命令窗口自己提问。\r\n"
+    L"正在合并／变基／拣选等流程没走完时本程序不做提交，也不会替你终止那种流程。";
 constexpr std::wstring_view kTipUndoCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git reset --soft HEAD^";
 constexpr std::wstring_view kTipPush = L"该操作尚未实现，按钮保持禁用。对应命令：git push";
 constexpr std::wstring_view kTipUnstagedList =
@@ -113,9 +124,19 @@ constexpr std::wstring_view kTipCoauthorList =
     L"双击某一行可以修改那一条合作者。\r\n"
     L"同一位（姓名相同、邮箱大小写不同也算同一位）在列表里重复添加会被拒绝；"
     L"提交信息里的重复判定只看描述的最后一段，规则见“描述”的说明。";
-constexpr std::wstring_view kTipDateInput = L"可用键盘直接输入年、月、日。";
-constexpr std::wstring_view kTipClockInput = L"可用键盘直接输入时、分、秒；本机时区见右侧说明。";
-constexpr std::wstring_view kTipTimeSync = L"勾选后，创建提交时以作者时间同步提交者时间。提交功能尚未接入。";
+constexpr std::wstring_view kTipDateInput =
+    L"可用键盘直接输入年、月、日；范围限于 1970 到 2099 年（Git 实测收不下更早或更晚的时刻）。";
+constexpr std::wstring_view kTipClockInput =
+    L"可用键盘直接输入时、分、秒。右侧说明里的偏移是这个日期时间在本机实际生效的 UTC 偏移"
+    L"（夏令时前后可能不同），交给 Git 的值带着它，因此不会按“读它的那个进程的时区”被挪动。";
+constexpr std::wstring_view kTipTimeSync =
+    L"勾选（默认）：提交者时间跟着作者时间走，上面那两块控件同时置灰，改一处就行。\r\n"
+    L"取消勾选：提交者时间可以自己单独设，例如让提交时刻晚于作者时刻。\r\n"
+    L"这里的“提交者时间”就是 GIT_COMMITTER_DATE，只覆盖这一次提交。";
+constexpr std::wstring_view kTipTimeReset =
+    L"把作者时间与提交者时间都改回此刻，并清掉“你亲手改过时间”的记号。\r\n"
+    L"没人改过时间时，创建提交用的就是提交那一刻的时间（不是程序启动时的时刻）；"
+    L"手动改过之后，那份时间会一直保留到点这个按钮或提交成功为止。";
 constexpr std::wstring_view kPendingNotice =
     L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
     L"未暂存/已暂存列表已按只读 git status 填充，“刷新”可随时重读且不弹命令窗口，"
@@ -126,7 +147,9 @@ constexpr std::wstring_view kPendingNotice =
     L"“← 移出暂存区”也已接入：只把选中的已暂存条目从索引撤回（git restore --staged，尚无提交时改用"
     L"同样只写索引的 git reset -q --），绝不改动工作区文件，执行后自动重读；"
     L"提交表单的标题/描述/作者/合作者已接入校验与消息合成（作者初值取自这个仓库的有效 Git 配置，只读不回写）；"
-    L"创建提交/撤回/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
+    L"“创建提交”也已接入：点击后先只读重读仓库现状再给确认框，提交范围只限索引里那一份，"
+    L"作者身份与两个时间只覆盖这一次 Git 子进程，真实的 git commit 在命令窗口里执行；"
+    L"撤回提交/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 // 切換倉庫時表單內容的去留：只有明確選「否」才會丟棄使用者打過的字，
 // 「取消」與關窗口都按保留處理——丟棄是不可逆的，預設值必須落在安全的那一邊。
@@ -246,9 +269,11 @@ void MainWindow::OnCreate(HWND window) {
 
   programInfo_ = L"EvernightCommit 界面骨架 v" + platform::Utf8ToUtf16(GC_VERSION_STRING) + L"（" +
                  platform::Utf8ToUtf16(GC_BUILD_TYPE) + L"）";
-  commitForm_.SetTimeZoneText(platform::LocalTimeZoneLabel());
   const SYSTEMTIME now = platform::CurrentLocalTime();
   commitForm_.SetTimes(now, now);
+  // 本机时区那句说明与「时间同步修改」的联动都在这一步落地：控件刚设完初值，
+  // 偏移要按那一段时刻算，提交者控件的可用状态要跟勾选项一致。
+  RefreshTimeControlsState(window);
 
   ApplyFonts(window);
   tooltips_.Create(window, metrics_.Font());
@@ -279,6 +304,7 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(commitForm_.CoauthorAdd(), kTipCoauthor);
   tooltips_.Add(commitForm_.CoauthorRemove(), kTipCoauthor);
   tooltips_.Add(commitForm_.SyncCheckbox(), kTipTimeSync);
+  tooltips_.Add(commitForm_.TimeResetButton(), kTipTimeReset);
   tooltips_.Add(commitForm_.AuthorDate(), kTipDateInput);
   tooltips_.Add(commitForm_.AuthorClock(), kTipClockInput);
   tooltips_.Add(commitForm_.CommitterDate(), kTipDateInput);
@@ -298,10 +324,17 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.createCommitButton(),
-                      actionBar_.undoCommitButton(), actionBar_.pushButton()}) {
+  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.undoCommitButton(),
+                      actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
+  // 「创建提交」单独有自己的接通开关：后续步骤接撤回提交时不该连带放开 fetch/pull/push。
+  const BOOL commitReady =
+      (app::AppState::kCreateCommitImplemented && state_.GitUsable() && state_.RepoUsable() &&
+       !tasks_.OperationInFlight())
+          ? TRUE
+          : FALSE;
+  ::EnableWindow(actionBar_.createCommitButton(), commitReady);
   // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
   // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
   ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
@@ -499,6 +532,27 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdCoauthorRemove:
       if (notifyCode == BN_CLICKED) {
         RemoveSelectedCoauthors(window);
+      }
+      break;
+    case kIdCreateCommitButton:
+      if (notifyCode == BN_CLICKED) {
+        CreateCommit(window);
+      }
+      break;
+    case kIdTimeResetButton:
+      if (notifyCode == BN_CLICKED) {
+        ResetCommitTimesToNow(window);
+      }
+      break;
+    case kIdTimeSyncCheck:
+      if (notifyCode == BN_CLICKED) {
+        // 勾选状态由控件自己翻转，这里只负责把联动规则跟上（置灰哪一半、说明怎么写）。
+        RefreshTimeControlsState(window);
+        state_.SetFormNote(commitForm_.TimeSyncChecked()
+                               ? L"“时间同步修改”已勾选：提交者时间跟着作者时间，"
+                                 L"上面那两块提交者时间控件已置灰。"
+                               : L"“时间同步修改”已取消：作者时间与提交者时间各改各的，两块控件都可用。");
+        RefreshTexts(window);
       }
       break;
     default:
@@ -719,6 +773,9 @@ void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalize
     app::RepoState repo;
     repo.status = app::RepoLoadStatus::detecting;
     state_.SetRepo(std::move(repo));
+    // 换仓库（或换 Git 程序）等于取消那次「等重读后再确认」的创建提交：
+    // 确认框要核对的是这个仓库的现状，仓库都换了，点下的那一次提交自然作废。
+    ClearPendingCommitRead();
     // 上一个仓库读来的身份默认值同样要作废：新仓库的配置可能完全不同，
     // 留着旧值会让界面把「旧仓库的默认作者」显示成新仓库的。
     state_.SetAuthor(app::AuthorState{});
@@ -761,6 +818,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   state_.SetRepo(std::move(repo));
   // 没有可用的工作区身份，就没有任何安全的查询落点：在途结果一律作废，列表清空。
   tasks_.UnbindRepository();
+  ClearPendingCommitRead();  // 同样也没有地方可提交了：那次等确认的创建提交作废。
   refreshCycleActive_ = false;
   ClearWorkspace();
   state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
@@ -837,6 +895,9 @@ void MainWindow::ScheduleRefresh(HWND window) {
 void MainWindow::RunRefreshCycle(HWND window) {
   if (!state_.GitUsable() || state_.Info().repoPath.empty()) {
     refreshCycleActive_ = false;
+    // 这一轮根本不会发起读取：等着「读回来再确认」的那次创建提交必须一并取消，
+    // 否则那个标记会一直挂着，将来某次无关的读取完成时凭空弹出确认框。
+    ClearPendingCommitRead();
     return;
   }
   // 一次刷新同时覆盖顶部摘要与两个列表：在外部终端里切分支、提交、拉取之后，
@@ -895,6 +956,24 @@ void MainWindow::OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial
   ApplyWorkspaceLists();
   UpdateCommandAvailability();
   RefreshTexts(window);
+  if (pendingCommit_.waitingForRead) {
+    // 这一次读取是「创建提交」点下去之后发起的核对：现状读回来了，才轮到确认框出场。
+    pendingCommit_.waitingForRead = false;
+    if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+      AbandonCommitAttempt(
+          window,
+          L"提交前核对仓库现状时没能读到 git status：" + state_.Workspace().message +
+              L" 因此没有打开命令窗口，也没有对仓库做任何改动。请改正后再点一次“创建提交”。",
+          {});
+      return;
+    }
+    ConfirmAndLaunchCommit(window);
+    if (tasks_.RefreshStillQueued()) {
+      // 核对期间又有人点过刷新：这一次不能因为弹了确认框就被吞掉。
+      ScheduleRefresh(window);
+    }
+    return;
+  }
   if (tasks_.RefreshStillQueued()) {
     ScheduleRefresh(window);  // 在途期间又请求过刷新：合并成这一趟补读。
   }
@@ -931,6 +1010,7 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
   if (!tasks_.BeginOperation(operation.displayName, &serial, options.policy)) {
     // 槽位被占：这次根本没跑起来，清单文件也就没人会去读，立刻回收。
     platform::RemoveNulPathspecFile(options.pathspecFile);
+    platform::RemoveCommitMessageFile(options.messageFile);
     return false;  // 同一时刻只跑一个命令窗口操作（按钮此时也已禁用）。
   }
   uint64_t operationId = 0;
@@ -940,13 +1020,15 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
     const app::OperationOutcome outcome =
         tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
     platform::RemoveNulPathspecFile(options.pathspecFile);  // Git 从未运行，文件同样没人要读了。
+    platform::RemoveCommitMessageFile(options.messageFile);
     state_.SetStatusNote(outcome.note);
     UpdateCommandAvailability();
     RefreshTexts(window);
     return false;
   }
-  activeOperation_ = ActiveOperation{serial,  operationId,           operation.displayName,
-                                     options.scopeNotice, options.viewKind, options.pathspecFile};
+  activeOperation_ = ActiveOperation{serial,     operationId,           operation.displayName,
+                                     options.scopeNotice, options.viewKind, options.pathspecFile,
+                                     options.messageFile, options.commitOperation};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1551,6 +1633,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const unsigned long long serial = activeOperation_.serial;
   const std::optional<git::DiffViewKind> viewKind = activeOperation_.viewKind;
   const std::wstring pathspecFile = activeOperation_.pathspecFile;
+  const std::wstring messageFile = activeOperation_.messageFile;
+  const bool commitOperation = activeOperation_.commitOperation;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
   // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/scriptNeverRan 里
@@ -1562,11 +1646,22 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
                               result.completion == git::CommandCompletion::scriptNeverRan;
   if (gitWillNotRead) {
     platform::RemoveNulPathspecFile(pathspecFile);
+    platform::RemoveCommitMessageFile(messageFile);
   }
   const app::OperationOutcome outcome =
       tasks_.FinishOperation(serial, result.completion, result.exitCode, result.failureReason);
   if (!outcome.recognised) {
     return;
+  }
+  // 「创建提交」的收尾只认 Git 的退出码：成功才清已提交的正文，失败时表单一个字都不动，
+  // 用户可以直接改好再点一次（那种场合最不该丢的就是他刚写下来的东西）。
+  if (commitOperation) {
+    if (outcome.succeeded) {
+      AfterCommitSucceeded(window);
+    } else {
+      state_.SetFormNote(L"提交没有成功：标题、描述、作者与合作者一个字都没动，"
+                         L"改好之后再点一次“创建提交”。命令窗口里留着 Git 的完整输出。");
+    }
   }
   // 结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
   std::wstring conclusion = outcome.note;
@@ -1641,6 +1736,263 @@ void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
   DoLayout(window);
 }
 
+bool MainWindow::BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
+                                       std::wstring* refusal) const {
+  *out = git::CommitTimeChoice{};
+  const platform::LocalInstant instant = platform::ResolveLocalWallTime(wall);
+  if (!instant.valid) {
+    *refusal = instant.failureReason;
+    return false;
+  }
+  std::string gitDate;
+  std::wstring dateRefusal;
+  if (!git::FormatGitInternalDate(instant.utcEpochSeconds, instant.offsetMinutes, &gitDate,
+                                 &dateRefusal)) {
+    *refusal = dateRefusal;
+    return false;
+  }
+  out->gitDate = std::move(gitDate);
+  out->wall = wall;
+  out->offsetMinutes = instant.offsetMinutes;
+  out->displayText = git::FormatCommitTimeText(wall, instant.offsetMinutes);
+  return true;
+}
+
+void MainWindow::RefreshTimeControlsState(HWND window) {
+  static_cast<void>(window);
+  const bool sync = commitForm_.TimeSyncChecked();
+  // 联动规则要看得见：勾着时提交者那两块控件既跟着作者时间，也置灰，
+  // 否则用户会以为自己填的那一半真的生效了。
+  commitForm_.SetCommitterTimeEnabled(!sync);
+  if (sync) {
+    commitForm_.MirrorCommitterTime();
+  }
+  // 「本机时区」那句说明报的是所选作者时间实际生效的偏移，而不是此刻的偏移：
+  // 挑一个夏令时里的日子时，两者差一个小时，显示错了就等于骗过用户一次。
+  std::wstring text = L"本机时区：" + platform::LocalTimeZoneName();
+  const platform::LocalInstant instant =
+      platform::ResolveLocalWallTime(commitForm_.AuthorWallTime());
+  if (instant.valid) {
+    const std::wstring offset = git::FormatOffsetText(instant.offsetMinutes);
+    text += offset.empty() ? L"｜所选时间的偏移无法表示" : L"｜作者时间 " + offset;
+  } else {
+    text += L"｜所选时间没能换算成一个时刻";
+  }
+  commitForm_.SetTimeZoneText(text);
+}
+
+void MainWindow::ResetCommitTimesToNow(HWND window) {
+  const SYSTEMTIME now = platform::CurrentLocalTime();
+  commitForm_.SetTimes(now, now);  // 同时清掉「用户改过时间」的记号：这是那条明确的退路。
+  RefreshTimeControlsState(window);
+  const platform::LocalInstant instant = platform::CurrentLocalInstant();
+  std::wstring note = L"作者时间与提交者时间都已回到此刻";
+  if (instant.valid) {
+    note += L"：" + git::FormatCommitTimeText(instant.wall, instant.offsetMinutes);
+  }
+  note += L"。“恢复当前时间”就是改错之后的退路；没人改过时间时，提交用的就是提交那一刻。";
+  state_.SetFormNote(note);
+  RefreshTexts(window);
+}
+
+void MainWindow::CreateCommit(HWND window) {
+  if (!RequireWritePrerequisites(window, L"创建提交")) {
+    return;
+  }
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+  if (pendingCommit_.waitingForRead) {
+    refuse(L"已经有一次“创建提交”正在核对仓库现状，请等确认框出现，或先取消那一次。");
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    refuse(L"还没读到这个仓库的工作区状态（" + state_.Workspace().message +
+           L"），无法确定要提交什么。请先点“刷新”。");
+    return;
+  }
+
+  // 正文与身份的校验：规则在 git/commit_message 里，这里只把它的答案当执行前提。
+  const git::CommitFormData data = commitForm_.Capture();
+  const git::CommitFormValidity validity =
+      git::ValidateCommitForm(data, state_.Author().config.CommitterState());
+  if (!validity.Ok()) {
+    RunFormValidation(window);
+    refuse(L"表单还没通过校验，因此没有提交任何内容：" + validity.StatusText());
+    return;
+  }
+
+  // 「默认用提交时的当前时间」在这里落地：没人动过时间控件时，先把控件改成此刻，
+  // 让用户亲眼看到要用的到底是哪个时间；应用启动时那个时刻绝不代替它。
+  if (!commitForm_.TimesUserEdited()) {
+    const SYSTEMTIME now = platform::CurrentLocalTime();
+    commitForm_.SetTimes(now, now);
+    RefreshTimeControlsState(window);
+  }
+
+  git::CommitTimeChoice authorTime;
+  git::CommitTimeChoice committerTime;
+  std::wstring refusal;
+  if (!BuildCommitTimeChoice(commitForm_.AuthorWallTime(), &authorTime, &refusal)) {
+    refuse(L"作者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
+    return;
+  }
+  if (commitForm_.TimeSyncChecked()) {
+    committerTime = authorTime;  // 同步勾选：提交者时间以作者时间为准（界面也已一致显示）。
+  } else if (!BuildCommitTimeChoice(commitForm_.CommitterWallTime(), &committerTime, &refusal)) {
+    refuse(L"提交者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
+    return;
+  }
+
+  // 记下点击瞬间界面显示的那份摘要，然后发起一次只读重读：
+  // 确认框必须摆出「刚刚读回的仓库现状」，不能拿几分钟前的列表当真。
+  pendingCommit_.captured = git::CapturedSnapshot{};
+  pendingCommit_.captured.valid = true;
+  pendingCommit_.captured.shortSha = state_.Repo().detection.shortSha;
+  pendingCommit_.captured.hasHead = state_.Repo().detection.headResolved;
+  pendingCommit_.captured.stagedItems = state_.WorkspaceModel().staged.size();
+  pendingCommit_.waitingForRead = true;
+  ScheduleRefresh(window);
+  state_.SetStatusNote(L"创建提交前先在后台重读仓库现状（只读查询，不弹命令窗口、不改动仓库），"
+                       L"读回来后给出确认框…");
+  RefreshTexts(window);
+}
+
+void MainWindow::AbandonCommitAttempt(HWND window, std::wstring_view reason,
+                                      std::wstring_view messageFile) {
+  ClearPendingCommitRead();
+  platform::RemoveCommitMessageFile(messageFile);
+  state_.SetStatusNote(std::wstring(reason));
+  RefreshTexts(window);
+}
+
+void MainWindow::ConfirmAndLaunchCommit(HWND window) {
+  const auto abandon = [&](std::wstring_view reason) {
+    AbandonCommitAttempt(window, reason, {});
+  };
+
+  const git::CommitFormData data = commitForm_.Capture();
+  const git::CommitFormValidity validity =
+      git::ValidateCommitForm(data, state_.Author().config.CommitterState());
+  if (!validity.Ok()) {
+    abandon(L"重读之后表单校验没通过，因此没有提交任何内容：" + validity.StatusText());
+    return;
+  }
+  git::GitIdentity author;
+  std::wstring identityError;
+  if (!git::ParseGitIdentity(data.author, &author, &identityError, L"作者")) {
+    abandon(L"作者身份没能拆解成「姓名 <邮箱>」，因此没有提交任何内容：" + identityError);
+    return;
+  }
+
+  git::CommitTimeChoice authorTime;
+  git::CommitTimeChoice committerTime;
+  std::wstring refusal;
+  if (!BuildCommitTimeChoice(commitForm_.AuthorWallTime(), &authorTime, &refusal)) {
+    abandon(L"作者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
+    return;
+  }
+  if (commitForm_.TimeSyncChecked()) {
+    committerTime = authorTime;
+  } else if (!BuildCommitTimeChoice(commitForm_.CommitterWallTime(), &committerTime, &refusal)) {
+    abandon(L"提交者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
+    return;
+  }
+
+  const git::ComposedCommitMessage composed = git::ComposeCommitMessage(data);
+  if (!composed.rejectedCoauthors.empty() || composed.message.empty()) {
+    // 校验已经过了才会走到这里，出现这种组合说明表单内容在校验之后又被改动了：
+    // 宁可不提交，也不按一份没核对过的内容写提交信息。
+    abandon(L"提交信息合成时出现了没能解析的合作者条目，因此没有提交任何内容。"
+            L"请检查“合作者”列表后重新点击“创建提交”。");
+    return;
+  }
+
+  const platform::CommitMessageFileWrite written =
+      platform::WriteCommitMessageFile(composed.message);
+  if (!written.written) {
+    abandon(L"没有打开命令窗口，也没有对仓库做任何改动。写提交信息文件失败：" +
+            written.failureReason);
+    return;
+  }
+
+  git::CommitPlanInput input;
+  input.model = state_.WorkspaceModel();
+  input.detection = state_.Repo().detection;
+  input.workflow = platform::ProbeRepositoryWorkflowState(state_.Repo().detection.absoluteGitDir);
+  input.captured = pendingCommit_.captured;
+  input.committer = state_.Author().config.CommitterState();
+  input.committerIdentityText = state_.Author().config.Identity();
+  input.author = author;
+  input.message = composed.message;
+  input.messageUtf8Bytes = written.payloadBytes;
+  input.messageFilePath = written.path;
+  input.authorTime = authorTime;
+  input.committerTime = committerTime;
+  input.timesSynced = commitForm_.TimeSyncChecked();
+
+  const git::CommitPlan plan = git::BuildCommitPlan(input);
+  ClearPendingCommitRead();
+  if (plan.blocked) {
+    platform::RemoveCommitMessageFile(written.path);  // 没跑 Git，文件也就没人要读了。
+    state_.SetStatusNote(L"没有打开命令窗口，也没有对仓库做任何改动。" + plan.blockedReason);
+    RefreshTexts(window);
+    return;
+  }
+
+  const int answer = ::MessageBoxW(window, plan.previewText.c_str(), L"创建提交前请确认",
+                                   MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+  if (answer != IDOK) {
+    AbandonCommitAttempt(window,
+                         L"已取消：没有打开命令窗口，也没有对仓库做任何改动。刚写的提交信息文件已删除，"
+                         L"表单里的内容一个字都没动。",
+                         written.path);
+    return;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = state_.Repo().detection.root;
+  operation.arguments = plan.arguments;
+  operation.environmentOverrides = plan.environmentOverrides;
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
+                        state_.Repo().detection.root + L"），本次提交 " +
+                        std::to_wstring(plan.stagedItems) + L" 项已暂存内容，等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.messageFile = written.path;
+  options.commitOperation = true;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    // 启动失败时信息文件已由执行路径回收，这里只补一句表单没动的说明。
+    state_.SetStatusNote(L"这次提交没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。"
+                         L"表单里的内容一个字都没动。");
+    RefreshTexts(window);
+    return;
+  }
+  if (!plan.stateChangeNote.empty()) {
+    // 用户已经看过那句「以刚读回的为准」，这一句留在状态栏里，操作结束后还能对上号。
+    state_.SetStatusNote(L"已在命令窗口启动创建提交。" + plan.stateChangeNote);
+  }
+}
+
+void MainWindow::AfterCommitSucceeded(HWND window) {
+  {
+    // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
+    const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+    commitForm_.ClearMessageFields();
+  }
+  formSession_.NoteCommitted();
+  const SYSTEMTIME now = platform::CurrentLocalTime();
+  commitForm_.SetTimes(now, now);
+  RefreshTimeControlsState(window);
+  state_.SetFormNote(L"提交已创建：标题、描述与合作者已清空，作者那一栏留着下次接着用；"
+                     L"两个时间也回到此刻。仓库状态正在重读。");
+}
+
 LRESULT CALLBACK MainWindow::Thunk(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
   MainWindow* self = reinterpret_cast<MainWindow*>(::GetWindowLongPtrW(window, GWLP_USERDATA));
   if (message == WM_NCCREATE) {
@@ -1705,6 +2057,25 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         // 双击合作者那一行＝修改它（行号 == 模型下标，和更改列表同一套约定）。
         const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
         EditCoauthorAt(window, activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      if (header != nullptr && header->code == DTN_DATETIMECHANGE &&
+          (header->idFrom == kIdAuthorDate || header->idFrom == kIdAuthorClock ||
+           header->idFrom == kIdCommitterDate || header->idFrom == kIdCommitterClock)) {
+        // 日期时间控件每改一次都会发这条通知，程序自己写入时同样会发（见 CommitForm 的说明），
+        // 所以那一次必须忽略，否则“没人动过时间”永远不成立，提交时刻就再也回不到“此刻”。
+        if (!commitForm_.AcceptsTimeNotify()) {
+          return 0;
+        }
+        commitForm_.NoteTimesUserEdited();
+        if (commitForm_.TimeSyncChecked() &&
+            (header->idFrom == kIdAuthorDate || header->idFrom == kIdAuthorClock)) {
+          // 同步勾选时只有作者那半边能改：把提交者那一边的显示跟着挪过去，
+          // 让用户看到的两块控件与真正交给 Git 的两个值一致。
+          commitForm_.MirrorCommitterTime();
+        }
+        RefreshTimeControlsState(window);
+        RefreshTexts(window);
         return 0;
       }
       return ::DefWindowProcW(window, message, wParam, lParam);
