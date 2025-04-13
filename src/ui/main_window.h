@@ -12,6 +12,7 @@
 #include "app/commit_form_session.h"
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
+#include "git/commit_plan.h"
 #include "git/staging_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
@@ -44,6 +45,10 @@ struct CommandLaunchOptions {
   // 本次操作独占的路径清单临时文件（git add 用）。Git 还在读它的时候绝不能删，
   // 因此所有权随操作一起交给 ActiveOperation，只在拿到终态或启动失败时回收。
   std::wstring pathspecFile;
+  // 本次操作独占的提交信息临时文件（git commit -F 用），回收规则与清单文件同一套。
+  std::wstring messageFile;
+  // 这次是「创建提交」：只有确认它创建成功，界面才清空已提交的标题/描述/合作者。
+  bool commitOperation = false;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -187,6 +192,28 @@ private:
   // 编程式改写「作者」输入框：期间抑制 EN_CHANGE，免得把程序填的值记成用户输入。
   void SetAuthorField(HWND window, const std::wstring& text);
 
+  // ---- 创建提交（本步骤）----
+  // 点击「创建提交」：先按界面现有的事实做一轮快速拒绝（表单、时间、暂存内容），
+  // 通过了才发起一次只读重读，等仓库现状回来之后再把确认框摆到用户面前。
+  // 提交前重新核对是必要的：列表可能是几分钟前读的，期间外部终端完全可能改了同一个仓库。
+  void CreateCommit(HWND window);
+  // 用刚刚读回的仓库现状合成方案、写提交信息文件、给出确认框；确认后才启动命令窗口。
+  void ConfirmAndLaunchCommit(HWND window);
+  // 放弃这次提交（核对失败、用户取消、启动失败）：删掉刚写的信息文件并把原因写进状态栏。
+  void AbandonCommitAttempt(HWND window, std::wstring_view reason, std::wstring_view messageFile);
+  // 把一段墙上时间换算成「交给 Git 的值 + 给人看的说明」；失败时写原因并返回 false。
+  [[nodiscard]] bool BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
+                                           std::wstring* refusal) const;
+  // 时间控件的联动与说明：勾选同步时提交者跟着作者、提交者那两块置灰，
+  // 并把「所选作者时间实际生效的 UTC 偏移」写进本机时区那句说明里。
+  void RefreshTimeControlsState(HWND window);
+  // 恢复当前时间：控件回到此刻、清掉「用户改过时间」的记号（这是那条明确的退路）。
+  void ResetCommitTimesToNow(HWND window);
+  // 提交创建成功后的表单收尾：清正文、留作者、时间回到此刻。
+  void AfterCommitSucceeded(HWND window);
+  // 不再等这次重读了（仓库被换掉、核对失败）：丢弃点击瞬间记下的那份摘要。
+  void ClearPendingCommitRead() noexcept { pendingCommit_.waitingForRead = false; }
+
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
   struct ActiveOperation {
@@ -201,6 +228,17 @@ private:
     // 本次操作独占的路径清单临时文件（写操作把选中的路径交给它）。
     // 只能在拿到终态之后删除：命令窗口里的 Git 可能还在读它。
     std::wstring pathspecFile;
+    // 本次操作独占的提交信息临时文件（git commit -F 的那个文件）。同上。
+    std::wstring messageFile;
+    // 这次是「创建提交」：终态是成功才做表单收尾（见 OnCommandWindowCompleted）。
+    bool commitOperation = false;
+  };
+
+  // 一次「等待重读后再确认」的创建提交：点击瞬间把界面摘要留在这儿，
+  // 重读回来后与它对比；两者不一致时，确认框必须说明以刚读回的为准（不假装旧状态还成立）。
+  struct PendingCommitRead {
+    bool waitingForRead = false;
+    git::CapturedSnapshot captured;
   };
 
   platform::UniqueWindow window_;
@@ -213,6 +251,7 @@ private:
   ActiveOperation activeOperation_;
   app::AppState state_;
   app::CommitFormSession formSession_;
+  PendingCommitRead pendingCommit_;
   UiMetrics metrics_;
   std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别

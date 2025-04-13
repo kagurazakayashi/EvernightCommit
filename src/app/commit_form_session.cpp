@@ -105,4 +105,10 @@ void CommitFormSession::Reset() {
   appliedAuthorDefault_.clear();
 }
 
+void CommitFormSession::NoteCommitted() {
+  edited_[Index(Field::subject)] = false;
+  edited_[Index(Field::description)] = false;
+  edited_[Index(Field::coauthors)] = false;
+}
+
 }  // namespace gc::app

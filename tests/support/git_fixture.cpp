@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "git/repository.h"
+#include "platform/windows/environment_block.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/subprocess.h"
 #include "platform/windows/utf_text.h"
@@ -336,11 +337,27 @@ std::wstring GitFixture::BuildEnvironmentBlock() const {
   return block;
 }
 
-GitRun GitFixture::RunWith(const std::wstring& program, const std::vector<std::wstring>& arguments,
-                           const std::wstring& workingDirectory) {
-  const std::wstring block = BuildEnvironmentBlock();
-  const platform::SubprocessRunResult raw =
-      platform::RunHiddenCaptured(program, arguments, workingDirectory, kGitTimeoutMs, block.c_str());
+std::wstring GitFixture::BuildEnvironmentBlock(
+    const std::vector<git::EnvironmentOverride>& overrides) const {
+  if (overrides.empty()) {
+    return BuildEnvironmentBlock();
+  }
+  // 与生产路径同一个合并函数：用例叠上去的 GIT_AUTHOR_* / GIT_COMMITTER_DATE
+  // 究竟怎么进环境块，和界面点「创建提交」时走的完全是同一段代码。
+  std::vector<std::wstring> merged;
+  std::wstring reason;
+  if (!platform::MergeEnvironmentEntries(baseEnvironment_, overrides, &merged, &reason)) {
+    throw PrerequisiteFailure("合并用例的环境覆盖失败：" + WideToUtf8(reason));
+  }
+  return platform::MakeUnicodeEnvironmentBlock(merged);
+}
+
+GitRun GitFixture::RunWithBlock(const std::wstring& program,
+                                const std::vector<std::wstring>& arguments,
+                                const std::wstring& workingDirectory,
+                                const std::wstring& environmentBlock) {
+  const platform::SubprocessRunResult raw = platform::RunHiddenCaptured(
+      program, arguments, workingDirectory, kGitTimeoutMs, environmentBlock.c_str());
   GitRun run;
   run.started = raw.started;
   run.exited = raw.exited;
@@ -353,6 +370,19 @@ GitRun GitFixture::RunWith(const std::wstring& program, const std::vector<std::w
     run.err = raw.launchErrorText;
   }
   return run;
+}
+
+GitRun GitFixture::RunWith(const std::wstring& program, const std::vector<std::wstring>& arguments,
+                           const std::wstring& workingDirectory) {
+  return RunWithBlock(program, arguments, workingDirectory, BuildEnvironmentBlock());
+}
+
+GitRun GitFixture::RunWithOverrides(const std::vector<std::wstring>& arguments,
+                                    const std::vector<git::EnvironmentOverride>& overrides) {
+  if (repoDir_.empty()) {
+    throw PrerequisiteFailure("夹具尚未初始化仓库，RunWithOverrides 无可用工作目录");
+  }
+  return RunWithBlock(gitExe_, arguments, repoDir_, BuildEnvironmentBlock(overrides));
 }
 
 GitRun GitFixture::RunCheckedWith(const std::vector<std::wstring>& arguments,
@@ -490,6 +520,12 @@ std::wstring GitFixture::HeadSubject() {
 
 std::wstring GitFixture::HeadAuthorIdentity() {
   return FirstLineTrimmed(RunCheckedInRepo({L"log", L"-1", L"--format=%an <%ae>"}).out);
+}
+
+std::wstring GitFixture::HeadCommitObject() {
+  // HEAD 不可解析（还没有任何提交）时返回空串：调用方按「没有提交」断言，而不是让前置失败炸掉。
+  const GitRun run = RunInRepo({L"cat-file", L"commit", L"HEAD"});
+  return run.Success() ? run.out : std::wstring();
 }
 
 std::vector<std::wstring> GitFixture::StatusPorcelain() {

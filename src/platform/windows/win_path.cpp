@@ -179,4 +179,28 @@ git::WorktreeFileFacts ProbeWorktreeFileForPreview(std::wstring_view absolutePat
   return facts;
 }
 
+git::RepositoryWorkflowState ProbeRepositoryWorkflowState(std::wstring_view absoluteGitDir) {
+  git::RepositoryWorkflowState state;
+  if (absoluteGitDir.empty()) {
+    return state;  // 没有可读的落点：按「没有痕迹」返回，判断交给 Git 自己。
+  }
+  std::wstring base(absoluteGitDir);
+  if (!base.empty() && base.back() != L'\\' && base.back() != L'/') {
+    base.push_back(L'\\');
+  }
+  const auto hasFile = [&base](const wchar_t* name) {
+    return IsExistingRegularFile(base + name);
+  };
+  const auto hasDirectory = [&base](const wchar_t* name) {
+    return IsExistingDirectory(base + name);
+  };
+  state.mergeInProgress = hasFile(L"MERGE_HEAD");
+  state.revertInProgress = hasFile(L"REVERT_HEAD");
+  state.cherryPickInProgress = hasFile(L"CHERRY_PICK_HEAD");
+  state.bisectInProgress = hasFile(L"BISECT_LOG");
+  state.rebaseInProgress = hasDirectory(L"rebase-merge") || hasDirectory(L"rebase-apply");
+  state.indexLocked = hasFile(L"index.lock");
+  return state;
+}
+
 }  // namespace gc::platform

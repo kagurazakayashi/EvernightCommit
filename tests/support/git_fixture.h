@@ -4,6 +4,8 @@
 #include <string_view>
 #include <vector>
 
+#include "git/command_window.h"
+#include "git/command_window.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/workspace_status.h"
@@ -85,6 +87,12 @@ public:
   GitRun RunChecked(const std::vector<std::wstring>& arguments, std::wstring_view workingDirectory);
   GitRun RunCheckedInRepo(const std::vector<std::wstring>& arguments);
 
+  // 在夹具的隔离环境之上再叠一层受控覆盖，然后执行一次 Git（工作目录固定在已初始化的仓库里）。
+  // 这就是「创建提交」那条路径的真实形态：身份与时间走 GIT_AUTHOR_* / GIT_COMMITTER_DATE，
+  // 由 platform::MergeEnvironmentEntries 合进同一个 Unicode 环境块，其余隔离规则一条都不放松。
+  [[nodiscard]] GitRun RunWithOverrides(const std::vector<std::wstring>& arguments,
+                                       const std::vector<git::EnvironmentOverride>& overrides);
+
   // 建库：git init（普通工作区或裸仓库）并显式固定默认分支 main；成功后 RepoDir() 指向新目录。
   void InitRepository(std::wstring_view directoryName = L"repo");
   void InitBareRepository(std::wstring_view directoryName = L"bare.git");
@@ -102,6 +110,10 @@ public:
   [[nodiscard]] std::wstring ParentShaOfHead();
   [[nodiscard]] std::wstring HeadSubject();
   [[nodiscard]] std::wstring HeadAuthorIdentity();  // "姓名 <邮箱>"
+  // git cat-file commit HEAD 的原始对象文本：author 与 committer 两行是
+  // 「姓名 <邮箱> <秒数> <±hhmm>」，核对 Git 究竟记下了哪个瞬间与哪个偏移，这是最直接的证据。
+  // HEAD 不可解析（还没有提交）时返回空串。
+  [[nodiscard]] std::wstring HeadCommitObject();
   // git status --porcelain=v1 原始行（保留两列状态前缀；已开 core.quotepath=off）。
   [[nodiscard]] std::vector<std::wstring> StatusPorcelain();
   [[nodiscard]] std::string ShowFileAtHead(std::wstring_view repositoryRelativePath);
@@ -121,6 +133,14 @@ public:
 private:
   // 把 baseEnvironment_ 拼成 NULL 结尾的 Unicode 环境块。
   [[nodiscard]] std::wstring BuildEnvironmentBlock() const;
+  // 同上，但在隔离环境之上再叠一层覆盖（大小写不敏感替换，无值即删除）。
+  [[nodiscard]] std::wstring BuildEnvironmentBlock(
+      const std::vector<git::EnvironmentOverride>& overrides) const;
+  // 用给定的环境块执行一次 Git：RunWith / RunWithOverrides 共用同一条执行与解码路径。
+  [[nodiscard]] GitRun RunWithBlock(const std::wstring& program,
+                                    const std::vector<std::wstring>& arguments,
+                                    const std::wstring& workingDirectory,
+                                    const std::wstring& environmentBlock);
   // 折叠为绝对路径并断言仍位于临时根内，越界抛 PrerequisiteFailure。
   [[nodiscard]] std::wstring ResolveOwnedDirectory(std::wstring_view path) const;
   // 核心执行：program 一般为 gitExe_，工作目录必须已解析为根内绝对路径。

@@ -61,6 +61,11 @@ public:
   // 表單被整體清空／重設（例如「放棄」之後界面重新填預設值）時調用。
   void Reset();
 
+  // 提交成功後調用：標題、描述、合作者已經不在了，它們的「是你寫的」記號跟著清掉，
+  // 否則一張空表單會被当成「有使用者內容」，換倉庫時白問一句要不要保留。
+  // 作者那一欄留著繼續用，它的記號與默認值記錄一律不動；綁定的倉庫也沒有換，同樣不動。
+  void NoteCommitted();
+
 private:
   static constexpr size_t kFieldCount = 4;
   [[nodiscard]] static size_t Index(Field field) noexcept;

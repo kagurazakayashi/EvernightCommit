@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 
+#include "git/commit_plan.h"
 #include "git/diff_view.h"
 
 namespace gc::platform {
@@ -34,5 +35,17 @@ namespace gc::platform {
 // 只做只读探测：不创建、不改写、不改时间戳，也不 Git 自己去猜路径。
 // 采样长度上限由 git::kBinaryProbeBytes 决定，超大文件因此同样只需极短一次读取。
 [[nodiscard]] git::WorktreeFileFacts ProbeWorktreeFileForPreview(std::wstring_view absolutePath);
+
+// 探测「这个仓库里有没有特殊的 Git 流程正在走」与「索引是否正被别人写着」。
+//
+// 依据只有 Git 自己留在 Git 目录里的那些痕迹，全部是只读的「存不存在」判断：
+//   MERGE_HEAD / REVERT_HEAD / CHERRY_PICK_HEAD / BISECT_LOG 这些档案，
+//   rebase-merge\ 与 rebase-apply\ 这两个目录，以及 index.lock。
+// absoluteGitDir 必须是仓库识别给出的「绝对 Git 目录」（链接工作树下是
+// <主仓>\.git\worktrees\<名字>，那些状态档案就落在这一层，不能拿主仓的 .git 去猜）。
+// 目录为空或读不到时一律按「没有痕迹」返回：本程序从不因为「看不见」而拒绝一次合法操作，
+// 真正能不能提交由 Git 自己判定，界面看的是退出码。
+[[nodiscard]] git::RepositoryWorkflowState ProbeRepositoryWorkflowState(
+    std::wstring_view absoluteGitDir);
 
 }  // namespace gc::platform

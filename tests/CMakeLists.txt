@@ -6,9 +6,12 @@ add_executable(gc_tests
   author_config_fixture_tests.cpp
   command_window_fixture_tests.cpp
   command_window_plan_tests.cpp
+  commit_date_tests.cpp
   commit_form_session_tests.cpp
   commit_identity_tests.cpp
   commit_message_tests.cpp
+  commit_plan_fixture_tests.cpp
+  commit_plan_tests.cpp
   diff_view_fixture_tests.cpp
   diff_view_tests.cpp
   environment_block_tests.cpp
@@ -17,6 +20,7 @@ add_executable(gc_tests
   git_probe_tests.cpp
   layout_tests.cpp
   list_view_memory_tests.cpp
+  local_time_tests.cpp
   refresh_repository_tests.cpp
   repo_detect_fixture_tests.cpp
   repository_tests.cpp
