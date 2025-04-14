@@ -61,6 +61,7 @@ add_library(gc_core STATIC
   src/git/author_config.cpp
   src/git/command_window.cpp
   src/git/commit_date.cpp
+  src/git/commit_history.cpp
   src/git/commit_identity.cpp
   src/git/commit_message.cpp
   src/git/commit_plan.cpp

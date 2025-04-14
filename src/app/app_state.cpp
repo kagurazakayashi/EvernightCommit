@@ -57,7 +57,14 @@ git::EmptyStateTexts AppState::WorkspaceHintTexts() const {
   const std::wstring_view failure = workspace_.status == git::WorkspaceLoadStatus::failed
                                         ? std::wstring_view(git::RepoErrorLabel(workspace_.error))
                                         : std::wstring_view{};
-  return git::WorkspaceEmptyTexts(workspace_.status, failure, repo_.detection.headResolved);
+  // 提交歷史的成敗與工作區分開記：只有 git log 那一段失敗時，兩個文件列表照常、歷史列單獨說明。
+  const std::wstring_view historyFailure =
+      workspace_.status == git::WorkspaceLoadStatus::loaded &&
+              workspace_.historyError != git::RepoError::none
+          ? std::wstring_view(git::RepoErrorLabel(workspace_.historyError))
+          : std::wstring_view{};
+  return git::WorkspaceEmptyTexts(workspace_.status, failure, repo_.detection.headResolved,
+                                  historyFailure);
 }
 
 std::wstring AppState::WorkspaceBanner() const {

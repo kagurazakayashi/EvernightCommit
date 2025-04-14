@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 
+#include "git/commit_history.h"
 #include "ui/commands.h"
 
 namespace gc::ui {
@@ -115,7 +116,8 @@ void ChangesPane::Layout(const ChangesColumns& columns, const UiMetrics& metrics
   Place(stageRemove_, Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
 }
 
-app::ListViewMemory ChangesPane::CaptureMemory(HWND list, const std::vector<git::ChangeItem>& shown) {
+template <typename Item>
+app::ListViewMemory ChangesPane::CaptureMemory(HWND list, const std::vector<Item>& shown) {
   app::ListViewMemory memory;
   for (const int row : GetListSelectedRows(list)) {
     if (row >= 0 && static_cast<size_t>(row) < shown.size()) {
@@ -125,8 +127,18 @@ app::ListViewMemory ChangesPane::CaptureMemory(HWND list, const std::vector<git:
   return memory;
 }
 
-void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::ChangeItem>& shown,
-                              const app::ListViewMemory& memory, const std::vector<git::ChangeItem>& items,
+std::vector<std::wstring> ChangesPane::CellsFor(const git::ChangeItem& item) {
+  return {item.StatusLabel(), item.PathLabel()};
+}
+
+std::vector<std::wstring> ChangesPane::CellsFor(const git::CommitItem& item) {
+  // 提交列展示短 ID（只是前缀，供阅读），一切命令都用条目里的完整对象 ID。
+  return {git::ShortObjectId(item.objectId), item.summary, item.author, item.authoredAt};
+}
+
+template <typename Item>
+void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<Item>& shown,
+                              const app::ListViewMemory& memory, const std::vector<Item>& items,
                               const std::wstring& hintText) {
   // 按差异就地更新，不整列清空：报表视图不响应 LVM_SCROLL，一旦清空重建，
   // 用户正在看的滚动位置就再也放不回去，只剩顶部一个选择。
@@ -134,12 +146,12 @@ void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::Chang
   const ListRedrawPause pause(list);  // 中间态不绘制，更新完一次性重绘，避免闪一下。
   std::vector<std::wstring> keys;
   keys.reserve(shown.size());
-  for (const git::ChangeItem& item : shown) {
+  for (const Item& item : shown) {
     keys.push_back(app::ViewKeyForItem(item));
   }
   std::vector<std::wstring> wanted;
   wanted.reserve(items.size());
-  for (const git::ChangeItem& item : items) {
+  for (const Item& item : items) {
     wanted.push_back(app::ViewKeyForItem(item));
   }
 
@@ -161,14 +173,12 @@ void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::Chang
   keys.erase(keys.begin() + static_cast<ptrdiff_t>(head), keys.begin() + static_cast<ptrdiff_t>(oldTail));
   // 中段：新的条目按顺序插在各自的位置上。
   for (size_t index = head; index < newTail; ++index) {
-    const git::ChangeItem& item = items[index];
-    InsertListRow(list, static_cast<int>(index), {item.StatusLabel(), item.PathLabel()});
+    InsertListRow(list, static_cast<int>(index), CellsFor(items[index]));
     keys.insert(keys.begin() + static_cast<ptrdiff_t>(index), wanted[index]);
   }
-  // 结构对齐以后，逐行刷新显示文本：同一路径的状态可能已经变了（修改→删除、状态字改变）。
+  // 结构对齐以后，逐行刷新显示文本：同一条目的内容可能已经变了（状态字改变、时间重算）。
   for (size_t index = 0; index < items.size(); ++index) {
-    const git::ChangeItem& item = items[index];
-    SetListRowCells(list, static_cast<int>(index), {item.StatusLabel(), item.PathLabel()});
+    SetListRowCells(list, static_cast<int>(index), CellsFor(items[index]));
   }
   // 选中项按条目身份恢复：行可能已经上移、下移或整条消失，消失的那条不会凭空选到别人。
   RestoreListSelection(list, app::MapListViewMemory(items, memory).selectedRows);
@@ -180,21 +190,19 @@ void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<git::Chang
 
 void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::EmptyStateTexts& texts) {
 
-  // 行内容与模型下标一一对应：状态列与路径列都只是显示文本，
-  // 后续步骤按行号回到模型取原始路径与状态，绝不从单元格文字反解 Git 命令参数。
+  // 行内容与模型下标一一对应：单元格列都只是显示文本，
+  // 后续步骤按行号回到模型取原始路径/对象 ID 与状态，绝不从单元格文字反解 Git 命令参数。
   // 记忆必须在改动行之前取：行号一旦移动，原来的选择就对不上条目了。
   const app::ListViewMemory unstagedMemory = CaptureMemory(unstagedList_, shown_.unstaged);
   const app::ListViewMemory stagedMemory = CaptureMemory(stagedList_, shown_.staged);
+  const app::ListViewMemory historyMemory = CaptureMemory(historyList_, shown_.recentCommits);
 
   RebuildList(unstagedList_, unstagedHint_, shown_.unstaged, unstagedMemory, model.unstaged, texts.unstaged);
   RebuildList(stagedList_, stagedHint_, shown_.staged, stagedMemory, model.staged, texts.staged);
-  shown_.unstaged = model.unstaged;
-  shown_.staged = model.staged;
-
-  // 提交历史仍属后续步骤：git log 未接入，这里只保留说明，不清成“没有提交”。
-  ClearListItems(historyList_);
-  SetControlText(historyHint_, texts.history);
-  ::ShowWindow(historyHint_, model.recentCommits.empty() ? SW_SHOW : SW_HIDE);
+  // 提交历史同一套就地更新：刷新后仍存在的提交保持选中，新提交插入到应有的位置。
+  RebuildList(historyList_, historyHint_, shown_.recentCommits, historyMemory, model.recentCommits,
+              texts.history);
+  shown_ = model;
 }
 
 const git::ChangeItem* ChangesPane::ItemAt(HWND list, int row, git::ChangeSide* side) const {
@@ -210,7 +218,7 @@ const git::ChangeItem* ChangesPane::ItemAt(HWND list, int row, git::ChangeSide* 
       *side = git::ChangeSide::staged;
     }
   } else {
-    return nullptr;  // 提交历史或陌生句柄：本步骤没有可按行查看的内容。
+    return nullptr;  // 提交历史或陌生句柄：历史条目经 CommitItemAt 按行号取，类型不同不从这里走。
   }
   if (row < 0 || static_cast<size_t>(row) >= items->size()) {
     return nullptr;  // 行已不在当前显示内容里（外部改动后被刷新移除）。
@@ -218,8 +226,15 @@ const git::ChangeItem* ChangesPane::ItemAt(HWND list, int row, git::ChangeSide* 
   return &(*items)[static_cast<size_t>(row)];
 }
 
+const git::CommitItem* ChangesPane::CommitItemAt(int row) const {
+  if (row < 0 || static_cast<size_t>(row) >= shown_.recentCommits.size()) {
+    return nullptr;  // 与 ItemAt 同一约定：行号只对最后一次落地的内容有效。
+  }
+  return &shown_.recentCommits[static_cast<size_t>(row)];
+}
+
 int ChangesPane::ListRowCount(HWND list) const {
-  if (list != unstagedList_ && list != stagedList_) {
+  if (list != unstagedList_ && list != stagedList_ && list != historyList_) {
     return -1;
   }
   return GetListItemCount(list);

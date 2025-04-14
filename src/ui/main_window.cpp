@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "git/commit_history.h"
 #include "git/commit_identity.h"
 #include "git/commit_message.h"
 #include "git/diff_view.h"
@@ -64,7 +65,7 @@ constexpr std::wstring_view kTipStageRemove =
     L"冲突（未合并）条目不会被取消暂存：那不等于解决冲突，程序会拒绝并说明原因；"
     L"内容只存在于索引里（磁盘上已没有那个文件）的条目会先弹出确认。";
 constexpr std::wstring_view kTipRefresh =
-    L"重新读取当前仓库的摘要与两个更改列表：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
+    L"重新读取当前仓库的摘要、两个更改列表与提交历史：只在本程序后台执行只读 Git 查询，不弹出命令窗口。\r\n"
     L"在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。";
 constexpr std::wstring_view kTipCreateCommit =
     L"把“已暂存的更改”里现在的索引内容提交出去：在新命令窗口里执行 git commit，显示真实命令与输出，"
@@ -99,6 +100,15 @@ constexpr std::wstring_view kTipStagedList =
     L"重命名条目会同时带上旧路径，否则 Git 只能把它显示成“新增文件”。\r\n"
     L"同一个文件在左右两侧的同名条目各对应自己那一份改动，两边看到的内容不一样。"
     L"仓库还没有任何提交时以空树为基准，暂存的新文件照样能看。";
+constexpr std::wstring_view kTipHistoryList =
+    L"最近提交是从当前 HEAD 可达的历史（只读 git log，默认 detached HEAD 也一样读），"
+    L"最多 100 条：更早的历史不读取，摘要里会注明已达上限。\r\n"
+    L"四列依次是短 ID（只显示前 8 位，命令一律用条目里保存的完整对象 ID）、标题、作者与作者时间；"
+    L"时间按本机时区显示，中文、制表符与任何长度的标题都不参与字段切分。\r\n"
+    L"\r\n"
+    L"双击某一行：在命令窗口里执行 git show，显示这条提交的完整元数据（--format=fuller）、"
+    L"正文与差异；合并提交的组合差异可能为空，那是正常的。\r\n"
+    L"这一列是只读的：不提供、也不会顺手执行 checkout/reset/revert 之类的历史改写。";
 constexpr std::wstring_view kTipSummary =
     L"标题：单行、必填，不能全是空白。\r\n"
     L"不要求任何前缀格式（feat:/fix: 之类一概不检查），程序也不会替你改写、翻译或润色文字。\r\n"
@@ -139,10 +149,11 @@ constexpr std::wstring_view kTipTimeReset =
     L"手动改过之后，那份时间会一直保留到点这个按钮或提交成功为止。";
 constexpr std::wstring_view kPendingNotice =
     L"提示：status 已接入外部命令窗口执行器（在新窗口里执行并保留输出）；"
-    L"未暂存/已暂存列表已按只读 git status 填充，“刷新”可随时重读且不弹命令窗口，"
+    L"未暂存/已暂存列表已按只读 git status 填充，“最近提交”已按只读 git log 填充（从 HEAD 可达、最多 100 条），"
+    L"“刷新”可随时重读且不弹命令窗口，"
     L"命令窗口里的 Git 结束后也会自动重读一次；"
     L"双击列表某一行会在命令窗口里显示该条目的差异（未跟踪文件显示内容，二进制只给说明，超大文件给 --stat 摘要），"
-    L"查看过程不改动索引与工作区；"
+    L"查看过程不改动索引与工作区；双击某条提交则在命令窗口里 git show 该提交的详情；"
     L"“加入暂存区 →”已接入：只把选中的未暂存条目交给命令窗口里的 git add，执行后自动重读；"
     L"“← 移出暂存区”也已接入：只把选中的已暂存条目从索引撤回（git restore --staged，尚无提交时改用"
     L"同样只写索引的 git reset -q --），绝不改动工作区文件，执行后自动重读；"
@@ -297,6 +308,7 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(changesPane_.stageRemoveButton(), kTipStageRemove);
   tooltips_.Add(changesPane_.unstagedList(), kTipUnstagedList);
   tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
+  tooltips_.Add(changesPane_.historyList(), kTipHistoryList);
   tooltips_.Add(commitForm_.SummaryEdit(), kTipSummary);
   tooltips_.Add(commitForm_.DescriptionEdit(), kTipDescription);
   tooltips_.Add(commitForm_.AuthorEdit(), kTipAuthor);
@@ -920,6 +932,8 @@ void MainWindow::StartWorkspaceRead(HWND window) {
   request.exePath = state_.Git().path;
   request.repositoryDirectory = state_.Repo().detection.root;
   request.timeoutMilliseconds = kWorkspaceStatusTimeoutMs;
+  // HEAD 是否可解析取仓库识别时 Git 自己的回答：尚无提交的仓库不在这次读取里追问 git log。
+  request.repositoryHasCommits = state_.Repo().detection.headResolved;
   // 凭据随请求交给工作线程，完成通知原样带回：界面只看它来决定这份结果还算不算数。
   request.readSerial = ticket.serial;
   request.bindingGeneration = ticket.generation;
@@ -1622,6 +1636,74 @@ void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
   }
 }
 
+void MainWindow::OnHistoryCommitDoubleClicked(HWND window, int row) {
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    refuse(L"Git 或仓库当前不可用，无法查看提交。请先确认路径并点“刷新”。");
+    return;
+  }
+  if (tasks_.OperationInFlight()) {
+    // 命令窗口操作是单槽的：并发发起两次会让“哪个窗口对应哪条提交”变得含糊。
+    refuse(L"已有一个命令窗口操作在进行，请等它结束后再双击查看提交。");
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
+    refuse(L"仓库工作区已改变，请先点“刷新”再查看提交。");
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    refuse(L"这一轮仓库状态没有读成功，提交历史不可用。请点“刷新”后重试。");
+    return;
+  }
+
+  const std::vector<git::CommitItem>& commits = state_.WorkspaceModel().recentCommits;
+  const git::CommitItem* shown = changesPane_.CommitItemAt(row);
+  if (changesPane_.ListRowCount(changesPane_.historyList()) != static_cast<int>(commits.size()) ||
+      shown == nullptr) {
+    refuse(L"列表行数与已读取的提交历史对不上，为避免看错提交，本次没有执行任何命令。点“刷新”后重试。");
+    return;
+  }
+  const git::CommitItem& item = commits[static_cast<size_t>(row)];
+  // 行号与模型的对应关系两头核对：显示的那一条和模型的那一条必须是同一个对象 ID，
+  // 命令只会用这个已验证的完整 ID，绝不从「提交」列的短 ID 反解。
+  if (shown->objectId != item.objectId) {
+    refuse(L"这一行已经换成另一条提交，为避免看错提交，本次没有执行任何命令。请重新双击。");
+    return;
+  }
+
+  const git::CommitShowPlan plan = git::BuildCommitShowPlan(item);
+  if (!plan.allowed) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.refusalReason +
+        L"\n\n提交：" + git::ShortObjectId(item.objectId) + L" " + item.summary;
+    ::MessageBoxW(window, message.c_str(), L"无法查看该提交", MB_OK | MB_ICONINFORMATION);
+    refuse(L"未查看提交 " + git::ShortObjectId(item.objectId) + L"：对象 ID 不符合约定。");
+    return;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = repositoryRoot;
+  operation.arguments = plan.arguments;
+
+  CommandLaunchOptions options;
+  // 退出码按常规判定：git show 读到对象就是 0，报错误非 0——不像 --no-index 那样有「1 也算正常」的语义。
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 git show（" + repositoryRoot + L"）：查看提交 " +
+                        git::ShortObjectId(item.objectId) + L"「" + item.summary + L"」，等待 Git 退出码…";
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    refuse(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+  }
+}
+
 void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (activeOperation_.serial == 0 || activeOperation_.runnerId != operationId) {
     return;  // 不是本窗口当前拥有的操作（保留的旧窗口、或已按通知丢失结案的迟到通知）。
@@ -2041,8 +2123,8 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       OnCommand(window, wParam);
       return 0;
     case WM_NOTIFY: {
-      // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认这两块更改列表与合作者列表，
-      // 其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
+      // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认两块更改列表、提交历史列表
+      // 与合作者列表，其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
       const auto* header = reinterpret_cast<const NMHDR*>(lParam);
       if (header != nullptr && header->code == NM_DBLCLK &&
           (header->idFrom == kIdUnstagedList || header->idFrom == kIdStagedList)) {
@@ -2051,6 +2133,12 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         // 不把选中的其它文件一起塞进同一个窗口（一次一条才看得清，命令也只限定一条路径）。
         OnChangesListDoubleClicked(window, header->hwndFrom,
                                   activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      if (header != nullptr && header->code == NM_DBLCLK && header->idFrom == kIdHistoryList) {
+        // 双击某条提交：命令窗口里 git show 完整详情。同样只认命中行，点在空白处不动作。
+        const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
+        OnHistoryCommitDoubleClicked(window, activated != nullptr ? activated->iItem : -1);
         return 0;
       }
       if (header != nullptr && header->code == NM_DBLCLK && header->idFrom == kIdCoauthorList) {

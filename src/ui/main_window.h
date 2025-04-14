@@ -106,8 +106,9 @@ private:
   void ResumeRepoDetectionWhenGitReady(HWND window);
 
   // 工作区状态解析（步骤 6）与刷新调度（步骤 7）：
-  // 一次刷新 = 重新读取仓库摘要 + 重新读取两个文件列表，全部走内部只读后台查询，不弹命令窗口。
-  // 以后接入“最近提交”时，只需在同一次刷新里再排一项读取，不需要新增一套触发机制。
+  // 一次刷新 = 重新读取仓库摘要 + 重新读取两个文件列表与提交历史，全部走内部只读后台查询，不弹命令窗口。
+  // 「最近提交」的 git log 读取挂在同一次工作区读取里（platform::LoadWorkspaceStatus 在 status
+  // 成功后追问一条 log），界面不另建触发机制。
   void ScheduleRefresh(HWND window);
   void RunRefreshCycle(HWND window);
   void StartWorkspaceRead(HWND window);
@@ -157,6 +158,10 @@ private:
   // 双击“未暂存的更改/已暂存的更改”的某一行：按所在侧与条目类别构造差异/内容查看命令，
   // 仍走上面的命令窗口执行器（不打开外部编辑器，也不在本进程里静默跑 Git）。
   void OnChangesListDoubleClicked(HWND window, HWND list, int row);
+
+  // 双击“最近提交”的某一行：用条目里保存的完整对象 ID 构造 git show，同样走命令窗口执行器。
+  // 列表是只读的：这里不构造任何 checkout/reset/revert，查看详情失败也不会动当前分支。
+  void OnHistoryCommitDoubleClicked(HWND window, int row);
 
   void OnCommandWindowCompleted(HWND window, uint64_t operationId);
   void TickActiveOperations(HWND window);

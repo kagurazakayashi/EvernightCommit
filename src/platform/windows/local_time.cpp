@@ -124,4 +124,39 @@ std::wstring LocalTimeZoneName() {
   return std::wstring(name);
 }
 
+std::wstring FormatLocalEpochSeconds(long long epochSeconds) {
+  const std::wstring fallback = std::to_wstring(epochSeconds);
+  // Unix 秒 → FILETIME（100 纳秒间隔，1601 起算）。负秒数（1970 之前的提交）先判不越过 FILETIME 零点。
+  const __int64 raw = static_cast<__int64>(kFileTimeUnixEpochOffset) +
+                      static_cast<__int64>(epochSeconds) * 10000000LL;
+  if (raw < 0) {
+    return fallback;
+  }
+  FILETIME utcFileTime{};
+  utcFileTime.dwLowDateTime = static_cast<DWORD>(raw & 0xFFFFFFFFULL);
+  utcFileTime.dwHighDateTime = static_cast<DWORD>(static_cast<unsigned __int64>(raw) >> 32);
+  SYSTEMTIME utcTime{};
+  if (::FileTimeToSystemTime(&utcFileTime, &utcTime) == 0) {
+    return fallback;
+  }
+  SYSTEMTIME localTime{};
+  if (::SystemTimeToTzSpecificLocalTime(nullptr, &utcTime, &localTime) == 0) {
+    return fallback;
+  }
+  const auto pad = [](unsigned long value, unsigned width) {
+    std::wstring text = std::to_wstring(value);
+    while (text.size() < width && text.size() < 4) {  // 年份为 4 位，其余 2 位。
+      text.insert(text.begin(), L'0');
+    }
+    return text;
+  };
+  // pad(年份, 4)：四位年份不需要补零，小于 1000 的年份按实际位数显示即可。
+  std::wstring year = std::to_wstring(localTime.wYear);
+  while (year.size() < 4) {
+    year.insert(year.begin(), L'0');
+  }
+  return year + L"-" + pad(localTime.wMonth, 2) + L"-" + pad(localTime.wDay, 2) + L" " +
+         pad(localTime.wHour, 2) + L":" + pad(localTime.wMinute, 2) + L":" + pad(localTime.wSecond, 2);
+}
+
 }  // namespace gc::platform

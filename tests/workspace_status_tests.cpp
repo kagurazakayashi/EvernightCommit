@@ -236,26 +236,37 @@ GC_TEST(labels_and_summary_describe_model_without_losing_raw_data) {
 
 GC_TEST(empty_state_texts_distinguish_lifecycle_states) {
   const gc::git::EmptyStateTexts unloaded =
-      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::unloaded, L"", true);
+      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::unloaded, L"", true, L"");
   GC_CHECK(unloaded.unstaged.find(L"尚未选择可用仓库") != std::wstring::npos);
+  GC_CHECK(unloaded.history.find(L"尚未选择可用仓库") != std::wstring::npos);
   // 正在读取：不能显示成“没有更改”。
   const gc::git::EmptyStateTexts loading =
-      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loading, L"", true);
+      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loading, L"", true, L"");
   GC_CHECK(loading.unstaged.find(L"正在读取") != std::wstring::npos);
   GC_CHECK(loading.staged.find(L"正在读取") != std::wstring::npos);
-  // 读取成功且确实干净：说明是“没有更改”，同时保留历史列尚未接入 git log 的说法。
+  GC_CHECK(loading.history.find(L"git log") != std::wstring::npos);
+  // 读取成功、历史也正常读到（HEAD 可解析）：历史列有条目时说明不显示；
+  // 若为空则按「HEAD 可解析却没读到提交」单独说明，不冒充“还没有任何提交”。
   const gc::git::EmptyStateTexts loaded =
-      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loaded, L"", true);
+      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loaded, L"", true, L"");
   GC_CHECK(loaded.unstaged.find(L"没有未暂存的更改") != std::wstring::npos);
   GC_CHECK(loaded.staged.find(L"没有已暂存的更改") != std::wstring::npos);
-  GC_CHECK(loaded.history.find(L"git log") != std::wstring::npos);
-  // 无提交仓库：历史列说明“还没有任何提交”，与“尚未接入”区分开。
+  GC_CHECK(loaded.history.find(L"提交历史为空") != std::wstring::npos);
+  // 无提交仓库：历史列说明“还没有任何提交”。
   const gc::git::EmptyStateTexts noCommits =
-      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loaded, L"", false);
+      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::loaded, L"", false, L"");
   GC_CHECK(noCommits.history.find(L"还没有任何提交") != std::wstring::npos);
-  // 读取失败：把已归类的原因作为第二行，界面不会看起来像空仓库。
+  // 工作区成功、只有 git log 失败：两个文件列表照常，历史列单独给出归类原因。
+  const gc::git::EmptyStateTexts historyFailed = gc::git::WorkspaceEmptyTexts(
+      WorkspaceLoadStatus::loaded, L"", true, gc::git::RepoErrorLabel(gc::git::RepoError::gitTimeout));
+  GC_CHECK(historyFailed.unstaged.find(L"没有未暂存的更改") != std::wstring::npos);
+  GC_CHECK(historyFailed.history.find(L"提交历史读取失败") != std::wstring::npos);
+  GC_CHECK(historyFailed.history.find(gc::git::RepoErrorLabel(gc::git::RepoError::gitTimeout)) !=
+           std::wstring::npos);
+  // 读取失败：把已归类的原因作为第二行，界面不会看起来像空仓库；历史那一段根本没跑。
   const gc::git::EmptyStateTexts failed =
-      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::failed, L"Git 查询超时", true);
+      gc::git::WorkspaceEmptyTexts(WorkspaceLoadStatus::failed, L"Git 查询超时", true, L"");
   GC_CHECK(failed.unstaged.find(L"读取失败") != std::wstring::npos);
   GC_CHECK(failed.unstaged.find(L"Git 查询超时") != std::wstring::npos);
+  GC_CHECK(failed.history.find(L"提交历史未读取") != std::wstring::npos);
 }

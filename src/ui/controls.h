@@ -33,7 +33,7 @@ void SetControlText(HWND target, std::wstring_view text);
 [[nodiscard]] std::wstring GetControlText(HWND target);
 
 // 报表视图的行读写：行内容一律由调用方给出「单元格文本」，界面不从单元格文本反解操作参数。
-// 整列作废只用于“内容确实要全部丢掉”的场合（例如提交历史还没接入）。
+// 整列作废只用于“内容确实要全部丢掉”的场合（例如重建合作者清单）。
 void ClearListItems(HWND list);
 // 就地改行 / 在指定位置插行 / 删行。刷新要保住用户正在看的滚动位置时必须按差异就地更新：
 // 报表视图不响应 LVM_SCROLL，整列清空重建之后没有任何消息能把视口放回原处。

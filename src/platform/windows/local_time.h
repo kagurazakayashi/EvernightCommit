@@ -48,4 +48,9 @@ struct LocalInstant {
 // 与 git/commit_date 的偏移文本搭配成「本机时区：… 此刻 UTC+08:00」这样的界面说明。
 [[nodiscard]] std::wstring LocalTimeZoneName();
 
+// Unix 秒 → 本机时区的「YYYY-MM-DD HH:MM:SS」展示文本（提交历史列表的时间列用）。
+// 换算走系统的时区规则（含那一天实际的夏令时状态），与 ResolveLocalWallTime 同一套依据。
+// 越界或换算失败时退回裸秒数的文本：时间列宁可难看地可读，也不能留一个空格让用户以为没读到。
+[[nodiscard]] std::wstring FormatLocalEpochSeconds(long long epochSeconds);
+
 }  // namespace gc::platform

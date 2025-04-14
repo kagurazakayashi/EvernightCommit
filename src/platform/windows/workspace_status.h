@@ -14,6 +14,9 @@ struct WorkspaceStatusRequest {
   std::wstring exePath;
   std::wstring repositoryDirectory;
   unsigned long timeoutMilliseconds = 0;
+  // HEAD 是否可解析（仓库至少有一条提交）。由仓库识别时 Git 自己的回答带来（headResolved），
+  // 尚无提交的仓库根本不发 git log——那条命令在空仓库里必然非 0 退出，不是错误却要解释。
+  bool repositoryHasCommits = false;
   // 讀取憑證的回顯欄位：界面把本次讀取的序號與倉庫身份版本填在這裡，
   // 任務體原樣帶回。切換倉庫後才遲遲完成的舊讀取就是靠它被判為過期，
   // 而不是靠「是不是最後一次提交」——換到一個讀不了的倉庫時根本不會再有新的提交。
@@ -33,7 +36,10 @@ struct WorkspaceStatusDeps {
   git::GitQueryRunner runner;
 };
 
-// 只讀地取回並解析工作區狀態：一條 git status 查詢，不寫對象庫、不訪問遠端、不改動倉庫。
+// 只讀地取回並解析工作區狀態與最近提交歷史：一次 git status，外加（僅當 HEAD 可解析時）
+// 一次 git log。兩條都是隱藏窗口的只讀查詢，不寫對象庫、不訪問遠端、不改動倉庫。
+// 兩者的成敗互相獨立：status 失敗時整體作廢；log 失敗時列表照常落地，
+// 失敗原因寫進 snapshot 的 historyError/historyMessage，界面不會把「讀不到」顯示成「沒有提交」。
 [[nodiscard]] git::WorkspaceSnapshot LoadWorkspaceStatus(const WorkspaceStatusRequest& request,
                                                           const WorkspaceStatusDeps& deps);
 

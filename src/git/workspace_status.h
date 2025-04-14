@@ -50,6 +50,10 @@ struct WorkspaceSnapshot {
   WorkspaceModel model;
   std::wstring message;   // 面向界面的完整說明（成功摘要或失敗原因）
   size_t skippedRecords = 0;
+  // 提交歷史（git log）與工作區共用這一次讀取，成敗互相獨立：
+  // status 為 loaded 而 historyError 不為 none 時，兩個文件列表照常可用，只有歷史列是空的並帶原因。
+  RepoError historyError = RepoError::none;
+  std::wstring historyMessage;  // 歷史讀取失敗時面向界面的完整說明
 };
 
 // 讀取成功後寫進界面的摘要：兩側條目數與衝突提示。

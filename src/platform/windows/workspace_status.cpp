@@ -1,9 +1,57 @@
 #include "platform/windows/workspace_status.h"
 
+#include "git/commit_history.h"
+#include "platform/windows/local_time.h"
 #include "platform/windows/subprocess.h"
 #include "platform/windows/utf_text.h"
 
 namespace gc::platform {
+namespace {
+
+// 在同一次讀取里追問提交歷史。失敗只記錄在 snapshot 的 historyError/historyMessage 上，
+// 不拖垮已經讀好的兩個文件列表；尚無提交的倉庫不發這條查詢（git log 在那裡必然非 0 退出）。
+void LoadRecentCommits(const WorkspaceStatusRequest& request, const WorkspaceStatusDeps& deps,
+                       git::WorkspaceSnapshot* snapshot) {
+  if (!request.repositoryHasCommits) {
+    return;
+  }
+  const git::GitQueryResult result =
+      deps.runner(request.exePath, request.repositoryDirectory,
+                  git::BuildRecentCommitsArguments(request.repositoryDirectory,
+                                                   git::kRecentCommitLimit));
+  std::wstring detail;
+  const git::RepoError failure = git::ClassifyGitFailure(result, detail);
+  if (failure != git::RepoError::none) {
+    snapshot->historyError = failure;
+    snapshot->historyMessage = std::wstring(git::RepoErrorLabel(failure)) +
+                               L"（读取提交历史）" +
+                               (detail.empty() ? std::wstring() : L"：" + detail) +
+                               L"。文件列表来自 git status，仍然照常显示。";
+    return;
+  }
+
+  const git::CommitTimeFormatter formatTime = [](long long epochSeconds) {
+    return FormatLocalEpochSeconds(epochSeconds);
+  };
+  const git::CommitHistoryParseResult parsed =
+      git::ParseRecentCommits(result.utf16Output, git::kRecentCommitLimit, formatTime);
+  if (!parsed.error.empty()) {
+    snapshot->historyError = git::RepoError::badOutput;
+    snapshot->historyMessage =
+        std::wstring(git::RepoErrorLabel(git::RepoError::badOutput)) +
+        L"（读取提交历史）：" + parsed.error + L"。文件列表来自 git status，仍然照常显示。";
+    return;
+  }
+
+  snapshot->model.recentCommits = std::move(parsed.commits);
+  const std::wstring notice = git::BuildRecentCommitsNotice(snapshot->model.recentCommits.size(),
+                                                            parsed.truncated);
+  if (!notice.empty()) {
+    snapshot->message += L"；" + notice;
+  }
+}
+
+}  // namespace
 
 git::WorkspaceSnapshot LoadWorkspaceStatus(const WorkspaceStatusRequest& request,
                                            const WorkspaceStatusDeps& deps) {
@@ -52,6 +100,11 @@ git::WorkspaceSnapshot LoadWorkspaceStatus(const WorkspaceStatusRequest& request
     // 認識但刻意不進列表的記錄（如 --ignored 未請求、# 頭部記錄）要讓使用者知道不是漏讀。
     snapshot.message += L"（另有 " + std::to_wstring(snapshot.skippedRecords) +
                         L" 条 Git 记录按约定未列入。）";
+  }
+  // 工作區讀好后才輪到提交歷史：兩條查詢共用這一次刷新，不另建觸發機制。
+  LoadRecentCommits(request, deps, &snapshot);
+  if (snapshot.historyError != git::RepoError::none) {
+    snapshot.message += L" " + snapshot.historyMessage;
   }
   return snapshot;
 }
