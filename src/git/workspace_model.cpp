@@ -79,29 +79,43 @@ std::vector<ChangeItem> WorkspaceModel::SubmoduleChanges() const {
 }
 
 EmptyStateTexts WorkspaceEmptyTexts(WorkspaceLoadStatus status, std::wstring_view failureLabel,
-                                   bool repositoryHasCommits) {
-  // 歷史列與工作區讀取是兩件事：本步驟只接入 git status，git log 留待後續步驟。
-  const std::wstring history = repositoryHasCommits
-                                   ? TwoLine(L"提交历史", L"将在后续步骤接入 git log。")
-                                   : TwoLine(L"仓库还没有任何提交", L"提交后这里会显示历史记录。");
+                                   bool repositoryHasCommits, std::wstring_view historyFailureLabel) {
+  // 歷史列的說明按「這一段讀取怎麼樣」給：工作區讀取與 git log 掛在同一次刷新上，
+  // 但兩者的成敗互相獨立，任何一種空都要講清楚原因。
+  const std::wstring historyFailure = TwoLine(L"提交历史读取失败", historyFailureLabel);
+  const std::wstring historyEmpty = TwoLine(L"仓库还没有任何提交", L"提交后这里会显示历史记录。");
+  const std::wstring historyOddEmpty =
+      TwoLine(L"提交历史为空", L"HEAD 可解析却没有读到提交，请点“刷新”重新读取。");
+  const auto historyForLoaded = [&]() {
+    if (!historyFailureLabel.empty()) {
+      return historyFailure;
+    }
+    return repositoryHasCommits ? historyOddEmpty : historyEmpty;
+  };
 
   switch (status) {
     case WorkspaceLoadStatus::unloaded:
       return EmptyStateTexts{TwoLine(L"暂无数据", L"尚未选择可用仓库。"),
                              TwoLine(L"暂无数据", L"尚未选择可用仓库。"),
-                             TwoLine(L"暂无数据", L"尚未接入 git log。")};
+                             TwoLine(L"暂无数据", L"尚未选择可用仓库。")};
     case WorkspaceLoadStatus::loading:
       return EmptyStateTexts{TwoLine(L"正在读取", L"后台执行 git status…"),
-                             TwoLine(L"正在读取", L"后台执行 git status…"), history};
+                             TwoLine(L"正在读取", L"后台执行 git status…"),
+                             TwoLine(L"正在读取", L"后台执行 git log…")};
     case WorkspaceLoadStatus::failed:
       return EmptyStateTexts{TwoLine(L"工作区读取失败", failureLabel),
-                             TwoLine(L"工作区读取失败", failureLabel), history};
+                             TwoLine(L"工作区读取失败", failureLabel),
+                             // 工作区这一轮整体失败时 git log 根本沒有跑：說「没有读到」而不是給個空列表。
+                             historyFailureLabel.empty() ? TwoLine(L"提交历史未读取", failureLabel)
+                                                         : historyFailure};
     case WorkspaceLoadStatus::loaded:
       return EmptyStateTexts{TwoLine(L"没有未暂存的更改", L"工作区与索引一致。"),
-                             TwoLine(L"没有已暂存的更改", L"选中文件后用“加入暂存区”暂存。"), history};
+                             TwoLine(L"没有已暂存的更改", L"选中文件后用“加入暂存区”暂存。"),
+                             historyForLoaded()};
   }
   return EmptyStateTexts{TwoLine(L"暂无数据", L"尚未选择可用仓库。"),
-                         TwoLine(L"暂无数据", L"尚未选择可用仓库。"), history};
+                         TwoLine(L"暂无数据", L"尚未选择可用仓库。"),
+                         TwoLine(L"暂无数据", L"尚未选择可用仓库。")};
 }
 
 std::wstring SubmoduleExplanationText(const WorkspaceModel& model) {

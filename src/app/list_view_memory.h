@@ -20,6 +20,10 @@ namespace gc::app {
 // 與狀態欄文字、顯示用的「舊 → 新」文本無關。
 [[nodiscard]] std::wstring ViewKeyForItem(const git::ChangeItem& item);
 
+// 提交歷史條目的記憶鍵：完整對象 ID。刷新後仍存在的提交保持選中，
+// 被撤回或換掉的提交自然失去選中，不會憑空選到別的提交。
+[[nodiscard]] std::wstring ViewKeyForItem(const git::CommitItem& item);
+
 // 一個列表在刷新前的視圖狀態。
 struct ListViewMemory {
   std::vector<std::wstring> selectedKeys;  // 仍被選中的條目鍵（多選）
@@ -31,6 +35,8 @@ struct RestoredListView {
 };
 
 [[nodiscard]] RestoredListView MapListViewMemory(const std::vector<git::ChangeItem>& items,
+                                                 const ListViewMemory& memory);
+[[nodiscard]] RestoredListView MapListViewMemory(const std::vector<git::CommitItem>& items,
                                                  const ListViewMemory& memory);
 
 }  // namespace gc::app

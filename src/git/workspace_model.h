@@ -48,10 +48,12 @@ struct ChangeItem {
 };
 
 struct CommitItem {
-  std::wstring objectId;  // 完整對象 ID
+  std::wstring objectId;  // 完整對象 ID（40 或 64 個十六進制字符，按 %H 原樣保存）
   std::wstring summary;
   std::wstring author;
-  std::wstring authoredAt;
+  std::wstring authoredAt;         // 作者時間的本機時區展示文本（由平台層的時間格式化回調填入）
+  long long authorEpochSeconds = 0;  // 作者時間的 Unix 秒：展示文本由它換算，命令一律用完整 ID
+  bool isMergeCommit = false;      // 父提交兩個以上：查看詳情時要說明組合差異可能為空
 };
 
 // 工作區變化模型。索引狀態與工作區狀態分開建模：同一個路徑可以同時出現在
@@ -63,7 +65,7 @@ struct WorkspaceModel {
   std::vector<ChangeItem> unstaged;
   // 索引相對 HEAD 的變化：已暫存、等待創建提交的條目。
   std::vector<ChangeItem> staged;
-  std::vector<CommitItem> recentCommits;  // 本步驟尚未接入 git log，恆為空
+  std::vector<CommitItem> recentCommits;  // 從當前 HEAD 可達的最近提交（有上限，見 git/commit_history）
 
   [[nodiscard]] bool HasAnyItems() const noexcept {
     return !unstaged.empty() || !staged.empty() || !recentCommits.empty();
@@ -90,9 +92,11 @@ struct EmptyStateTexts {
 
 // 三塊列表在「該列沒有條目」時要顯示的說明，按讀取週期與倉庫形態選取。
 // failureLabel 只在 status 為 failed 時使用（取 RepoErrorLabel 的文案即可）。
-// 提交歷史列仍屬後續步驟：有提交時說明「尚未接入 git log」，無提交時說明尚無提交可讀。
+// historyFailureLabel：工作區讀取成功、但 git log 這一項失敗時的簡短原因（空表示沒有失敗）。
+// 提交歷史與工作區共用同一次讀取，「歷史列為空」可能是倉庫還沒有提交、這一段讀取失敗、
+// 或讀取根本沒跑——幾種說法必須互相區分，都不能顯示成一份理應如此的空列表。
 EmptyStateTexts WorkspaceEmptyTexts(WorkspaceLoadStatus status, std::wstring_view failureLabel,
-                                    bool repositoryHasCommits);
+                                    bool repositoryHasCommits, std::wstring_view historyFailureLabel);
 
 // 子模組變化的集中說明文字：解釋父倉庫暫存只會記錄提交指標。沒有子模組變化時返回空字串。
 [[nodiscard]] std::wstring SubmoduleExplanationText(const WorkspaceModel& model);

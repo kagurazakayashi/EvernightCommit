@@ -33,7 +33,7 @@ GC_TEST(app_state_hint_texts_follow_workspace_lifecycle) {
   // 未选择仓库：说明是“尚未选择可用仓库”，不能长得像读取成功的空列表。
   gc::git::EmptyStateTexts texts = state.WorkspaceHintTexts();
   GC_CHECK(texts.unstaged.find(L"尚未选择可用仓库") != std::wstring::npos);
-  GC_CHECK(texts.history.find(L"git log") != std::wstring::npos);
+  GC_CHECK(texts.history.find(L"尚未选择可用仓库") != std::wstring::npos);
 
   gc::git::WorkspaceSnapshot loading;
   loading.status = gc::git::WorkspaceLoadStatus::loading;

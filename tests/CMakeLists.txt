@@ -8,6 +8,8 @@ add_executable(gc_tests
   command_window_plan_tests.cpp
   commit_date_tests.cpp
   commit_form_session_tests.cpp
+  commit_history_fixture_tests.cpp
+  commit_history_tests.cpp
   commit_identity_tests.cpp
   commit_message_tests.cpp
   commit_plan_fixture_tests.cpp
