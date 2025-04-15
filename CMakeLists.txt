@@ -70,6 +70,7 @@ add_library(gc_core STATIC
   src/git/git_probe.cpp
   src/git/repository.cpp
   src/git/staging_plan.cpp
+  src/git/undo_commit_plan.cpp
   src/git/workspace_model.cpp
   src/git/workspace_status.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -91,6 +92,7 @@ add_library(gc_platform STATIC
   src/platform/windows/platform_init.cpp
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp
+  src/platform/windows/undo_probe.cpp
   src/platform/windows/utf_text.cpp
   src/platform/windows/win_path.cpp
   src/platform/windows/workspace_status.cpp)
