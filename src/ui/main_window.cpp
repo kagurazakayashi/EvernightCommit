@@ -79,7 +79,18 @@ constexpr std::wstring_view kTipCreateCommit =
     L"提交者身份仍由这个仓库的有效 Git 配置决定。\r\n"
     L"命令里没有 --no-verify：仓库的 hooks 与签名设置照常生效，需要口令时由命令窗口自己提问。\r\n"
     L"正在合并／变基／拣选等流程没走完时本程序不做提交，也不会替你终止那种流程。";
-constexpr std::wstring_view kTipUndoCommit = L"该操作尚未实现，按钮保持禁用。对应命令：git reset --soft HEAD^";
+constexpr std::wstring_view kTipUndoCommit =
+    L"把当前分支引用挪回最近一次提交的父提交（git reset --soft）：只移动分支引用，"
+    L"索引与工作区一个字节都不动，原提交的改动会表现为“已暂存的更改”。\r\n"
+    L"这不是 revert（不生成反向提交），更不是 hard reset（不丢弃任何改动），也绝不触碰远端。\r\n"
+    L"点击后先在后台重读分支、HEAD 完整 ID、父提交、远端跟踪引用与工作区状态（只读），"
+    L"确认框摆出的是刚刚读回的现状；本地引用显示该提交可能已推送、或判断不了发布状态、"
+    L"或这是合并提交时，需要你明确点“强制撤回（仅本地）”才执行——那也只是确认风险，命令不变。\r\n"
+    L"仓库的第一个提交没有父提交，改用同样不碰索引的受控路径 git update-ref -d HEAD <完整ID>："
+    L"分支回到“尚无提交”，全部改动留在暂存区。\r\n"
+    L"游离 HEAD、合并／变基进行中、有未解决冲突时明确拒绝；确认之后、执行之前还会再核对一次"
+    L"HEAD 与分支，变了就取消并刷新。撤回后确认框与结果里都留着原提交完整 ID，可用 "
+    L"git reset --soft <完整ID> 或 reflog 找回，本程序不自动恢复。";
 constexpr std::wstring_view kTipPush = L"该操作尚未实现，按钮保持禁用。对应命令：git push";
 constexpr std::wstring_view kTipUnstagedList =
     L"未暂存的更改来自只读的 git status（porcelain v2，机器可读格式）：\r\n"
@@ -336,17 +347,22 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.undoCommitButton(),
-                      actionBar_.pushButton()}) {
+  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
-  // 「创建提交」单独有自己的接通开关：后续步骤接撤回提交时不该连带放开 fetch/pull/push。
+  // 「创建提交」「撤回最近提交」各自有单独的接通开关：接一个不该连带放开 fetch/pull/push。
   const BOOL commitReady =
       (app::AppState::kCreateCommitImplemented && state_.GitUsable() && state_.RepoUsable() &&
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
   ::EnableWindow(actionBar_.createCommitButton(), commitReady);
+  const BOOL undoReady =
+      (app::AppState::kUndoCommitImplemented && state_.GitUsable() && state_.RepoUsable() &&
+       !tasks_.OperationInFlight())
+          ? TRUE
+          : FALSE;
+  ::EnableWindow(actionBar_.undoCommitButton(), undoReady);
   // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
   // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
   ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
@@ -549,6 +565,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdCreateCommitButton:
       if (notifyCode == BN_CLICKED) {
         CreateCommit(window);
+      }
+      break;
+    case kIdUndoCommitButton:
+      if (notifyCode == BN_CLICKED) {
+        UndoLastCommit(window);
       }
       break;
     case kIdTimeResetButton:
@@ -1040,9 +1061,16 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
     RefreshTexts(window);
     return false;
   }
-  activeOperation_ = ActiveOperation{serial,     operationId,           operation.displayName,
-                                     options.scopeNotice, options.viewKind, options.pathspecFile,
-                                     options.messageFile, options.commitOperation};
+  activeOperation_ = ActiveOperation{serial,
+                                     operationId,
+                                     operation.displayName,
+                                     options.scopeNotice,
+                                     options.viewKind,
+                                     options.pathspecFile,
+                                     options.messageFile,
+                                     options.commitOperation,
+                                     options.undoOperation,
+                                     options.restoreHint};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1717,6 +1745,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const std::wstring pathspecFile = activeOperation_.pathspecFile;
   const std::wstring messageFile = activeOperation_.messageFile;
   const bool commitOperation = activeOperation_.commitOperation;
+  const bool undoOperation = activeOperation_.undoOperation;
+  const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
   // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/scriptNeverRan 里
@@ -1752,6 +1782,12 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     // 查看类操作的退出码语义在这里补完整：`git diff` 有差异时也是 0，
     // `git diff --no-index` 则用 1 表示“有差异”。不解释就会被读成“操作失败”。
     conclusion += git::DescribeDiffViewExitCode(*viewKind, result.exitCode);
+  }
+  // 撤回成功的结论必须带上恢复线索（原提交完整 ID + 找回方式）：用户之后在状态栏里
+  // 还能查到那条提交去了哪。失败/结果未知时不追加——那句「未成功」本身说明没有移动引用，
+  // 具体原因命令窗口和上一行结论里都有。
+  if (undoOperation && outcome.succeeded && !restoreHint.empty()) {
+    conclusion += L"｜" + restoreHint;
   }
   tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
@@ -2061,6 +2097,185 @@ void MainWindow::ConfirmAndLaunchCommit(HWND window) {
   }
 }
 
+namespace {
+
+// 「强制撤回（仅本地）」风险确认框：按钮文字必须是这两个明确的说法，
+// MessageBox 的按钮不可自定义，所以用 TaskDialog（Common Controls v6，app.manifest 已声明）。
+// 万一 TaskDialog 初始化失败（异常环境），退回是/否形态并在正文里点明哪个按钮是什么——
+// 无论哪种形态，「强制」都只是确认越过本程序的风险提示，命令本身一字不变。
+bool ShowForceUndoConfirm(HWND window, const std::wstring& preview) {
+  TASKDIALOGCONFIG config{};
+  config.cbSize = sizeof(config);
+  config.hwndParent = window;
+  config.hInstance = ::GetModuleHandleW(nullptr);
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+  config.pszWindowTitle = L"撤回最近提交：风险确认";
+  config.pszMainInstruction = L"这条撤回带有需要你自己核对的风险";
+  config.pszContent = preview.c_str();
+  config.pszMainIcon = TD_WARNING_ICON;
+  const TASKDIALOG_BUTTON buttons[] = {
+      {IDYES, L"强制撤回（仅本地）"},
+      {IDNO, L"取消"},
+  };
+  config.pButtons = buttons;
+  config.cButtons = ARRAYSIZE(buttons);
+  config.nDefaultButton = IDNO;
+  int button = IDNO;
+  const HRESULT hr = ::TaskDialogIndirect(&config, &button, nullptr, nullptr);
+  if (FAILED(hr)) {
+    const int answer =
+        ::MessageBoxW(window,
+                      (preview + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“强制撤回（仅本地）”，"
+                                L"点“否”取消。）")
+                          .c_str(),
+                      L"撤回最近提交：风险确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    return answer == IDYES;
+  }
+  return button == IDYES;
+}
+
+}  // namespace
+
+void MainWindow::UndoLastCommit(HWND window) {
+  if (!RequireWritePrerequisites(window, L"撤回最近提交")) {
+    return;
+  }
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+  if (pendingUndo_.probing) {
+    refuse(L"已经有一次撤回预检在跑，请等确认框出现，或先取消那一次。");
+    return;
+  }
+  if (pendingCommit_.waitingForRead) {
+    refuse(L"“创建提交”正在核对仓库现状，请先等它的确认框出现或取消那一次，再来撤回。");
+    return;
+  }
+
+  // 记下点击瞬间界面显示的那份摘要：预检回来后与它对比，不一致时确认框必须说明
+  // 「以下以刚读回的为准」（与创建提交同一套原则，不假装旧状态还成立）。
+  pendingUndo_.captured = git::CapturedSnapshot{};
+  pendingUndo_.captured.valid = true;
+  pendingUndo_.captured.shortSha = state_.Repo().detection.shortSha;
+  pendingUndo_.captured.hasHead = state_.Repo().detection.headResolved;
+  pendingUndo_.captured.stagedItems = state_.WorkspaceModel().staged.size();
+  pendingUndo_.probing = true;
+
+  platform::UndoProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kUndoProbeTimeoutMs;
+  undoWorker_.Request(window, kUndoProbeCompleted, std::move(request),
+                      [](const platform::UndoProbeRequest& pending) {
+                        return platform::RunUndoProbeLoad(pending);
+                      });
+  state_.SetStatusNote(L"撤回最近提交前先在后台重读分支、HEAD、父提交、远端跟踪引用与工作区状态"
+                       L"（只读查询，不弹命令窗口、不改动仓库），读回来后给出确认框…");
+  RefreshTexts(window);
+}
+
+void MainWindow::AbandonUndoAttempt(HWND window, std::wstring_view reason) {
+  pendingUndo_.probing = false;
+  pendingUndo_.captured = git::CapturedSnapshot{};
+  state_.SetStatusNote(std::wstring(reason));
+  RefreshTexts(window);
+}
+
+void MainWindow::OnUndoProbeCompleted(HWND window, uint64_t completionSerial) {
+  platform::UndoProbeOutcome outcome;
+  if (!undoWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
+  }
+  if (!pendingUndo_.probing) {
+    return;  // 不是等中的那一次（例如已按“仓库切换”作废）。
+  }
+  pendingUndo_.probing = false;
+  if (!state_.RepoUsable() ||
+      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
+    // 预检是在旧仓库上跑的：那份 HEAD/父提交/远端事实对当前界面显示的仓库毫无意义。
+    AbandonUndoAttempt(window,
+                       L"预检完成时仓库已经换掉，本次没有执行任何撤回。请对现在的仓库重新点一次“撤回最近提交”。");
+    return;
+  }
+  ConfirmAndLaunchUndo(window, outcome.facts);
+}
+
+void MainWindow::ConfirmAndLaunchUndo(HWND window, const git::UndoPreflightFacts& facts) {
+  const auto abandon = [&](std::wstring_view reason) { AbandonUndoAttempt(window, reason); };
+
+  git::UndoCommitPlanInput input;
+  input.facts = facts;
+  input.workflow = platform::ProbeRepositoryWorkflowState(state_.Repo().detection.absoluteGitDir);
+  input.repositoryRoot = state_.Repo().detection.root;
+  input.captured = pendingUndo_.captured;
+  pendingUndo_.captured = git::CapturedSnapshot{};
+
+  const git::UndoCommitPlan plan = git::BuildUndoCommitPlan(input);
+  if (plan.blocked) {
+    const std::wstring message = L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason;
+    ::MessageBoxW(window, message.c_str(), L"无法撤回最近提交", MB_OK | MB_ICONINFORMATION);
+    abandon(L"未执行撤回：" + plan.blockedReason);
+    return;
+  }
+
+  const bool proceed =
+      plan.requiresForce
+          ? ShowForceUndoConfirm(window, plan.previewText)
+          : ::MessageBoxW(window, plan.previewText.c_str(), L"撤回最近提交前请确认",
+                          MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK;
+  if (!proceed) {
+    abandon(L"已取消：没有打开命令窗口，也没有对仓库做任何改动。");
+    return;
+  }
+
+  // 用户点头之后再同步核对一次 HEAD/分支：确认框是模态的，但期间外部终端照样可能动过仓库。
+  // 对不上就取消并刷新——绝不对着已经变了的目标执行旧方案。
+  const git::UndoHeadFacts recheck = platform::CaptureUndoHeadSnapshot(
+      state_.Git().path, state_.Repo().detection.root, kUndoRecheckTimeoutMs);
+  if (!recheck.queryOk) {
+    abandon(L"确认后复核 HEAD 没能完成（" +
+            (recheck.queryFailure.empty() ? std::wstring(L"原因未知") : recheck.queryFailure) +
+            L"），本次没有执行任何命令。仓库状态正在重读，请看清现状后再来。");
+    ScheduleRefresh(window);
+    return;
+  }
+  if (recheck.branchRef != facts.head.branchRef || recheck.headObjectId != facts.head.headObjectId) {
+    abandon(L"确认之后、执行之前，HEAD/分支又变了（分支：" +
+            (recheck.branchRef.empty() ? std::wstring(L"不在分支上") : recheck.branchRef) +
+            L"；HEAD：" +
+            (recheck.headObjectId.empty() ? std::wstring(L"尚无提交")
+                                          : git::ShortObjectId(recheck.headObjectId)) +
+            L"）。本次没有执行任何命令。仓库状态正在重读，看清现状后如仍要撤回请再点一次。");
+    ScheduleRefresh(window);
+    return;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = state_.Repo().detection.root;
+  operation.arguments = plan.arguments;
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
+                        state_.Repo().detection.root + L"），撤回提交 " +
+                        git::ShortObjectId(facts.head.headObjectId) + L"，等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.undoOperation = true;
+  options.restoreHint = plan.restoreHint;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    state_.SetStatusNote(L"这次撤回没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    RefreshTexts(window);
+    return;
+  }
+  if (!plan.stateChangeNote.empty()) {
+    // 用户已经看过那句「以刚读回的为准」，这一句留在状态栏里，操作结束后还能对上号。
+    state_.SetStatusNote(L"已在命令窗口启动撤回最近提交。" + plan.stateChangeNote);
+  }
+}
+
 void MainWindow::AfterCommitSucceeded(HWND window) {
   {
     // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
@@ -2194,6 +2409,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kAuthorConfigCompleted:
       OnAuthorConfigCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kUndoProbeCompleted:
+      OnUndoProbeCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -2213,6 +2431,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       repoWorker_.Shutdown();
       workspaceWorker_.Shutdown();
       authorWorker_.Shutdown();
+      undoWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

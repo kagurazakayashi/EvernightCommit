@@ -14,12 +14,14 @@
 #include "git/commit_message.h"
 #include "git/commit_plan.h"
 #include "git/staging_plan.h"
+#include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
+#include "platform/windows/undo_probe.h"
 #include "platform/windows/workspace_status.h"
 #include "ui/action_bar.h"
 #include "ui/changes_pane.h"
@@ -49,6 +51,9 @@ struct CommandLaunchOptions {
   std::wstring messageFile;
   // 这次是「创建提交」：只有确认它创建成功，界面才清空已提交的标题/描述/合作者。
   bool commitOperation = false;
+  // 这次是「撤回最近提交」：成功时把恢复线索（原提交完整 ID）拼进结果说明。
+  bool undoOperation = false;
+  std::wstring restoreHint;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -219,6 +224,17 @@ private:
   // 不再等这次重读了（仓库被换掉、核对失败）：丢弃点击瞬间记下的那份摘要。
   void ClearPendingCommitRead() noexcept { pendingCommit_.waitingForRead = false; }
 
+  // ---- 撤回最近提交（本步骤）----
+  // 点击「撤回最近提交」：核对写操作共同前提后，发起一轮只读预检（分支 / HEAD 完整 ID /
+  // 父提交 / 远端跟踪包含 / 工作区状态）。预检回来之前不弹任何确认框，也不碰仓库。
+  void UndoLastCommit(HWND window);
+  // 预检回来：判读成方案。blocked 直接说明原因；有可继续风险时确认框要求「强制撤回（仅本地）」；
+  // 用户点头后还要同步复核一次 HEAD/分支，对得上才启动命令窗口。
+  void OnUndoProbeCompleted(HWND window, uint64_t completionSerial);
+  void ConfirmAndLaunchUndo(HWND window, const git::UndoPreflightFacts& facts);
+  // 放弃这次撤回（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
+  void AbandonUndoAttempt(HWND window, std::wstring_view reason);
+
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
   struct ActiveOperation {
@@ -237,6 +253,16 @@ private:
     std::wstring messageFile;
     // 这次是「创建提交」：终态是成功才做表单收尾（见 OnCommandWindowCompleted）。
     bool commitOperation = false;
+    // 这次是「撤回最近提交」：成功时把恢复线索拼进结果说明（不自动恢复、不删 reflog）。
+    bool undoOperation = false;
+    std::wstring restoreHint;
+  };
+
+  // 一次「等待预检回来再确认」的撤回最近提交：点击瞬间把界面摘要留在这儿，
+  // 预检回来后与它对比；两者不一致时确认框必须说明以刚读回的为准。
+  struct PendingUndoProbe {
+    bool probing = false;
+    git::CapturedSnapshot captured;
   };
 
   // 一次「等待重读后再确认」的创建提交：点击瞬间把界面摘要留在这儿，
@@ -251,12 +277,14 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
+  platform::UndoProbeWorker undoWorker_;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;
   app::AppState state_;
   app::CommitFormSession formSession_;
   PendingCommitRead pendingCommit_;
+  PendingUndoProbe pendingUndo_;
   UiMetrics metrics_;
   std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别
