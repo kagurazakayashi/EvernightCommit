@@ -16,3 +16,8 @@
 #define IDC_IDENTITY_LABEL 1001
 #define IDC_IDENTITY_EDIT 1002
 #define IDC_IDENTITY_NOTE 1003
+
+// fetch 的远端选择框。同上：模板只放控件与占位几何，文字全部由 C++ 设置。
+#define IDD_FETCH_REMOTE_DIALOG 202
+#define IDC_REMOTE_LABEL 1004
+#define IDC_REMOTE_LIST 1005

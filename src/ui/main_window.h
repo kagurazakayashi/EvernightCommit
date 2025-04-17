@@ -17,6 +17,7 @@
 #include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
+#include "platform/windows/fetch_probe.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/raii.h"
@@ -54,6 +55,8 @@ struct CommandLaunchOptions {
   // 这次是「撤回最近提交」：成功时把恢复线索（原提交完整 ID）拼进结果说明。
   bool undoOperation = false;
   std::wstring restoreHint;
+  // 这次是「fetch」：结论里追加一句范围承诺（只更新了远端跟踪引用；失败时不自动重试）。
+  bool fetchOperation = false;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -235,6 +238,16 @@ private:
   // 放弃这次撤回（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
   void AbandonUndoAttempt(HWND window, std::wstring_view reason);
 
+  // ---- fetch（本步骤）----
+  // 点击「fetch」：核对共同前提后发起一次只读目标预检（当前分支 / 分支配置的远端 /
+  // 远端清单）。预检回来之前不弹任何框、不发任何对外命令。
+  void RequestFetch(HWND window);
+  // 预检回来：判读成方案。目标唯一 → 确认框；定不下来 → 远端选择界面列出既有远端；
+  // 没有远端/查询失败 → 如实说明，不猜 origin、不创建远端、不改配置。
+  void OnFetchProbeCompleted(HWND window, uint64_t completionSerial);
+  // 在命令窗口里启动一条确定的 fetch 方案（确认框已由调用方点头）。
+  void LaunchFetch(HWND window, const git::FetchPlan& plan);
+
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
   struct ActiveOperation {
@@ -256,6 +269,8 @@ private:
     // 这次是「撤回最近提交」：成功时把恢复线索拼进结果说明（不自动恢复、不删 reflog）。
     bool undoOperation = false;
     std::wstring restoreHint;
+    // 这次是「fetch」：终态说明里追加范围承诺；无论成败都不自动重试（失败原因在命令窗口里）。
+    bool fetchOperation = false;
   };
 
   // 一次「等待预检回来再确认」的撤回最近提交：点击瞬间把界面摘要留在这儿，
@@ -278,6 +293,9 @@ private:
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
   platform::UndoProbeWorker undoWorker_;
+  platform::FetchProbeWorker fetchWorker_;
+  // 是否有一次 fetch 目标预检在跑：重复点击先被这句拒绝，迟到的旧结果按序号作废。
+  bool fetchProbing_ = false;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;

@@ -66,6 +66,7 @@ add_library(gc_core STATIC
   src/git/commit_message.cpp
   src/git/commit_plan.cpp
   src/git/diff_view.cpp
+  src/git/fetch_plan.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp
   src/git/repository.cpp
@@ -83,6 +84,7 @@ add_library(gc_platform STATIC
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp
   src/platform/windows/environment_block.cpp
+  src/platform/windows/fetch_probe.cpp
   src/platform/windows/git_toolchain.cpp
   src/platform/windows/identity_prompt.cpp
   src/platform/windows/local_time.cpp
@@ -90,6 +92,7 @@ add_library(gc_platform STATIC
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp
   src/platform/windows/platform_init.cpp
+  src/platform/windows/remote_choice_dialog.cpp
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp
   src/platform/windows/undo_probe.cpp

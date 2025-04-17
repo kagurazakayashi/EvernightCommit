@@ -22,6 +22,7 @@
 #include "platform/windows/locale_text.h"
 #include "platform/windows/path_picker.h"
 #include "platform/windows/pathspec_file.h"
+#include "platform/windows/remote_choice_dialog.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
 #include "ui/commands.h"
@@ -38,7 +39,14 @@ constexpr int kInitialWindowHeight = 780;
 constexpr std::wstring_view kTipBrowseRepo =
     L"选择本地仓库目录；也可在输入框直接键入路径（停顿后自动识别）。支持仓库的子目录，识别时会上溯到工作区根。";
 constexpr std::wstring_view kTipBrowseGit = L"浏览选择 git.exe；选定后立即在后台运行 git --version 验证。";
-constexpr std::wstring_view kTipFetch = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git fetch";
+constexpr std::wstring_view kTipFetch =
+    L"在新命令窗口里执行 git fetch：显示真实命令与输出，Git 结束窗口仍保留；本程序通过结果文件获知退出码。\r\n"
+    L"抓取目标优先取当前分支明确配置的远端（branch.<分支名>.remote）；没有这种配置时列出既有远端"
+    L"供你选择——不猜 origin、不自动创建远端、也不改动任何配置。\r\n"
+    L"fetch 只更新远端跟踪引用（refs/remotes/ 下）：不移动 HEAD、不改本地分支、不动索引与工作区，"
+    L"也不顺带 pull；不隐式 prune，不一次抓所有远端，--recurse-submodules=no 明确关闭子模块递归。\r\n"
+    L"需要口令或交互时由命令窗口里的 Git 自己提问，沿用你已有的认证方式；失败（不可达、认证不过、"
+    L"取消）时窗口里留着真实输出，本程序按退出码重读一次仓库现状，不反复自动重试。";
 constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
 constexpr std::wstring_view kTipStatus =
     L"在新命令窗口里执行 git status：显示真实命令与输出，Git 结束窗口仍保留；本程序通过结果文件获知退出码。";
@@ -171,7 +179,9 @@ constexpr std::wstring_view kPendingNotice =
     L"提交表单的标题/描述/作者/合作者已接入校验与消息合成（作者初值取自这个仓库的有效 Git 配置，只读不回写）；"
     L"“创建提交”也已接入：点击后先只读重读仓库现状再给确认框，提交范围只限索引里那一份，"
     L"作者身份与两个时间只覆盖这一次 Git 子进程，真实的 git commit 在命令窗口里执行；"
-    L"撤回提交/fetch/pull/push 将在后续步骤接入，按钮当前保持禁用。";
+    L"“撤回最近提交”也已接入：软撤回只移动分支引用，不丢弃任何改动；"
+    L"fetch 也已接入：只更新所选远端的远端跟踪引用，工作区/索引/本地分支不受影响；"
+    L"pull/push 将在后续步骤接入，按钮当前保持禁用。";
 
 // 切換倉庫時表單內容的去留：只有明確選「否」才會丟棄使用者打過的字，
 // 「取消」與關窗口都按保留處理——丟棄是不可逆的，預設值必須落在安全的那一邊。
@@ -347,10 +357,10 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.fetchButton(), repoBar_.pullButton(), actionBar_.pushButton()}) {
+  for (HWND button : {repoBar_.pullButton(), actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
-  // 「创建提交」「撤回最近提交」各自有单独的接通开关：接一个不该连带放开 fetch/pull/push。
+  // 「创建提交」「撤回最近提交」「fetch」各自有单独的接通开关：接一个不该连带放开 pull/push。
   const BOOL commitReady =
       (app::AppState::kCreateCommitImplemented && state_.GitUsable() && state_.RepoUsable() &&
        !tasks_.OperationInFlight())
@@ -363,6 +373,12 @@ void MainWindow::UpdateCommandAvailability() {
           ? TRUE
           : FALSE;
   ::EnableWindow(actionBar_.undoCommitButton(), undoReady);
+  const BOOL fetchReady =
+      (app::AppState::kFetchImplemented && state_.GitUsable() && state_.RepoUsable() &&
+       !tasks_.OperationInFlight())
+          ? TRUE
+          : FALSE;
+  ::EnableWindow(repoBar_.fetchButton(), fetchReady);
   // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
   // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
   ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
@@ -528,6 +544,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStatusButton:
       if (notifyCode == BN_CLICKED) {
         LaunchStatusOperation(window);
+      }
+      break;
+    case kIdFetchButton:
+      if (notifyCode == BN_CLICKED) {
+        RequestFetch(window);
       }
       break;
     case kIdRefreshButton:
@@ -1070,7 +1091,8 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.messageFile,
                                      options.commitOperation,
                                      options.undoOperation,
-                                     options.restoreHint};
+                                     options.restoreHint,
+                                     options.fetchOperation};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1746,6 +1768,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const std::wstring messageFile = activeOperation_.messageFile;
   const bool commitOperation = activeOperation_.commitOperation;
   const bool undoOperation = activeOperation_.undoOperation;
+  const bool fetchOperation = activeOperation_.fetchOperation;
   const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
@@ -1788,6 +1811,19 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   // 具体原因命令窗口和上一行结论里都有。
   if (undoOperation && outcome.succeeded && !restoreHint.empty()) {
     conclusion += L"｜" + restoreHint;
+  }
+  // fetch 的结论必须把范围说死：成功只是「远端跟踪引用按 Git 的回答更新了」，
+  // HEAD/本地分支/索引/工作区本来就不归它动；失败则明确「不自动重试、不改配置」，
+  // 具体原因看命令窗口里留下的真实输出。紧随其后的自动刷新会重读分支摘要，
+  // 下一次点「撤回最近提交」的发布状态判断用的就是这批新读回的引用。
+  if (fetchOperation) {
+    if (outcome.succeeded) {
+      conclusion += L"｜fetch 只更新远端跟踪引用；分支摘要正按新状态重读，"
+                    L"HEAD、本地分支、索引与工作区没有被这次操作改动。";
+    } else {
+      conclusion += L"｜fetch 未成功：远端跟踪引用是否变化以重读结果为准。本程序不自动重试，"
+                    L"也不会删除或改写任何远端配置；原因看命令窗口里 Git 的真实输出。";
+    }
   }
   tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
@@ -2276,6 +2312,128 @@ void MainWindow::ConfirmAndLaunchUndo(HWND window, const git::UndoPreflightFacts
   }
 }
 
+void MainWindow::RequestFetch(HWND window) {
+  if (!RequireWritePrerequisites(window, L"fetch")) {
+    return;
+  }
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+  if (fetchProbing_) {
+    refuse(L"已经有一次 fetch 目标预检在跑，请等它的界面出现，再点不会排队。");
+    return;
+  }
+  if (pendingUndo_.probing) {
+    refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 fetch。");
+    return;
+  }
+  if (pendingCommit_.waitingForRead) {
+    refuse(L"「创建提交」正在核对仓库现状，请先等它的确认框出现或取消那一次，再来 fetch。");
+    return;
+  }
+
+  fetchProbing_ = true;
+  platform::FetchProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kFetchProbeTimeoutMs;
+  fetchWorker_.Request(window, kFetchProbeCompleted, std::move(request),
+                       [](const platform::FetchProbeRequest& pending) {
+                         return platform::RunFetchProbeLoad(pending);
+                       });
+  state_.SetStatusNote(L"fetch 前先在后台只读询问：当前分支、这个分支配置的远端、仓库既有远端清单"
+                       L"（只读查询，不弹命令窗口、不接触任何远端），问回来后给出抓取目标…");
+  RefreshTexts(window);
+}
+
+void MainWindow::OnFetchProbeCompleted(HWND window, uint64_t completionSerial) {
+  platform::FetchProbeOutcome outcome;
+  if (!fetchWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
+  }
+  if (!fetchProbing_) {
+    return;  // 不是等中的那一次（例如已按「仓库切换」作废）。
+  }
+  fetchProbing_ = false;
+  const auto settle = [&](std::wstring_view reason) {
+    state_.SetStatusNote(std::wstring(reason));
+    RefreshTexts(window);
+  };
+  if (!state_.RepoUsable() ||
+      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
+    // 预检是在旧仓库上跑的：那份远端清单对当前界面显示的仓库毫无意义。
+    settle(L"预检完成时仓库已经换掉，本次没有执行 fetch。请对现在的仓库重新点一次“fetch”。");
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  git::FetchPlan plan = git::BuildFetchPlan(outcome.facts, repositoryRoot);
+
+  if (plan.state == git::FetchPlanState::chooseRemote) {
+    // 分支配置定不下目标：把既有远端一个个摆出来，目标（名字与 URL）必须看得见才谈得上「不猜」。
+    platform::RemoteChoiceSpec spec;
+    spec.title = L"选择 fetch 的远端";
+    spec.label = plan.explanation;
+    for (const git::FetchRemoteEntry& entry : plan.candidates) {
+      spec.items.push_back({entry.name, entry.fetchUrl});
+    }
+    spec.font = metrics_.Font();
+    spec.layout.margin = metrics_.Margin();
+    spec.layout.gap = metrics_.RowGap();
+    spec.layout.width = metrics_.Scale(420);
+    spec.layout.labelHeight = 3 * metrics_.LabelHeight();  // 「为什么要在这里选」那句说明留三行。
+    spec.layout.listHeight = metrics_.Scale(140);
+    spec.layout.buttonWidth = metrics_.ButtonWidth(L"抓取选中的远端");
+    spec.layout.buttonHeight = metrics_.ControlHeight();
+    const platform::RemoteChoiceResult choice = platform::PromptForRemoteChoice(window, spec);
+    if (!choice.accepted || choice.selectedIndex < 0 ||
+        static_cast<size_t>(choice.selectedIndex) >= plan.candidates.size()) {
+      settle(L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
+      return;
+    }
+    plan = git::ChooseFetchRemote(outcome.facts,
+                                  plan.candidates[static_cast<size_t>(choice.selectedIndex)].name,
+                                  repositoryRoot);
+  }
+
+  if (plan.state != git::FetchPlanState::ready) {
+    const std::wstring message = L"没有打开命令窗口，也没有接触任何远端或改动仓库。\n\n" + plan.explanation;
+    ::MessageBoxW(window, message.c_str(), L"现在不能 fetch", MB_OK | MB_ICONINFORMATION);
+    settle(L"未执行 fetch。");
+    return;
+  }
+
+  const int answer = ::MessageBoxW(window, plan.confirmationText.c_str(), L"fetch 前请确认",
+                                   MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2);
+  if (answer != IDOK) {
+    settle(L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
+    return;
+  }
+  LaunchFetch(window, plan);
+}
+
+void MainWindow::LaunchFetch(HWND window, const git::FetchPlan& plan) {
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = state_.Repo().detection.root;
+  // 参数按数组提交，不进任何 shell 字符串；目标只认名字，URL 由 Git 自己按配置解析。
+  operation.arguments = plan.arguments;
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（目标：" + plan.remoteName +
+                        L" @ " +
+                        (plan.remoteUrl.empty() ? std::wstring(L"URL 未记录") : plan.remoteUrl) +
+                        L"），等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.fetchOperation = true;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    state_.SetStatusNote(L"这次 fetch 没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    RefreshTexts(window);
+  }
+}
+
 void MainWindow::AfterCommitSucceeded(HWND window) {
   {
     // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
@@ -2412,6 +2570,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kUndoProbeCompleted:
       OnUndoProbeCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kFetchProbeCompleted:
+      OnFetchProbeCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -2432,6 +2593,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       workspaceWorker_.Shutdown();
       authorWorker_.Shutdown();
       undoWorker_.Shutdown();
+      fetchWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);
