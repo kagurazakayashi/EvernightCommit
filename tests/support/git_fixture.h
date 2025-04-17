@@ -97,6 +97,28 @@ public:
   void InitRepository(std::wstring_view directoryName = L"repo");
   void InitBareRepository(std::wstring_view directoryName = L"bare.git");
 
+  // ---- 多工作区与本地远端（fetch/pull/push 步骤共用） ----
+  // 切换当前活动工作区：相对临时根的名字或本夹具建出的绝对路径皆可（折叠后必须仍在根内）；
+  // 之后的 RunInRepo / WriteFile / Commit / Push 都作用在它上面。
+  void SetActiveRepository(std::wstring_view directory);
+  // 从「根内本地路径」克隆出一个新工作区并成为活动工作区；来源同样要过 IsAllowedTestRemote 守卫。
+  void CloneRepository(std::wstring_view sourceDirectory, std::wstring_view directoryName);
+  // 给活动工作区添加远端；URL 未通过守卫一律抛 PrerequisiteFailure，绝不落到 Git 命令行上。
+  void AddRemote(std::wstring_view name, std::wstring_view url);
+  // 测试远端守卫（AddRemote 与 CloneRepository 内部执行；用例也可直接验证它的拒绝名单）：
+  //   * 含 "://" 的一律拒绝——http/https/ssh/git/file 都不放行。file:// 也算：它同样能写成
+  //     file://server/share 指向网络共享，所以不能把「file 协议」当作一定不联网；
+  //   * 拒绝 UNC 形态（\\server\share 与 //server/share）；
+  //   * 拒绝 scp 形态的 "user@host:path"（冒号不在盘符位）；
+  //   * 其余必须是「盘符 + 绝对路径」，且折叠后仍位于本次临时根内（存在性不要求——
+  //     「无效本地目标」的场景正需要指着根内一个不存在的目录）。
+  [[nodiscard]] bool IsAllowedTestRemote(std::wstring_view url, std::string& reason) const;
+  // git push [-u] <remote> <branch>（活动工作区）；失败抛 PrerequisiteFailure。
+  void Push(std::wstring_view remote, std::wstring_view branch = L"main", bool setUpstream = false);
+  // rev-parse --verify --quiet <revision>：可解析时返回完整 ID，否则返回空串。
+  // 断言远端跟踪引用与本地分支各指向哪里就用它，不额外发明第二种读法。
+  [[nodiscard]] std::wstring RevParseVerified(std::wstring_view revision);
+
   // 在工作区内写文件（覆盖式，UTF-8 原始字节，自动建父目录）。返回绝对路径，可丢弃。
   std::wstring WriteFile(std::wstring_view repositoryRelativePath, const std::string& utf8Content);
   void StageAll();
@@ -159,6 +181,33 @@ private:
   // 过滤后的继承项 + 隔离项 + 固定身份/日期项；Commit 就地更新日期两行。
   std::vector<std::wstring> baseEnvironment_;
   long commitSequence_ = 0;
+};
+
+// 三方本地远端夹具：一个 bare 远端 + 两个克隆自它的本地工作区（A 与 B）。
+// 这就是 fetch/pull/push 各步骤共用的形态：B 提交并推送制造「远端更新」，
+// A fetch 观察远端跟踪引用的变化；A/B 各自再提交一条就是「分叉」。
+// 远端 URL 只允许临时根内的本地绝对路径（GitFixture::IsAllowedTestRemote 把关），
+// 身份、hooks、协议限制沿用夹具同一套隔离环境，绝不接触网络。
+class RemoteRig {
+public:
+  // 建 origin.git（bare）、A（init + 初始提交 + push -u origin main）、B（clone origin）。
+  // 完成后活动工作区停在 A；失败写原因并返回 false。
+  bool Prepare(std::string& failureReason);
+
+  [[nodiscard]] GitFixture& fixture() noexcept { return fixture_; }
+  [[nodiscard]] const std::wstring& OriginUrl() const noexcept { return originUrl_; }
+  [[nodiscard]] const std::wstring& DirectoryA() const noexcept { return directoryA_; }
+  [[nodiscard]] const std::wstring& DirectoryB() const noexcept { return directoryB_; }
+
+  // 切换活动工作区（之后 fixture() 的 Commit/Push/Fetch 都落在选定的那一侧）。
+  void UseA() { fixture_.SetActiveRepository(directoryA_); }
+  void UseB() { fixture_.SetActiveRepository(directoryB_); }
+
+private:
+  GitFixture fixture_;
+  std::wstring originUrl_;
+  std::wstring directoryA_;
+  std::wstring directoryB_;
 };
 
 }  // namespace gc::test

@@ -19,3 +19,18 @@ BEGIN
     DEFPUSHBUTTON   "", IDOK, 183, 58, 60, 14
     PUSHBUTTON      "", IDCANCEL, 117, 58, 60, 14
 END
+
+// Remote picker for "fetch": one explanation line, a single-selection list of the
+// existing remotes (name plus fetch URL), and OK/Cancel. Like the identity box above,
+// every text is set from C++ as UTF-16 and the geometry is only a placeholder that
+// WM_INITDIALOG re-arranges in per-monitor DPI pixels.
+IDD_FETCH_REMOTE_DIALOG DIALOGEX 0, 0, 260, 110
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION ""
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "", IDC_REMOTE_LABEL, 7, 7, 246, 8
+    LISTBOX         IDC_REMOTE_LIST, 7, 19, 246, 70, LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "", IDOK, 193, 93, 60, 14
+    PUSHBUTTON      "", IDCANCEL, 126, 93, 60, 14
+END

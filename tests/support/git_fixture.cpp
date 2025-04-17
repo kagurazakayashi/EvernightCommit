@@ -455,6 +455,95 @@ void GitFixture::InitBareRepository(std::wstring_view directoryName) {
   InitRepositoryAt(ResolveOwnedDirectory(directoryName), /*bare=*/true);
 }
 
+void GitFixture::SetActiveRepository(std::wstring_view directory) {
+  const std::wstring absolute = ResolveOwnedDirectory(directory);
+  if (!platform::IsExistingDirectory(absolute)) {
+    throw PrerequisiteFailure("夹具的目录不存在，不能切为活动工作区：" + WideToUtf8(absolute));
+  }
+  repoDir_ = absolute;
+}
+
+bool GitFixture::IsAllowedTestRemote(std::wstring_view url, std::string& reason) const {
+  reason.clear();
+  if (url.empty()) {
+    reason = "测试远端 URL 为空";
+    return false;
+  }
+  // 形态判定只看第一个冒号之前的前缀：
+  //   前缀恰好一个字母 —— 盘符（P:\…、C:/…），继续做位置校验；
+  //   其余一切带冒号的形态（https://、ssh://、git://、file://、user@host:path）一律拒绝。
+  // file:// 也拒绝是有意的：file://server/share 指向的是网络共享，
+  // 「file 协议」本身不等于「一定走本机磁盘」，不能拿它当安全边界。
+  const size_t colon = url.find(L':');
+  if (colon != std::wstring::npos) {
+    const bool drivePrefix =
+        colon == 1 && ((url[0] >= L'A' && url[0] <= L'Z') || (url[0] >= L'a' && url[0] <= L'z'));
+    if (!drivePrefix) {
+      reason = "拒绝带协议/主机形态的测试远端（http/https/ssh/git/file://、scp 形态都不放行）：" +
+               WideToUtf8(std::wstring(url.substr(0, colon > 64 ? 64 : colon)));
+      return false;
+    }
+  } else if (url.starts_with(L"\\\\")) {
+    // 没有冒号的 UNC：\\server\share 同样是网络共享，不是「本地路径的一种」。
+    reason = "拒绝 UNC/网络共享形态的测试远端：" + WideToUtf8(std::wstring(url.substr(0, 64)));
+    return false;
+  } else {
+    reason = "测试远端必须是带盘符的绝对本地路径（相对路径会被解释成别的目录）：" +
+             WideToUtf8(std::wstring(url));
+    return false;
+  }
+  if (!platform::IsAbsolutePath(url)) {
+    reason = "测试远端必须是绝对路径：" + WideToUtf8(std::wstring(url));
+    return false;
+  }
+  const std::wstring absolute = platform::ToAbsolutePath(url);
+  if (absolute.empty() || !git::PathIsWithin(absolute, temp_.Path())) {
+    reason = "拒绝夹具临时根之外的测试远端：" + WideToUtf8(absolute) + "（根：" +
+             WideToUtf8(temp_.Path()) + "）";
+    return false;
+  }
+  return true;
+}
+
+void GitFixture::AddRemote(std::wstring_view name, std::wstring_view url) {
+  if (repoDir_.empty()) {
+    throw PrerequisiteFailure("夹具尚未初始化仓库，AddRemote 无可用工作目录");
+  }
+  std::string reason;
+  if (!IsAllowedTestRemote(url, reason)) {
+    throw PrerequisiteFailure("拒绝添加越界的测试远端：" + reason);
+  }
+  RunCheckedInRepo({L"remote", L"add", std::wstring(name), platform::ToAbsolutePath(url)});
+}
+
+void GitFixture::CloneRepository(std::wstring_view sourceDirectory, std::wstring_view directoryName) {
+  std::string reason;
+  // 克隆源也是一种测试远端：同一道守卫，不给「从根外/协议形态的路径拽东西进来」留第二条门。
+  if (!IsAllowedTestRemote(sourceDirectory, reason)) {
+    throw PrerequisiteFailure("拒绝从越界的来源克隆：" + reason);
+  }
+  const std::wstring source = platform::ToAbsolutePath(sourceDirectory);
+  const std::wstring target = ResolveOwnedDirectory(directoryName);
+  RunChecked({L"clone", source, target}, temp_.Path());
+  repoDir_ = target;
+}
+
+void GitFixture::Push(std::wstring_view remote, std::wstring_view branch, bool setUpstream) {
+  std::vector<std::wstring> arguments{L"push"};
+  if (setUpstream) {
+    arguments.push_back(L"-u");
+  }
+  arguments.push_back(std::wstring(remote));
+  arguments.push_back(std::wstring(branch));
+  RunCheckedInRepo(arguments);
+}
+
+std::wstring GitFixture::RevParseVerified(std::wstring_view revision) {
+  const GitRun run =
+      RunInRepo({L"rev-parse", L"--verify", L"--quiet", std::wstring(revision)});
+  return run.Success() ? FirstLineTrimmed(run.out) : std::wstring{};
+}
+
 std::wstring GitFixture::WriteFile(std::wstring_view repositoryRelativePath,
                                    const std::string& utf8Content) {
   if (repoDir_.empty()) {
@@ -612,6 +701,32 @@ void GitFixture::WriteUserConfig(const std::string& utf8Content) {
   if (file.fail()) {
     throw PrerequisiteFailure("写入夹具的用户配置文件失败：" + WideToUtf8(emptyConfig_));
   }
+}
+
+bool RemoteRig::Prepare(std::string& failureReason) {
+  if (!fixture_.Prepare(failureReason)) {
+    return false;
+  }
+  // bare 远端：origin.git 就在临时根里，URL 走同一道本地守卫。
+  fixture_.InitBareRepository(L"origin.git");
+  originUrl_ = fixture_.PathInRoot(L"origin.git");
+
+  // A：初始提交并推送，上游绑定 origin/main。
+  fixture_.InitRepository(L"A");
+  directoryA_ = fixture_.RepoDir();
+  fixture_.AddRemote(L"origin", originUrl_);
+  fixture_.WriteFile(L"remote-init.txt", "0\n");
+  fixture_.StageAll();
+  fixture_.Commit(L"远端夹具初始提交");
+  fixture_.Push(L"origin", L"main", /*setUpstream=*/true);
+
+  // B：从 bare 的本地路径克隆，origin 同样指着它。
+  fixture_.CloneRepository(originUrl_, L"B");
+  directoryB_ = fixture_.RepoDir();
+
+  // 活动工作区停在 A：用例先操作 A 一侧最常见，切换用 UseA/UseB。
+  fixture_.SetActiveRepository(directoryA_);
+  return true;
 }
 
 }  // namespace gc::test

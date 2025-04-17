@@ -80,6 +80,8 @@ inline constexpr UINT kWorkspaceStatusCompleted = WM_APP + 5;
 inline constexpr UINT kAuthorConfigCompleted = WM_APP + 6;
 // 撤回最近提交的预检（HEAD/分支/父提交/远端跟踪引用/工作区状态，全部只读）完成通知；wParam 为请求序号。
 inline constexpr UINT kUndoProbeCompleted = WM_APP + 7;
+// fetch 目标的只读预检（当前分支/分支配置的远端/远端清单，全部只读）完成通知；wParam 为请求序号。
+inline constexpr UINT kFetchProbeCompleted = WM_APP + 8;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -106,5 +108,8 @@ inline constexpr unsigned long kUndoProbeTimeoutMs = 20000;
 // 确认框点头之后、启动命令窗口之前的同步复核只有两条毫秒级查询：超时即按「复核不过」
 // 取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目 reset），因此用短超时、绝不长等。
 inline constexpr unsigned long kUndoRecheckTimeoutMs = 3000;
+// fetch 目标预检同样是本地只读查询（symbolic-ref / config / remote -v 三条都是毫秒级），
+// 沿用识别的 8 秒放宽值以容纳慢盘；超时按「查询失败」展示，绝不自动重试。
+inline constexpr unsigned long kFetchProbeTimeoutMs = 8000;
 
 }  // namespace gc::ui
