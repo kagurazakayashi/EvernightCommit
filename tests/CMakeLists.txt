@@ -33,6 +33,8 @@ add_executable(gc_tests
   staging_plan_tests.cpp
   task_coordinator_tests.cpp
   ui_metrics_tests.cpp
+  pull_plan_tests.cpp
+  pull_probe_fixture_tests.cpp
   undo_commit_plan_tests.cpp
   undo_probe_fixture_tests.cpp
   utf_text_tests.cpp

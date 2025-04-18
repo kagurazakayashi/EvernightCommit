@@ -5,11 +5,15 @@
 namespace gc::platform {
 namespace {
 
-// 列表一行的展示文本：名字与 fetch URL 同行，目标一眼能对上号。
-// 没有记录 fetch URL 的远端（罕见形态）显示占位说明，绝不显示成「看起来没配远端」。
-std::wstring FormatItemText(const RemoteChoiceItem& item) {
+// 列表一行的展示文本：名字与第二栏（fetch URL）同行，目标一眼能对上号。
+// 第二栏为空时补一句占位说明——这句话随场合而異（spec.emptyItemDetail），
+// 因为这个框也被拿去做别的单选（例如 pull 的整合策略），那时「没有记录 fetch URL」就是无关的话。
+std::wstring FormatItemText(const RemoteChoiceItem& item, const RemoteChoiceSpec& spec) {
+  if (spec.emptyItemDetail.empty()) {
+    return item.name;
+  }
   std::wstring text = item.name + L"　　";
-  text += item.url.empty() ? L"（这个远端没有记录 fetch URL）" : item.url;
+  text += item.url.empty() ? spec.emptyItemDetail : item.url;
   return text;
 }
 
@@ -69,7 +73,7 @@ INT_PTR CALLBACK DialogProcedure(HWND dialog, UINT message, WPARAM wParam, LPARA
         const HWND list = ::GetDlgItem(dialog, IDC_REMOTE_LIST);
         for (const RemoteChoiceItem& item : spec.items) {
           static_cast<void>(::SendMessageW(list, LB_ADDSTRING, 0,
-                                           reinterpret_cast<LPARAM>(FormatItemText(item).c_str())));
+                                           reinterpret_cast<LPARAM>(FormatItemText(item, spec).c_str())));
         }
         if (!spec.items.empty()) {
           // 只有一个候选时默认选中那一个：候选直接摆在那里由人确认，程序不越俎代庖。
@@ -88,8 +92,7 @@ INT_PTR CALLBACK DialogProcedure(HWND dialog, UINT message, WPARAM wParam, LPARA
           if (selected == LB_ERR || selected < 0 ||
               static_cast<size_t>(selected) >= state->spec->items.size()) {
             // 没选中就按确定：说明写回标题区并保持打开——关掉丢掉选择比多读一句更糟。
-            ::SetDlgItemTextW(dialog, IDC_REMOTE_LABEL,
-                              L"先在列表里点选一个远端，再按确定。（取消不会执行任何命令）");
+            ::SetDlgItemTextW(dialog, IDC_REMOTE_LABEL, state->spec->needSelectionHint.c_str());
             ::SetFocus(::GetDlgItem(dialog, IDC_REMOTE_LIST));
             return TRUE;
           }

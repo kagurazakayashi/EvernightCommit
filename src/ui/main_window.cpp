@@ -47,7 +47,20 @@ constexpr std::wstring_view kTipFetch =
     L"也不顺带 pull；不隐式 prune，不一次抓所有远端，--recurse-submodules=no 明确关闭子模块递归。\r\n"
     L"需要口令或交互时由命令窗口里的 Git 自己提问，沿用你已有的认证方式；失败（不可达、认证不过、"
     L"取消）时窗口里留着真实输出，本程序按退出码重读一次仓库现状，不反复自动重试。";
-constexpr std::wstring_view kTipPull = L"该仓库级操作尚未实现，按钮保持禁用。对应命令：git pull";
+constexpr std::wstring_view kTipPull =
+    L"pull 分两步，两步都在新命令窗口里看得见真实命令与输出：先「获取」（git fetch），再按判定出的"
+    L"关系做「整合」（git merge / git rebase）。中间每次弹框之前都在后台只读重读仓库现状。\r\n"
+    L"前提由 Git 的回答决定：必须在分支上、这个分支有明确的上游；无上游、游离 HEAD、尚有未解决冲突、"
+    L"或有 merge/rebase 等流程在走时，本程序给出具体原因并拒绝——不猜 origin、不代设 upstream、"
+    L"不替你改任何配置。\r\n"
+    L"整合方式尊重你已有的配置（branch.<分支>.rebase > pull.rebase，pull.ff > merge.ff）并在确认框里"
+    L"说明是哪条配置定的；分叉而配置未明确时由你当场选（默认偏向合并）。--no-autostash 与 "
+    L"-c submodule.recurse=false 写死在命令里：不会替你 stash，也不会递归改动子模块。\r\n"
+    L"风险预检用不改动工作区/索引的 git merge-tree 预演内容冲突，并核对未提交改动、未跟踪文件与"
+    L"这次要带进来的路径是否重叠；预检不支持的 Git 版本会降级为保守提示。变基路线不做合并式预演，"
+    L"也不会拿合并的预演结果去声称变基无冲突。\r\n"
+    L"预检不是保证：点头之后到 Git 跑完之间仓库仍可能被外部改动，因此在执行前还会再核对一次现状，"
+    L"对不上就不执行。真留下冲突时本程序保留现场，绝不 abort/reset/continue，也不替你选任何一方的内容。";
 constexpr std::wstring_view kTipStatus =
     L"在新命令窗口里执行 git status：显示真实命令与输出，Git 结束窗口仍保留；本程序通过结果文件获知退出码。";
 constexpr std::wstring_view kTipStageAdd =
@@ -357,10 +370,10 @@ void MainWindow::UpdateCommandAvailability() {
        !tasks_.OperationInFlight())
           ? TRUE
           : FALSE;
-  for (HWND button : {repoBar_.pullButton(), actionBar_.pushButton()}) {
+  for (HWND button : {actionBar_.pushButton()}) {
     ::EnableWindow(button, gitReady);
   }
-  // 「创建提交」「撤回最近提交」「fetch」各自有单独的接通开关：接一个不该连带放开 pull/push。
+  // 「创建提交」「撤回最近提交」「fetch」「pull」各自有单独的接通开关：接一个不该连带放开 push。
   const BOOL commitReady =
       (app::AppState::kCreateCommitImplemented && state_.GitUsable() && state_.RepoUsable() &&
        !tasks_.OperationInFlight())
@@ -379,6 +392,12 @@ void MainWindow::UpdateCommandAvailability() {
           ? TRUE
           : FALSE;
   ::EnableWindow(repoBar_.fetchButton(), fetchReady);
+  const BOOL pullReady =
+      (app::AppState::kPullImplemented && state_.GitUsable() && state_.RepoUsable() &&
+       !tasks_.OperationInFlight())
+          ? TRUE
+          : FALSE;
+  ::EnableWindow(repoBar_.pullButton(), pullReady);
   // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
   // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
   ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
@@ -549,6 +568,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdFetchButton:
       if (notifyCode == BN_CLICKED) {
         RequestFetch(window);
+      }
+      break;
+    case kIdPullButton:
+      if (notifyCode == BN_CLICKED) {
+        RequestPull(window);
       }
       break;
     case kIdRefreshButton:
@@ -1092,7 +1116,9 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.commitOperation,
                                      options.undoOperation,
                                      options.restoreHint,
-                                     options.fetchOperation};
+                                     options.fetchOperation,
+                                     options.pullFetchOperation,
+                                     options.pullIntegrateOperation};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1769,6 +1795,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const bool commitOperation = activeOperation_.commitOperation;
   const bool undoOperation = activeOperation_.undoOperation;
   const bool fetchOperation = activeOperation_.fetchOperation;
+  const bool pullFetchOperation = activeOperation_.pullFetchOperation;
+  const bool pullIntegrateOperation = activeOperation_.pullIntegrateOperation;
   const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
@@ -1825,10 +1853,33 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
                     L"也不会删除或改写任何远端配置；原因看命令窗口里 Git 的真实输出。";
     }
   }
+  // pull 的两个阶段各自有各自的结论：获取成功只是「远端跟踪引用更新了」，
+  // 整合的结论才涉及分支/索引/工作区。两者都不把「窗口还开着」当成 Git 成功。
+  if (pullFetchOperation) {
+    conclusion += outcome.succeeded
+                      ? L"｜pull 第一步（获取）完成：只更新了远端跟踪引用；正在重读现状并核对本地与远端的关系…"
+                      : L"｜pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
+                        L"本程序不自动重试，也不会删除或改写任何远端配置。";
+  }
+  if (pullIntegrateOperation) {
+    conclusion += outcome.succeeded
+                      ? L"｜pull 整合完成：本地分支已按刚才预检的那一份提交整合过；"
+                        L"本程序没有 push、没有 reset、没有 stash，也没有改任何配置。"
+                        L"现在正在重读分支、列表与历史。"
+                      : ReportPullIntegrateFailure(window, result.completion, result.exitCode);
+  }
   tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
   commandRunner_.ClearAllResults();
   UpdateCommandAvailability();
+  // pull 的第一步（获取）终态不是这次操作的终点：成功就接着做阶段二预检，失败就此为止。
+  // 这一句必须排在槽位释放与可用性刷新之后——那一次预检是内部只读查询，不占命令窗口槽位。
+  if (pullFetchOperation) {
+    OnPullFetchSettled(window, outcome.succeeded);
+  } else if (pullIntegrateOperation) {
+    // 整合有了终态（含「结果未知」）就结案：这一次 pull 到此为止，要不要再来由用户重新点。
+    pendingPull_ = PendingPull{};
+  }
   // 无论成功还是失败都要重读一次：失败的操作同样可能已经改动仓库
   // （提交到一半、push 被拒、合并留下冲突），只有退出码决定要不要报成功。
   ScheduleRefresh(window);
@@ -1842,9 +1893,17 @@ void MainWindow::TickActiveOperations(HWND window) {
       !commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
     const unsigned long long serial = activeOperation_.serial;
     const std::wstring name = activeOperation_.displayName;
+    const bool pullStepInProgress = activeOperation_.pullFetchOperation ||
+                                    activeOperation_.pullIntegrateOperation;
     // 这里不删清单文件：通知丢失意味着 Git 可能还在命令窗口里跑，删掉正在被读的文件
     // 会让一次合法的 git add 变成 Git 的报错。%TEMP% 里留下几百字节的清单远小于那个代价。
     activeOperation_ = ActiveOperation{};
+    // pull 的那两步本来就靠这条终态通知往下走（获取成功才问关系）。通知既然丢了，
+    // 就把这一次 pull 结案：界面不再停在「等待某一步」上，否则下一次点 pull 会被自己锁住。
+    // 仓库究竟被改到什么程度只有重读知道，因此这里同样只重读、不替用户猜。
+    if (pullStepInProgress) {
+      pendingPull_ = PendingPull{};
+    }
     // 执行器已经不记得这个操作：按“结果未知”结案并释放槽位，
     // 否则一个再也等不到通知的操作会把后续写操作永久锁住。
     const app::OperationOutcome outcome =
@@ -2434,6 +2493,390 @@ void MainWindow::LaunchFetch(HWND window, const git::FetchPlan& plan) {
   }
 }
 
+bool MainWindow::ShowPullRiskConfirm(HWND window, const std::wstring& preview) {
+  // 与「强制撤回（仅本地）」同一套规矩：按钮文字必须说清点的到底是哪两样。
+  // 这里的「继续」只越过本程序的风险提示，不追加任何更激烈的参数——命令与无风险时一字不差，
+  // 尤其不含 --force、--no-verify、--autostash，也不会替你 reset/abort。
+  TASKDIALOGCONFIG config{};
+  config.cbSize = sizeof(config);
+  config.hwndParent = window;
+  config.hInstance = ::GetModuleHandleW(nullptr);
+  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+  config.pszWindowTitle = L"pull 整合：风险确认";
+  config.pszMainInstruction = L"这份预检带有需要你自己核对的风险";
+  config.pszContent = preview.c_str();
+  config.pszMainIcon = TD_WARNING_ICON;
+  const TASKDIALOG_BUTTON buttons[] = {
+      {IDYES, L"按这份预检继续整合"},
+      {IDNO, L"取消"},
+  };
+  config.pButtons = buttons;
+  config.cButtons = ARRAYSIZE(buttons);
+  config.nDefaultButton = IDNO;
+  int button = IDNO;
+  const HRESULT hr = ::TaskDialogIndirect(&config, &button, nullptr, nullptr);
+  if (FAILED(hr)) {
+    const int answer =
+        ::MessageBoxW(window,
+                      (preview + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“按这份预检继续整合”，"
+                                L"点“否”取消。）")
+                          .c_str(),
+                      L"pull 整合：风险确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    return answer == IDYES;
+  }
+  return button == IDYES;
+}
+
+void MainWindow::AbandonPullAttempt(HWND window, std::wstring_view reason) {
+  pendingPull_ = PendingPull{};
+  state_.SetStatusNote(std::wstring(reason));
+  RefreshTexts(window);
+}
+
+void MainWindow::RequestPull(HWND window) {
+  if (!RequireWritePrerequisites(window, L"pull")) {
+    return;
+  }
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+  if (pendingPull_.stage != PullStage::none) {
+    refuse(L"已经有一次 pull 在走流程（预检、获取或整合），请等它结束或先取消那一步。");
+    return;
+  }
+  if (fetchProbing_) {
+    refuse(L"「fetch」的目标预检还在跑，请先等它的界面出现，再来 pull。");
+    return;
+  }
+  if (pendingUndo_.probing) {
+    refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 pull。");
+    return;
+  }
+  if (pendingCommit_.waitingForRead) {
+    refuse(L"「创建提交」正在核对仓库现状，请先等它的确认框出现或取消那一次，再来 pull。");
+    return;
+  }
+
+  pendingPull_.stage = PullStage::fetchProbe;
+  platform::PullProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
+  request.timeoutMilliseconds = kPullProbeTimeoutMs;
+  request.includeRelationship = false;
+  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
+                      [](const platform::PullProbeRequest& pending) {
+                        return platform::RunPullProbeLoad(pending);
+                      });
+  state_.SetStatusNote(L"pull 第一步：先在后台只读问清「在哪个分支、这个分支的上游是谁、你的 "
+                       L"pull/rebase 与 ff 配置怎么写的、工作区现状」（不弹命令窗口、不接触任何远端），"
+                       L"问回来后先把要处理的分支对摆给你看…");
+  RefreshTexts(window);
+}
+
+void MainWindow::OnPullProbeCompleted(HWND window, uint64_t completionSerial) {
+  platform::PullProbeOutcome outcome;
+  if (!pullWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
+  }
+  const PullStage stage = pendingPull_.stage;
+  if (stage == PullStage::none) {
+    return;  // 这一次 pull 已经按「取消 / 换仓库 / 结案」作废，迟到的结果原样丢掉。
+  }
+  if (!state_.RepoUsable() ||
+      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
+    AbandonPullAttempt(window,
+                       L"预检完成时仓库已经换掉，这次 pull 没有执行任何命令。请对现在的仓库重新点一次「pull」。");
+    return;
+  }
+  switch (stage) {
+    case PullStage::fetchProbe:
+      HandlePullFetchProbe(window, outcome);
+      break;
+    case PullStage::integrateProbe:
+      HandlePullIntegrateProbe(window, outcome);
+      break;
+    case PullStage::recheckProbe:
+      HandlePullRecheckProbe(window, outcome);
+      break;
+    default:
+      AbandonPullAttempt(window, L"预检回来时这次 pull 已经不在等它了，没有执行任何命令。");
+      break;
+  }
+}
+
+void MainWindow::HandlePullFetchProbe(HWND window, const platform::PullProbeOutcome& outcome) {
+  const git::PullFetchPlan plan =
+      git::BuildPullFetchPlan(outcome.target, state_.Repo().detection.root);
+  if (plan.state == git::PullFetchPlanState::blocked) {
+    ::MessageBoxW(window, plan.explanation.c_str(), L"现在不能 pull", MB_OK | MB_ICONINFORMATION);
+    AbandonPullAttempt(window,
+                       L"未执行 pull：前提不成立（原因见刚才的说明框）。没有打开命令窗口，也没有接触"
+                       L"任何远端或改动仓库。");
+    return;
+  }
+  const int answer = ::MessageBoxW(window, plan.confirmationText.c_str(), L"pull 第一步：先获取，请确认",
+                                   MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2);
+  if (answer != IDOK) {
+    AbandonPullAttempt(window,
+                       L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。整合这一步更没有被谈起。");
+    return;
+  }
+
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = state_.Repo().detection.root;
+  operation.arguments = plan.arguments;  // 目标只认远端名字，URL 由 Git 自己按配置解析。
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第一步：获取；" +
+                        plan.remoteName + L" → " + plan.trackingRef + L"），等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.pullFetchOperation = true;
+  pendingPull_.stage = PullStage::fetching;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    state_.SetStatusNote(L"这次 pull 停在第一步：命令窗口未能打开，或启动失败（原因见上一行状态）。"
+                         L"远端没有被接触，仓库也没有改动。");
+    pendingPull_ = PendingPull{};
+    RefreshTexts(window);
+  }
+}
+
+void MainWindow::OnPullFetchSettled(HWND window, bool fetchSucceeded) {
+  if (pendingPull_.stage != PullStage::fetching) {
+    // 通知迟到（期间换了仓库、或这一步已按别的路径结案）：绝不能凭这份旧状态继续往下整合。
+    pendingPull_ = PendingPull{};
+    return;
+  }
+  if (!fetchSucceeded) {
+    pendingPull_ = PendingPull{};
+    state_.SetStatusNote(L"pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
+                         L"远端跟踪引用有没有被这次抓取改动，以正在重读的现状为准；本程序不自动重试，"
+                         L"也不会删除或改写任何远端配置。原因看命令窗口里 Git 的真实输出。");
+    RefreshTexts(window);
+    return;
+  }
+
+  pendingPull_.stage = PullStage::integrateProbe;
+  pendingPull_.fetchAlreadyRan = true;
+  platform::PullProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
+  request.timeoutMilliseconds = kPullProbeTimeoutMs;
+  request.includeRelationship = true;
+  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
+                      [](const platform::PullProbeRequest& pending) {
+                        return platform::RunPullProbeLoad(pending);
+                      });
+  state_.SetStatusNote(L"获取已完成。正在后台重读仓库现状，并只读核对本地与远端的关系（各有几个独有提交、"
+                       L"共同基准、这次会带进哪些文件、内容冲突预演），判回来后将问你要不要整合…");
+  RefreshTexts(window);
+}
+
+void MainWindow::HandlePullIntegrateProbe(HWND window, const platform::PullProbeOutcome& outcome) {
+  // 这一份事实是确认框与「执行前复核」的比对基准，必须先存下来再弹框。
+  pendingPull_.integrateFacts = outcome;
+  ComposeAndConfirmPullIntegrate(window, outcome, git::PullStrategyChoice::none);
+}
+
+void MainWindow::ComposeAndConfirmPullIntegrate(HWND window, const platform::PullProbeOutcome& outcome,
+                                                git::PullStrategyChoice choice) {
+  git::PullIntegratePlanInput input;
+  input.target = outcome.target;
+  input.relationship = outcome.relationship;
+  input.repositoryRoot = state_.Repo().detection.root;
+  input.choice = choice;
+  const git::PullIntegratePlan plan = git::BuildPullIntegratePlan(input);
+
+  // 取消/拒绝时几乎都要带同一句：那次获取已经动了远端跟踪引用，而且不该被退回去。
+  const std::wstring fetchLeftover =
+      pendingPull_.fetchAlreadyRan
+          ? std::wstring(L"要说明的是：刚才那次获取（在命令窗口里跑的那条 fetch）已经把远端跟踪引用更新到"
+                         L"远端的位置，这一处改动保留着——本程序不会把它退回去，也不需要你做什么。"
+                         L"你取消的是接下来的整合：本地分支、索引与工作区都没有被动过。")
+          : std::wstring(L"没有执行整合：本地分支、索引与工作区都没有被动过，也没有接触任何远端。");
+
+  switch (plan.state) {
+    case git::PullPlanState::blocked: {
+      ::MessageBoxW(window, plan.explanation.c_str(), L"现在不能整合", MB_OK | MB_ICONINFORMATION);
+      AbandonPullAttempt(window, L"未执行整合：" + fetchLeftover);
+      return;
+    }
+    case git::PullPlanState::nothingToIntegrate: {
+      ::MessageBoxW(window, plan.explanation.c_str(), L"pull：远端没有要整合的内容",
+                    MB_OK | MB_ICONINFORMATION);
+      AbandonPullAttempt(window, plan.explanation + L"\n" + fetchLeftover);
+      return;
+    }
+    case git::PullPlanState::chooseStrategy: {
+      // 分叉而配置没定策略：合并与变基两种做法摆出来，选完还会再有一次带风险清单的确认。
+      platform::RemoteChoiceSpec spec;
+      spec.title = L"选择这次 pull 的整合方式";
+      spec.label = plan.explanation;
+      for (const std::wstring& candidate : plan.strategyCandidates) {
+        spec.items.push_back({candidate, L""});
+      }
+      spec.okText = L"按选中的方式整合";
+      spec.emptyItemDetail.clear();  // 这里没有第二栏，别补一句与远端无关的占位。
+      spec.needSelectionHint = L"先在列表里点选一种整合方式，再按确定。（取消不会执行任何命令）";
+      spec.font = metrics_.Font();
+      spec.layout.margin = metrics_.Margin();
+      spec.layout.gap = metrics_.RowGap();
+      spec.layout.width = metrics_.Scale(560);
+      spec.layout.labelHeight = 4 * metrics_.LabelHeight();  // 「为什么要在这里选」那句留四行。
+      spec.layout.listHeight = metrics_.Scale(110);
+      spec.layout.buttonWidth = metrics_.ButtonWidth(L"按选中的方式整合");
+      spec.layout.buttonHeight = metrics_.ControlHeight();
+      const platform::RemoteChoiceResult picked = platform::PromptForRemoteChoice(window, spec);
+      if (!picked.accepted || picked.selectedIndex < 0 ||
+          static_cast<size_t>(picked.selectedIndex) >= plan.strategyCandidates.size()) {
+        AbandonPullAttempt(window, L"已取消整合方式的选择：" + fetchLeftover);
+        return;
+      }
+      ComposeAndConfirmPullIntegrate(
+          window, outcome,
+          picked.selectedIndex == 0 ? git::PullStrategyChoice::chooseMerge
+                                    : git::PullStrategyChoice::chooseRebase);
+      return;
+    }
+    case git::PullPlanState::ready:
+      break;
+  }
+
+  const bool proceed =
+      plan.requiresForce
+          ? ShowPullRiskConfirm(window, plan.confirmationText)
+          : ::MessageBoxW(window, plan.confirmationText.c_str(), L"pull 第二步：整合前请确认",
+                          MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK;
+  if (!proceed) {
+    AbandonPullAttempt(window, L"已取消整合：" + fetchLeftover);
+    return;
+  }
+  pendingPull_.plan = plan;
+  RequestPullExecutionRecheck(window);
+}
+
+void MainWindow::RequestPullExecutionRecheck(HWND window) {
+  pendingPull_.stage = PullStage::recheckProbe;
+  platform::PullProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
+  request.timeoutMilliseconds = kPullProbeTimeoutMs;
+  request.includeRelationship = false;
+  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
+                      [](const platform::PullProbeRequest& pending) {
+                        return platform::RunPullProbeLoad(pending);
+                      });
+  state_.SetStatusNote(L"点头之后、执行之前，再把预检那套只读查询原样重发一遍核对现状"
+                       L"（分支 / HEAD / 远端跟踪引用 / 工作区）：对得上才执行那条整合命令…");
+  RefreshTexts(window);
+}
+
+void MainWindow::HandlePullRecheckProbe(HWND window, const platform::PullProbeOutcome& outcome) {
+  const std::wstring change =
+      git::DescribePullChange(pendingPull_.integrateFacts.target, outcome.target);
+  if (!change.empty()) {
+    ::MessageBoxW(window, change.c_str(), L"执行前复核：仓库又变了", MB_OK | MB_ICONWARNING);
+    pendingPull_ = PendingPull{};
+    state_.SetStatusNote(L"执行前复核发现现状与预检时不一致，因此没有发出整合命令。"
+                         L"仓库状态正在重读，看清现状后如仍要 pull 请再点一次。");
+    RefreshTexts(window);
+    ScheduleRefresh(window);
+    return;
+  }
+  LaunchPullIntegrate(window, pendingPull_.plan);
+}
+
+void MainWindow::LaunchPullIntegrate(HWND window, const git::PullIntegratePlan& plan) {
+  git::CommandWindowOperation operation;
+  operation.operationId = plan.operationId;
+  operation.displayName = plan.displayName;
+  operation.gitExecutable = state_.Git().path;
+  operation.repositoryDirectory = state_.Repo().detection.root;
+  operation.arguments = plan.arguments;
+
+  CommandLaunchOptions options;
+  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第二步：整合；工作目录 " +
+                        state_.Repo().detection.root + L"），等待 Git 退出码…";
+  options.scopeNotice = plan.notice;
+  options.pullIntegrateOperation = true;
+  pendingPull_.stage = PullStage::integrating;
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    state_.SetStatusNote(L"这次整合没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。" +
+                         std::wstring(pendingPull_.fetchAlreadyRan
+                                          ? L"之前那次获取只更新了远端跟踪引用，本地没有被改动。"
+                                          : L"本地没有任何改动。"));
+    pendingPull_ = PendingPull{};
+    RefreshTexts(window);
+  }
+}
+
+std::wstring MainWindow::ReportPullIntegrateFailure(HWND window, git::CommandCompletion completion,
+                                                   long exitCode) {
+  const platform::PullAftermath aftermath = platform::CapturePullAftermath(
+      state_.Git().path, state_.Repo().detection.root, state_.Repo().detection.absoluteGitDir,
+      kPullRecheckTimeoutMs);
+
+  std::wstring text;
+  text += L"命令窗口里的那次整合没有完成（" + std::wstring(git::CommandCompletionLabel(completion));
+  if (completion == git::CommandCompletion::finished ||
+      completion == git::CommandCompletion::gitNotStarted) {
+    text += L"，Git 退出码 " + std::to_wstring(static_cast<long long>(exitCode));
+  }
+  text += L"）。\n\n";
+  text += L"当前流程：" +
+          (aftermath.workflow.HasSpecialFlowInProgress()
+               ? aftermath.workflow.SpecialFlowText()
+               : std::wstring(L"没有 Git 流程停在进行中（这次整合没有留下未完成的流程）")) +
+          L"\n";
+  if (!aftermath.conflict.readOk) {
+    text += L"未合并的文件：没能读回来（" +
+            (aftermath.conflict.readFailure.empty() ? std::wstring(L"原因未知")
+                                                    : aftermath.conflict.readFailure) +
+            L"）。以命令窗口里 Git 的真实输出为准。\n";
+  } else if (aftermath.conflict.conflictPaths.empty()) {
+    text += L"未合并的文件：无（索引里没有未合并条目，这次失败不是留下冲突的那种失败）。\n";
+  } else {
+    text += L"未合并的文件共 " + std::to_wstring(aftermath.conflict.conflictPaths.size()) + L" 个：";
+    const size_t shown = std::min(aftermath.conflict.conflictPaths.size(), size_t{8});
+    for (size_t index = 0; index < shown; ++index) {
+      text += L"\n  · " + aftermath.conflict.conflictPaths[index];
+    }
+    if (aftermath.conflict.conflictPaths.size() > shown) {
+      text += L"\n  · …（其余 " +
+              std::to_wstring(aftermath.conflict.conflictPaths.size() - shown) + L" 个见“未暂存的更改”）";
+    }
+    text += L"\n这些文件也正列在“未暂存的更改”里（重读完成后带「冲突」状态）。\n";
+  }
+  if (!aftermath.conflict.branchRef.empty()) {
+    text += L"当前分支：" + aftermath.conflict.branchRef + L"\n";
+  }
+  if (!aftermath.conflict.headObjectId.empty()) {
+    text += L"HEAD 现在在：" + git::ShortObjectId(aftermath.conflict.headObjectId) + L"\n";
+  }
+  text += L"\n本程序不会替你收尾：不会 abort、不会 reset、不会 continue，也不会选任何一方的内容——"
+          L"这些决定属于你，命令窗口里留着 Git 的完整输出。\n";
+  text += L"你可以继续那个流程（git merge --continue / git rebase --continue），"
+          L"或按你自己的判断中止（git merge --abort / git rebase --abort）。";
+
+  ::MessageBoxW(window, text.c_str(), L"pull 整合没有完成", MB_OK | MB_ICONWARNING);
+
+  std::wstring note = L"pull 整合未完成";
+  if (aftermath.workflow.HasSpecialFlowInProgress()) {
+    note += L"：仓库停在「" + aftermath.workflow.SpecialFlowText() + L"」";
+  }
+  if (!aftermath.conflict.conflictPaths.empty()) {
+    note += L"，未合并 " + std::to_wstring(aftermath.conflict.conflictPaths.size()) + L" 个文件";
+  }
+  note += L"。本程序没有 abort/reset/continue，处理现场由你决定（详见刚才的说明框）。";
+  return note;
+}
+
 void MainWindow::AfterCommitSucceeded(HWND window) {
   {
     // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
@@ -2573,6 +3016,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kFetchProbeCompleted:
       OnFetchProbeCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kPullProbeCompleted:
+      OnPullProbeCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -2594,6 +3040,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       authorWorker_.Shutdown();
       undoWorker_.Shutdown();
       fetchWorker_.Shutdown();
+      pullWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

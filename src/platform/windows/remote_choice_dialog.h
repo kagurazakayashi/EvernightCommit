@@ -31,6 +31,11 @@ struct RemoteChoiceSpec {
   std::vector<RemoteChoiceItem> items;  // 呼叫方按 Git 给出的顺序传入
   std::wstring okText{L"抓取选中的远端"};
   std::wstring cancelText{L"取消"};
+  // 条目没有第二栏可显示时的占位，以及「没选中就按确定」的那句提醒。
+  // 默认是 fetch 的说法；把这个框用作别的单选（例如 pull 的整合策略）时换掉，
+  // 免得一个「选策略」的框里冒出「远端没有记录 fetch URL」。
+  std::wstring emptyItemDetail{L"（这个远端没有记录 fetch URL）"};
+  std::wstring needSelectionHint{L"先在列表里点选一个远端，再按确定。（取消不会执行任何命令）"};
   HFONT font = nullptr;
   RemoteChoiceLayout layout{};
 };

@@ -13,6 +13,7 @@
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
 #include "git/commit_plan.h"
+#include "git/pull_plan.h"
 #include "git/staging_plan.h"
 #include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
@@ -20,6 +21,7 @@
 #include "platform/windows/fetch_probe.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
+#include "platform/windows/pull_probe.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/undo_probe.h"
@@ -57,6 +59,11 @@ struct CommandLaunchOptions {
   std::wstring restoreHint;
   // 这次是「fetch」：结论里追加一句范围承诺（只更新了远端跟踪引用；失败时不自动重试）。
   bool fetchOperation = false;
+  // 这次是「pull 的第一步：获取」。它的完成不是终态——还要接着做阶段二预检并再问一次才整合，
+  // 因此界面要在终态里认出「这一步属于哪一次 pull」。
+  bool pullFetchOperation = false;
+  // 这次是「pull 的第二步：整合」。非 0 退出时界面要把现场读回来如实说（冲突文件、卡在哪一步）。
+  bool pullIntegrateOperation = false;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -238,7 +245,7 @@ private:
   // 放弃这次撤回（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
   void AbandonUndoAttempt(HWND window, std::wstring_view reason);
 
-  // ---- fetch（本步骤）----
+  // ---- fetch（已接通）----
   // 点击「fetch」：核对共同前提后发起一次只读目标预检（当前分支 / 分支配置的远端 /
   // 远端清单）。预检回来之前不弹任何框、不发任何对外命令。
   void RequestFetch(HWND window);
@@ -247,6 +254,36 @@ private:
   void OnFetchProbeCompleted(HWND window, uint64_t completionSerial);
   // 在命令窗口里启动一条确定的 fetch 方案（确认框已由调用方点头）。
   void LaunchFetch(HWND window, const git::FetchPlan& plan);
+
+  // ---- pull（本步骤）----
+  // pull 分两步，两步都在命令窗口里看得见，中间夹两次只读预检：
+  //   获取（fetch）→ 重读事实并判出关系/风险/策略 → 点头 → 执行前复核 → 整合（merge / rebase）。
+  // 点击「pull」：核对共同前提后发起阶段一只读预检（分支 / HEAD / 上游 / 策略配置 / 现状）。
+  void RequestPull(HWND window);
+  // 预检回来，按 pendingPull_.stage 分派到下面三条路之一（迟到或换仓库的结果一律作废）。
+  void OnPullProbeCompleted(HWND window, uint64_t completionSerial);
+  // 阶段一：给出「本地分支 ← 远端分支」的确认框，点头才在命令窗口里 fetch。
+  void HandlePullFetchProbe(HWND window, const platform::PullProbeOutcome& outcome);
+  // 抓取的操作终态回来：成功才继续做阶段二预检；失败就停在这里（不自动重试、不改配置）。
+  void OnPullFetchSettled(HWND window, bool fetchSucceeded);
+  // 阶段二：判关系与风险 → 需要时让用户选合并/变基 → 给带风险清单的确认框。
+  void HandlePullIntegrateProbe(HWND window, const platform::PullProbeOutcome& outcome);
+  // 用给定的策略选择合成方案，并按方案的状态走「说明 / 选择框 / 确认框」三条路之一。
+  void ComposeAndConfirmPullIntegrate(HWND window, const platform::PullProbeOutcome& outcome,
+                                      git::PullStrategyChoice choice);
+  // 确认框点头之后：在后台把预检那套只读查询重发一遍，比对两回事实——一致才启动整合命令。
+  void RequestPullExecutionRecheck(HWND window);
+  void HandlePullRecheckProbe(HWND window, const platform::PullProbeOutcome& outcome);
+  // 在命令窗口里启动一条确定的整合方案（复核已通过）。
+  void LaunchPullIntegrate(HWND window, const git::PullIntegratePlan& plan);
+  // 整合没跑成：把现场读回来（还有没有流程在走、哪些文件未合并），如实告诉用户程序不会替他收尾。
+  // 弹出的说明框由本函数负责；返回值是写进状态栏的那句结论（同时并进操作的终态说明里）。
+  [[nodiscard]] std::wstring ReportPullIntegrateFailure(HWND window, git::CommandCompletion completion,
+                                                        long exitCode);
+  // 放弃这次 pull（预检失败、用户取消、复核不过）：原因写进状态栏，必要时说明 fetch 的遗留影响。
+  void AbandonPullAttempt(HWND window, std::wstring_view reason);
+  // 风险确认框：按钮是「仍要按这份预检继续整合」与「取消」，跟撤回那套一样走 TaskDialog。
+  [[nodiscard]] bool ShowPullRiskConfirm(HWND window, const std::wstring& preview);
 
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
@@ -271,6 +308,10 @@ private:
     std::wstring restoreHint;
     // 这次是「fetch」：终态说明里追加范围承诺；无论成败都不自动重试（失败原因在命令窗口里）。
     bool fetchOperation = false;
+    // 这次是「pull 的获取阶段」：终态不是终点——成功要继续问本地与远端的关系，失败就此为止。
+    bool pullFetchOperation = false;
+    // 这次是「pull 的整合阶段」：非 0 退出时界面要把现场读回来如实交代。
+    bool pullIntegrateOperation = false;
   };
 
   // 一次「等待预检回来再确认」的撤回最近提交：点击瞬间把界面摘要留在这儿，
@@ -287,6 +328,33 @@ private:
     git::CapturedSnapshot captured;
   };
 
+  // pull 进行到哪一步。三个阶段共用同一个后台预检器，靠这个标记分辨「回来的那份事实给谁用」：
+  //   fetchProbe     —— 抓取前的阶段一只读预检在跑（分支/上游/配置/现状）；
+  //   fetching       —— 命令窗口里的那次获取在跑（网络操作，用户看得见）；
+  //   integrateProbe —— 抓取成功后的阶段二预检在跑（关系/带入文件/冲突预演）；
+  //   recheckProbe   —— 用户点头之后的执行前复核在跑（把阶段一那套查询原样重发一遍）；
+  //   integrating    —— 命令窗口里的那次整合在跑。
+  // 确认框/选择框是模态的，不需要额外的阶段：弹出时界面仍然停在对应的预检阶段上。
+  enum class PullStage {
+    none = 0,
+    fetchProbe,
+    fetching,
+    integrateProbe,
+    recheckProbe,
+    integrating,
+  };
+
+  // 一次进行中的 pull。integrateFacts/plan 只在走到确认框之后才有内容：
+  // 复核比对的是「预检那一份」与「点头后重读的那一份」，两者缺一就不能执行旧方案。
+  struct PendingPull {
+    PullStage stage = PullStage::none;
+    platform::PullProbeOutcome integrateFacts;
+    git::PullIntegratePlan plan;
+    // 这一次 pull 是否已经在命令窗口里跑过「获取」：取消整合时要把这一点交代清楚
+    // （远端跟踪引用已经被那次抓取更新过，本程序不会、也不该把它退回去）。
+    bool fetchAlreadyRan = false;
+  };
+
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
@@ -294,6 +362,10 @@ private:
   platform::AuthorConfigWorker authorWorker_;
   platform::UndoProbeWorker undoWorker_;
   platform::FetchProbeWorker fetchWorker_;
+  // pull 的三个预检阶段共用这一个后台预检器（阶段一 / 阶段二 / 执行前复核），
+  // 回来的那份事实给谁用，由 pendingPull_.stage 分辨。
+  platform::PullProbeWorker pullWorker_;
+  PendingPull pendingPull_;
   // 是否有一次 fetch 目标预检在跑：重复点击先被这句拒绝，迟到的旧结果按序号作废。
   bool fetchProbing_ = false;
   platform::CommandWindowRunner commandRunner_;
