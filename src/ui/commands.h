@@ -82,6 +82,9 @@ inline constexpr UINT kAuthorConfigCompleted = WM_APP + 6;
 inline constexpr UINT kUndoProbeCompleted = WM_APP + 7;
 // fetch 目标的只读预检（当前分支/分支配置的远端/远端清单，全部只读）完成通知；wParam 为请求序号。
 inline constexpr UINT kFetchProbeCompleted = WM_APP + 8;
+// pull 的只读预检（分支/HEAD/上游/策略配置/现状，以及抓取后的关系与冲突预演）完成通知；
+// wParam 为请求序号。抓取与整合两步本身都在命令窗口里跑，不走这条通知。
+inline constexpr UINT kPullProbeCompleted = WM_APP + 9;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -111,5 +114,11 @@ inline constexpr unsigned long kUndoRecheckTimeoutMs = 3000;
 // fetch 目标预检同样是本地只读查询（symbolic-ref / config / remote -v 三条都是毫秒级），
 // 沿用识别的 8 秒放宽值以容纳慢盘；超时按「查询失败」展示，绝不自动重试。
 inline constexpr unsigned long kFetchProbeTimeoutMs = 8000;
+// pull 预检里最慢的一条是 git status（要展开未跟踪目录），与工作区读取同源，
+// 因此沿用它的 20 秒放宽值；抓取之后那一趟还要多问关系、带入清单与冲突预演，都在这一次里。
+inline constexpr unsigned long kPullProbeTimeoutMs = 20000;
+// 确认框点头之后、启动整合命令之前的同步复核只有三条毫秒级查询（分支 / HEAD / 跟踪引用）：
+// 超时即按「复核不过」放弃本次执行，因此用短超时、绝不长等。
+inline constexpr unsigned long kPullRecheckTimeoutMs = 3000;
 
 }  // namespace gc::ui
