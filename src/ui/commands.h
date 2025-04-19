@@ -85,6 +85,11 @@ inline constexpr UINT kFetchProbeCompleted = WM_APP + 8;
 // pull 的只读预检（分支/HEAD/上游/策略配置/现状，以及抓取后的关系与冲突预演）完成通知；
 // wParam 为请求序号。抓取与整合两步本身都在命令窗口里跑，不走这条通知。
 inline constexpr UINT kPullProbeCompleted = WM_APP + 9;
+// push 的只读预检（分支/HEAD/上游/生效配置/发布 URL/领先落后）完成通知；wParam 为请求序号。
+// 推送本身在命令窗口里跑，不走这条通知。
+inline constexpr UINT kPushProbeCompleted = WM_APP + 10;
+// 推送之后向发布目标核对（只读 ls-remote）的完成通知；wParam 为请求序号。
+inline constexpr UINT kPushVerifyCompleted = WM_APP + 11;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -120,5 +125,12 @@ inline constexpr unsigned long kPullProbeTimeoutMs = 20000;
 // 确认框点头之后、启动整合命令之前的同步复核只有三条毫秒级查询（分支 / HEAD / 跟踪引用）：
 // 超时即按「复核不过」放弃本次执行，因此用短超时、绝不长等。
 inline constexpr unsigned long kPullRecheckTimeoutMs = 3000;
+// push 预检最慢的一条是 `git config --list`（按 include 叠出全部生效配置），同样是本地只读查询，
+// 沿用 20 秒放宽值容纳慢盘与巨型配置；超时按「查询失败」拒绝这次推送，绝不带着猜的目标上线。
+inline constexpr unsigned long kPushProbeTimeoutMs = 20000;
+// 推送之后向发布目标的那一次核对要走网络（ls-remote），凭据由 Git 自己的认证方式处理：
+// 给 30 秒，超时只说明「这一处没能核实」，不据此断言推送失败，也不自动重试。
+// 上限不宜再放大：程序退出时 WM_DESTROY 会等工作线程收尾，最长就阻塞这么久（隐藏查询没有取消接口）。
+inline constexpr unsigned long kPushVerifyTimeoutMs = 30000;
 
 }  // namespace gc::ui

@@ -575,6 +575,9 @@ PullTargetFacts InterpretPullTarget(const PullTargetQueries& queries) {
 
 // ---- 阶段二判读 ----
 
+// 兩個階段共用的行拆解工具：SplitWhitespace 服務下面這個計數解析，
+// ParseAheadBehindCount 另外要給 push 用（同一個輸出約定，見 pull_plan.h 的宣告處）。
+
 // 「12<TAB>3」这样一行按空白拆成 token。
 std::vector<std::wstring> SplitWhitespace(std::wstring_view line) {
   std::vector<std::wstring> tokens;
@@ -595,7 +598,7 @@ std::vector<std::wstring> SplitWhitespace(std::wstring_view line) {
   return tokens;
 }
 
-bool ParseCountPair(std::wstring_view line, long long* ahead, long long* behind) {
+bool ParseAheadBehindCount(std::wstring_view line, long long* ahead, long long* behind) {
   const std::vector<std::wstring> tokens = SplitWhitespace(line);
   if (tokens.size() != 2) {
     return false;
@@ -624,7 +627,7 @@ PullRelationshipFacts InterpretPullRelationship(const PullRelationshipQueries& q
     return facts;
   }
   const std::wstring_view line = count.lines.empty() ? std::wstring_view() : std::wstring_view(count.lines.front());
-  if (!ParseCountPair(line, &facts.ahead, &facts.behind)) {
+  if (!ParseAheadBehindCount(line, &facts.ahead, &facts.behind)) {
     facts.queryFailure = L"rev-list --left-right --count 的回答不是「左 右」两个非负整数（读到的那一行是：" +
                          std::wstring(line) + L"），无法判断本地与远端的关系。";
     return facts;

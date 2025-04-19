@@ -96,6 +96,11 @@ struct PullUpstreamInfo {
 
 [[nodiscard]] PullUpstreamInfo ParsePullUpstreamLine(std::wstring_view line);
 
+// `git rev-list --left-right --count A...B` 那一行（「左<TAB>右」兩個非負整數）的拆解。
+// 這個約定只有一份判讀實現：pull 判「本地與遠端各有幾個獨有提交」，push 判「這次要送出去幾個、
+// 對端是否已有本地沒有的東西」，兩者問的是同一件事，不能各寫一套。
+[[nodiscard]] bool ParseAheadBehindCount(std::wstring_view line, long long* ahead, long long* behind);
+
 
 [[nodiscard]] std::vector<std::wstring> BuildPullSymbolicRefArguments(std::wstring_view repositoryDirectory);
 [[nodiscard]] std::vector<std::wstring> BuildPullHeadObjectArguments(std::wstring_view repositoryDirectory);
