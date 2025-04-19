@@ -14,6 +14,7 @@
 #include "git/commit_message.h"
 #include "git/commit_plan.h"
 #include "git/pull_plan.h"
+#include "git/push_plan.h"
 #include "git/staging_plan.h"
 #include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
@@ -22,6 +23,7 @@
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/pull_probe.h"
+#include "platform/windows/push_probe.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/undo_probe.h"
@@ -64,6 +66,8 @@ struct CommandLaunchOptions {
   bool pullFetchOperation = false;
   // 这次是「pull 的第二步：整合」。非 0 退出时界面要把现场读回来如实说（冲突文件、卡在哪一步）。
   bool pullIntegrateOperation = false;
+  // 这次是「推送」：终态之后还要向发布目标做一次只读核对，成功与否以那份实况参与结论。
+  bool pushOperation = false;
 };
 
 // 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
@@ -285,6 +289,29 @@ private:
   // 风险确认框：按钮是「仍要按这份预检继续整合」与「取消」，跟撤回那套一样走 TaskDialog。
   [[nodiscard]] bool ShowPullRiskConfirm(HWND window, const std::wstring& preview);
 
+  // ---- push（本步骤）----
+  // 推送只有一个可见阶段：命令窗口里那一条 `git push`。它前后各夹一次后台只读动作：
+  //   预检（分支/HEAD/上游/生效配置/发布 URL/领先落后）→ 点头 → 执行前复核 → 命令窗口 push
+  //   → 终态 → 向**发布目标**逐条只读核实那条引用停在哪。
+  // 点击「推送」：核对共同前提后发起预检。预检回来之前不弹任何框、不接触任何远端。
+  void RequestPush(HWND window);
+  // 预检回来：判读成方案。blocked 只说明原因；ready 给确认框（有风险时要求明确点「仍要推送」）。
+  void OnPushProbeCompleted(HWND window, uint64_t completionSerial);
+  void HandlePushProbe(HWND window, const platform::PushProbeOutcome& outcome);
+  // 确认框点头之后：把预检那套只读查询原样重发一遍，比对两回事实——一致才启动那条命令。
+  void RequestPushExecutionRecheck(HWND window);
+  void HandlePushRecheckProbe(HWND window, const platform::PushProbeOutcome& outcome);
+  // 在命令窗口里启动一条确定的推送方案（复核已通过）。
+  void LaunchPush(HWND window, const git::PushPlan& plan);
+  // 推送终态回来：无论成败都要向发布目标核实（失败时那份实况正是解释「到底送没送到」的证据）。
+  void RequestPushVerification(HWND window, bool commandSucceeded, std::wstring_view commandConclusion);
+  // 核实结果回来：结论写进状态栏；与命令窗口的结论不符时另开一个说明框，把逐目标证据摆出来。
+  void OnPushVerifyCompleted(HWND window, uint64_t completionSerial);
+  // 风险确认框：与 pull 整合同一套规矩——「仍要推送」只越过本程序的提示，命令一个字都不加。
+  [[nodiscard]] bool ShowPushRiskConfirm(HWND window, const std::wstring& preview);
+  // 放弃这次推送（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
+  void AbandonPushAttempt(HWND window, std::wstring_view reason);
+
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
   struct ActiveOperation {
@@ -312,6 +339,8 @@ private:
     bool pullFetchOperation = false;
     // 这次是「pull 的整合阶段」：非 0 退出时界面要把现场读回来如实交代。
     bool pullIntegrateOperation = false;
+    // 这次是「推送」：终态之后界面要发起对发布目标的核实（那才是「送到没送到」的依据）。
+    bool pushOperation = false;
   };
 
   // 一次「等待预检回来再确认」的撤回最近提交：点击瞬间把界面摘要留在这儿，
@@ -355,6 +384,22 @@ private:
     bool fetchAlreadyRan = false;
   };
 
+  // 一次进行中的推送走到哪一步。预检与执行前复核共用 pushWorker_，靠这个标记分辨
+  // 「回来的那份事实给谁用」；核实走 pushVerifyWorker_，与它们互不干扰。
+  enum class PushStage {
+    none = 0,
+    probe,        // 点击之后的只读预检在跑
+    recheckProbe, // 点头之后的执行前复核在跑
+    pushing,      // 命令窗口里的那条 push 在跑
+    verifying,    // 向发布目标核对在跑（这一步不影响仓库，只影响结论措辞）
+  };
+
+  struct PendingPush {
+    PushStage stage = PushStage::none;
+    platform::PushProbeOutcome preflight;  // 预检那一份：复核要和它逐条比对
+    git::PushPlan plan;
+  };
+
   platform::UniqueWindow window_;
   platform::GitVerifyWorker gitWorker_;
   platform::RepoDetectWorker repoWorker_;
@@ -366,6 +411,10 @@ private:
   // 回来的那份事实给谁用，由 pendingPull_.stage 分辨。
   platform::PullProbeWorker pullWorker_;
   PendingPull pendingPull_;
+  // push 的预检与执行前复核共用这一个后台预检器；核实另用一个（它在命令窗口操作终态之后才发起）。
+  platform::PushProbeWorker pushWorker_;
+  platform::PushVerifyWorker pushVerifyWorker_;
+  PendingPush pendingPush_;
   // 是否有一次 fetch 目标预检在跑：重复点击先被这句拒绝，迟到的旧结果按序号作废。
   bool fetchProbing_ = false;
   platform::CommandWindowRunner commandRunner_;

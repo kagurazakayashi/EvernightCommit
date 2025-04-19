@@ -70,6 +70,7 @@ add_library(gc_core STATIC
   src/git/git_locator.cpp
   src/git/git_probe.cpp
   src/git/pull_plan.cpp
+  src/git/push_plan.cpp
   src/git/repository.cpp
   src/git/staging_plan.cpp
   src/git/undo_commit_plan.cpp
@@ -94,6 +95,7 @@ add_library(gc_platform STATIC
   src/platform/windows/pathspec_file.cpp
   src/platform/windows/platform_init.cpp
   src/platform/windows/pull_probe.cpp
+  src/platform/windows/push_probe.cpp
   src/platform/windows/remote_choice_dialog.cpp
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp

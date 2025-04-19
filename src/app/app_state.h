@@ -62,14 +62,10 @@ struct AuthorState {
 // 界面与后续服务层之间的状态持有者：界面只读写这里，不直接访问 Git。
 class AppState {
 public:
-  // 依赖 Git 的“写操作”（暂存/提交/撤回/fetch/pull/push）是否已接通；后续步骤逐项打开。
-  // 打开前按钮保持禁用；打开后还要 GitUsable() 且 RepoUsable() 并无其他操作在跑才允许触发。
-  // 只读路径（仓库识别、工作区读取、手动刷新）不受本开关约束，已各自接入。
-  // 剩下的写操作（push）仍归本开关：「创建提交」「撤回最近提交」「fetch」「pull」已各自单独打开。
-  static constexpr bool kGitOperationsImplemented = false;
-
-  // 「创建提交」是否已接通：只影响这一个按钮，
-  // 这样每个写操作都能单独放开，不必连带放开 fetch/pull/push。
+  // 依赖 Git 的“写操作”（暂存/提交/撤回/fetch/pull/push）逐个接通：每个按钮下面各自一个开关，
+  // 接一个不连带放开别的。打开前按钮保持禁用；打开后还要 GitUsable() 且 RepoUsable()
+  // 并无其他命令窗口操作在跑才允许触发。只读路径（仓库识别、工作区读取、手动刷新）
+  // 不受这些开关约束，已各自接入。
   static constexpr bool kCreateCommitImplemented = true;
 
   // 「撤回最近提交」是否已接通：与「创建提交」同一套单独开关的规矩，只管这一个按钮。
@@ -82,6 +78,10 @@ public:
   // 「pull」是否已接通：只管自己这一个按钮。本步骤的 pull 分「获取」与「整合」两个可见阶段，
   // 中间夹只读预检与执行前复核；接通它不代表 push 就绪。
   static constexpr bool kPullImplemented = true;
+
+  // 「推送」是否已接通：只管自己这一个按钮。本步骤的 push 只推当前分支这一条引用，
+  // 不带 --force / --mirror / --all，也不推标签；推送后另向发布目标核实那条引用的实际位置。
+  static constexpr bool kPushImplemented = true;
 
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }
   void SetGitExePath(std::wstring path) { info_.gitExePath = std::move(path); }
