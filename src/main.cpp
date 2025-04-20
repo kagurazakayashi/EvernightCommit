@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include "platform/windows/command_window_helper.h"
 #include "platform/windows/platform_init.h"
 #include "ui/main_window.h"
 #include "ui/splitter.h"
@@ -14,6 +15,13 @@ void ShowStartupFailure() {
 
 // GUI 子系统入口：启动时不附加控制台窗口。
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+  // 命令窗口辅助入口：本程序被自己以 --gc-console-helper 启动时，在这里跑完那条
+  // 已由界面创建并核验过的 Git 操作并结束进程 —— 不创建主窗口，也不初始化 COM/通用控件。
+  // 判定只看命令行第一个参数，普通启动必然返回 false，走下面的界面流程。
+  int helperExitCode = 0;
+  if (gc::platform::RunCommandWindowHelperIfRequested(&helperExitCode)) {
+    return helperExitCode;
+  }
   try {
     gc::platform::CommonControls commonControls;
     gc::platform::ComApartment apartment;  // “浏览…”对话框依赖 COM 套间

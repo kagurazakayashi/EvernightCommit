@@ -1,6 +1,7 @@
 /.w*
 /A*.md
 /build
+/.evernight-local/
 
 # Created by https://www.toptal.com/developers/gitignore/api/c++,cmake,linux,macos,windows,visualstudio,visualstudiocode,ninja
 # Edit at https://www.toptal.com/developers/gitignore?templates=c++,cmake,linux,macos,windows,visualstudio,visualstudiocode,ninja

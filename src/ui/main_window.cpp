@@ -1784,13 +1784,13 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
-  // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/scriptNeverRan 里
+  // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/helperNeverStarted 里
   // Git 从未运行；而 terminated、stillUnknown 表示 Git 可能还活着，此时宁可让 %TEMP% 留一个
   // 几百字节的清单文件，也绝不能把 Git 正在读的那份删掉。
   const bool gitWillNotRead = result.completion == git::CommandCompletion::finished ||
                               result.completion == git::CommandCompletion::launchFailed ||
                               result.completion == git::CommandCompletion::gitNotStarted ||
-                              result.completion == git::CommandCompletion::scriptNeverRan;
+                              result.completion == git::CommandCompletion::helperNeverStarted;
   if (gitWillNotRead) {
     platform::RemoveNulPathspecFile(pathspecFile);
     platform::RemoveCommitMessageFile(messageFile);

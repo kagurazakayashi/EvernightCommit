@@ -276,7 +276,7 @@ CommitPlan BuildCommitPlan(const CommitPlanInput& input) {
 
   // ---- 確認文字：把「要提交什麼」一次講完 ----
   std::wstring preview;
-  // 把真正交给 Git 的参数原样列出来（命令窗口里的脚本也是这一条），让用户核对的是同一件事。
+  // 把真正交给 Git 的参数原样列出来（命令窗口里执行并回显的也是这一条），让用户核对的是同一件事。
   std::wstring commandLine = L"  git";
   for (const std::wstring& argument : plan.arguments) {
     commandLine += L' ' + argument;

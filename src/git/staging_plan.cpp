@@ -434,7 +434,7 @@ bool AppendPathspecFileOptions(std::vector<std::wstring>* arguments, std::wstrin
   if (arguments == nullptr || pathspecFilePath.empty()) {
     return false;
   }
-  // 与执行器的边界校验同源：清单路径最终要进 cmd 脚本的 call 行。
+  // 与执行器的边界校验同源：清单路径最终要作为参数原样交给 Git。
   // 这两项检查本模块自己先做一次，界面才能在「写得出文件但送不出去」时给出准确原因。
   if (pathspecFilePath.find(L'"') != std::wstring_view::npos) {
     return false;

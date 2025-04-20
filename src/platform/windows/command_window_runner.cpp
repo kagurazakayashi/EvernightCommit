@@ -7,11 +7,12 @@
 #include <chrono>
 #include <cstring>
 #include <optional>
+#include <random>
 #include <system_error>
 #include <utility>
 #include <vector>
 
-#include "platform/windows/ansi_text.h"
+#include "platform/windows/command_window_helper.h"
 #include "platform/windows/environment_block.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
@@ -27,7 +28,7 @@ constexpr unsigned long kProcessExitRetryIntervalMs = 100;
 //   GIT_TERMINAL_PROMPT=1                —— 凭据/口令必须在终端里问，不许被静默跳过；
 //   删除 GIT_ASKPASS / SSH_ASKPASS       —— 二者会把提问搬成 GUI 弹窗，与“原生交互留在窗口里”冲突；
 //   GIT_PAGER=cat                        —— 关键：新建控制台是交互式 TTY，Git 默认把
-//     status/log/diff 之类输出交给分页器 less，脚本会卡在 call 那一行等用户按键，
+//     status/log/diff 之类输出交给分页器 less，辅助进程会停在等用户按键的那一页上，
 //     于是退出码迟迟拿不到、临时仓库也被窗口占用。命令窗口本来就保留全部输出供滚动查看，
 //     分页没有价值，因此这里直接关闭分页器（不影响凭据交互）。
 const std::vector<git::EnvironmentOverride>& CommandWindowDefaultOverrides() {
@@ -60,16 +61,6 @@ std::wstring FormatWindowsError(unsigned long errorCode) {
   return text;
 }
 
-bool IsAsciiBytes(std::string_view bytes) {
-  for (const char c : bytes) {
-    const unsigned char u = static_cast<unsigned char>(c);
-    if (u < 0x20u || u > 0x7Eu) {
-      return false;
-    }
-  }
-  return true;
-}
-
 std::wstring JoinPath(std::wstring_view base, std::wstring_view relative) {
   std::wstring result(base);
   if (!result.empty() && result.back() != L'\\') {
@@ -92,22 +83,43 @@ std::wstring TempRootPath() {
   return buffer;
 }
 
-// cmd.exe 的所在目录：GetSystemDirectoryW 给出真正的系统目录（64 位进程下为 System32）。
-// 注意不要用 GetWindowsDirectoryW/GetSystemWindowsDirectoryW —— 它们只到 C:\Windows，
-// 那里没有 cmd.exe，CreateProcessW 会报“系统找不到指定的文件”。
-std::wstring SystemDirectoryPath() {
+// 本程序的完整路径：命令窗口辅助入口就住在同一个可执行文件里，
+// 启动它时用 GetModuleFileNameW 取路径，因此装在中文目录、带空格的目录都无需任何码页转换。
+std::wstring CurrentExecutablePath() {
   std::wstring buffer(MAX_PATH + 4, L'\0');
-  const UINT length = ::GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
-  if (length != 0 && length < buffer.size()) {
-    buffer.resize(length);
-    return buffer;
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const DWORD length = ::GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0) {
+      return {};
+    }
+    if (length < buffer.size() - 1) {
+      buffer.resize(length);
+      return buffer;
+    }
+    buffer.resize(buffer.size() * 2, L'\0');  // 路径比预估长（含长路径前缀时可能很长）：扩容再试。
   }
-  const DWORD queried = ::GetEnvironmentVariableW(L"windir", buffer.data(), static_cast<DWORD>(buffer.size()));
-  if (queried != 0 && queried < buffer.size()) {
-    buffer.resize(queried);
-    return JoinPath(buffer, L"System32");
+  return {};
+}
+
+// 本次操作的随机口令：说明书里的 nonce 与命令行上传来的相符，辅助进程才肯执行。
+// MSVC 的 std::random_device 取的是系统加密级随机源（内部即 rand_s），不是可预测的序号；
+// 熵源异常时宁可让这次操作起不来，也不退回“进程 ID + 计数”这种能被猜到的形态。
+std::wstring GenerateOperationNonce() {
+  static constexpr wchar_t kHexDigits[] = L"0123456789abcdef";
+  try {
+    std::random_device entropy;
+    std::wstring text;
+    text.reserve(32);
+    for (int group = 0; group < 8; ++group) {
+      const unsigned int value = entropy();
+      for (int nibble = 7; nibble >= 0; --nibble) {
+        text.push_back(kHexDigits[(value >> (nibble * 4)) & 0xFu]);
+      }
+    }
+    return text;  // 32 个十六进制字符：纯 ASCII 字母数字，满足 git::IsSafeNonce
+  } catch (...) {
+    return {};
   }
-  return L"C:\\Windows\\System32";
 }
 
 bool WriteAllBytes(std::wstring_view path, std::string_view bytes) {
@@ -151,9 +163,10 @@ bool ReadAllBytes(std::wstring_view path, std::string& outBytes) {
   }
 }
 
-// 按标题里的唯一 ASCII 标记查找命令窗口。
-// 不做整串精确匹配：脚本标题里的中文要先按系统 ANSI 码页编码、再由 cmd 按其控制台码页解码，
-// 两个码页不一致时中文会变形，而纯 ASCII 标记（操作 ID）在任何码页往返下都保持稳定。
+// 按标题里的唯一标记（操作目录名，纯 ASCII）查找命令窗口。
+// 标题现在由辅助进程用 SetConsoleTitleW 直接设置，中文部分在什么代码页的机器上都不会变形，
+// 整串精确匹配也已可用；这里仍按子串标记查找，是因为窗口刚创建时标题可能还没写上，
+// 而纯 ASCII 标记从始至终稳定，命中一次就可以缓存句柄。
 struct EnumWindowContext {
   std::wstring token;
   HWND found = nullptr;
@@ -187,9 +200,10 @@ HWND FindWindowOwningToken(std::wstring_view token) {
   return context.found;
 }
 
-// 脚本段的引用形态与 git::BuildGitCommandLine 一致：程序路径与每个参数都整体加引号。
-// 边界校验已保证这些值不含双引号与控制字符，因此不需要 CRT 的反斜杠加倍规则，
-// 只补一条：结尾反斜杠会把闭合引号转义成字面量，必须加倍。
+// 辅助进程命令行的引用形态与 git::BuildGitCommandLine 一致：每个值整体加引号。
+// Windows 不允许路径与目录名里出现双引号，口令又是纯十六进制，因此没有需要转义的引号，
+// 只剩一条要处理：结尾反斜杠会把闭合引号转义成字面量，必须加倍。
+// 这些值只作为参数被 CommandLineToArgvW 还原成数据，不会被任何 shell 再解析。
 std::wstring QuotePathSegment(std::wstring_view value) {
   std::wstring result;
   result.push_back(L'"');
@@ -220,8 +234,8 @@ struct CommandWindowWatchState {
   std::wstring directory;
   std::wstring commandLine;
   std::wstring repositoryDirectory;
-  std::wstring windowTitle;         // 脚本设置的控制台标题（展示用）
-  std::wstring windowTitleToken;    // 标题里的唯一 ASCII 标记（操作 ID），用于可靠定位窗口
+  std::wstring windowTitle;         // 辅助进程用 SetConsoleTitleW 设置的控制台标题（展示用）
+  std::wstring windowTitleToken;    // 标题里的唯一标记（操作目录名），用于可靠定位窗口
   std::wstring statusText;          // 界面可见的即时状态
   platform::UniqueHandle process;
   platform::UniqueHandle thread;
@@ -373,7 +387,7 @@ static void SweepStaleOperationDirectories() {
     const std::wstring directory = JoinPath(tempRoot, find.cFileName);
     // 只回收已知的三个文件名，绝不递归删除未知内容；目录删得掉才说明真的空了。
     for (const char* name :
-         {git::kStartMarkerFileName, git::kResultFileName, git::kScriptFileName}) {
+         {git::kStartMarkerFileName, git::kResultFileName, git::kSpecFileName}) {
       static_cast<void>(::DeleteFileW(JoinPath(directory, Utf8ToUtf16(std::string(name))).c_str()));
     }
     static_cast<void>(::RemoveDirectoryW(directory.c_str()));
@@ -427,25 +441,29 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
   }
   localFailure.commandLine = gitLine;
 
-  // 2) 操作独占目录：位于系统临时目录，名字即操作 ID，必须纯 ASCII
-  //    （结果与标记文件靠 cmd 的重定向创建，非 ASCII 目录名会在码页往返中被破坏）。
+  // 2) 操作独占目录：位于系统临时目录，目录名就是本次操作的唯一标记。
+  //    临时根可以是中文用户名一类的非 ASCII 路径：说明书、标记与结果文件全部由本程序和
+  //    辅助进程用 Unicode API（CreateFileW）读写，不再经过 cmd 批处理的字节流，
+  //    因此“临时目录必须纯 ASCII，否则中文用户不能用”这个旧前提已经不成立。
   const std::wstring tempRoot = TempRootPath();
   if (tempRoot.empty()) {
     return reportFailure(git::CommandCompletion::launchFailed, L"无法取得系统临时目录。");
   }
   const std::wstring directory = JoinPath(tempRoot, idText);
-  std::string directoryAnsi;
-  if (!EncodeToSystemAnsi(directory, directoryAnsi) || !IsAsciiBytes(directoryAnsi)) {
+  if (::CreateDirectoryW(directory.c_str(), nullptr) == 0) {
+    // 目录已存在就说明它不属于本次操作：已存在的名字不是所有权证明。
+    // 宁可拒绝这一次启动，也绝不往别人的目录里写说明书与结果。
+    const unsigned long errorCode = ::GetLastError();
+    if (errorCode == ERROR_ALREADY_EXISTS) {
+      return reportFailure(git::CommandCompletion::launchFailed,
+                           L"操作目录已存在，不属于本进程，已拒绝使用：" + directory);
+    }
     return reportFailure(git::CommandCompletion::launchFailed,
-                         L"临时目录不是 ASCII 路径，无法安全用于命令窗口脚本：" + directory);
-  }
-  if (::CreateDirectoryW(directory.c_str(), nullptr) == 0 && ::GetLastError() != ERROR_ALREADY_EXISTS) {
-    return reportFailure(git::CommandCompletion::launchFailed,
-                         L"创建操作目录失败：" + FormatWindowsError(::GetLastError()));
+                         L"创建操作目录失败：" + FormatWindowsError(errorCode));
   }
   localFailure.directory = directory;
 
-  // 3) Git 程序必须是存在的普通文件：这一步在启动 cmd 之前完成，
+  // 3) Git 程序必须是存在的普通文件：这一步在启动命令窗口之前完成，
   //    因此“Git 不存在”不会被误报成“执行完成、失败退出码”。
   if (!IsExistingRegularFile(operation.gitExecutable)) {
     return reportFailure(git::CommandCompletion::launchFailed,
@@ -456,42 +474,35 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
                          L"仓库目录不存在或不是目录：" + operation.repositoryDirectory);
   }
 
-  // 4) 按系统 ANSI 码页编码进入脚本的各段；不可表示的字符直接拒绝，绝不降级成 '?'。
-  std::string programAnsi;
-  std::string argumentsAnsi;
-  std::string titleAnsi;
-  if (!EncodeToSystemAnsi(QuotePathSegment(operation.gitExecutable), programAnsi)) {
-    return reportFailure(git::CommandCompletion::launchFailed,
-                         L"Git 程序路径含系统 ANSI 码页无法表示的字符：" + operation.gitExecutable);
-  }
-  for (size_t index = 0; index < operation.arguments.size(); ++index) {
-    std::string encoded;
-    if (!EncodeToSystemAnsi(QuotePathSegment(operation.arguments[index]), encoded)) {
-      return reportFailure(git::CommandCompletion::launchFailed,
-                           L"参数含系统 ANSI 码页无法表示的字符：" + operation.arguments[index]);
-    }
-    if (index > 0) {
-      argumentsAnsi.push_back(' ');
-    }
-    argumentsAnsi.append(encoded);
-  }
+  // 4) 操作说明书：一次操作的全部语义（Git 程序、参数、工作目录、窗口标题）只以数据形态
+  //    写进独占目录里的 spec.txt，由辅助进程读回、再用同一套边界校验复核之后才执行。
+  //    落盘用严格 UTF-8 —— 它不是“本机码页”，是双方约定的格式，因此中文、emoji 与
+  //    任何超出传统代码页的字符都原样可表达；只有孤立代理项这类非法码元会被明确拒绝，
+  //    绝不写成问号、U+FFFD 或“最佳匹配”来冒充原值。
   const std::wstring windowTitle =
       git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", operation.displayName, idText);
-  if (!EncodeToSystemAnsi(windowTitle, titleAnsi)) {
+  const std::wstring nonce = GenerateOperationNonce();
+  if (nonce.empty()) {
     return reportFailure(git::CommandCompletion::launchFailed,
-                         L"窗口标题含系统 ANSI 码页无法表示的字符：" + windowTitle);
+                         L"无法生成本次操作的随机口令，辅助进程无法与它绑定。");
   }
-
-  git::CommandWindowPlan plan;
-  if (!git::AssembleCommandWindowScript(idText, directoryAnsi, windowTitle, titleAnsi, programAnsi,
-                                        argumentsAnsi, &plan)) {
-    return reportFailure(git::CommandCompletion::launchFailed,
-                         L"脚本内容不符合命令窗口的安全约束（引号区域或路径形态被拒绝）。");
+  reject = git::CommandPlanReject::none;
+  detail.clear();
+  std::wstring specText;
+  if (!git::BuildCommandWindowSpecText(operation, idText, windowTitle, nonce, &specText, &reject,
+                                       &detail)) {
+    return reportFailure(git::CommandCompletion::launchFailed, detail);
   }
-  const std::wstring scriptPath = JoinPath(directory, Utf8ToUtf16(std::string(git::kScriptFileName)));
-  if (!WriteAllBytes(scriptPath, plan.scriptAnsi)) {
+  std::string specBytes;
+  if (!TryUtf16ToUtf8Strict(specText, specBytes)) {
     return reportFailure(git::CommandCompletion::launchFailed,
-                         L"写入一次性脚本失败：" + FormatWindowsError(::GetLastError()));
+                         L"操作内容含无法用 UTF-8 表达的码元（孤立代理项），已拒绝执行：" +
+                             operation.repositoryDirectory);
+  }
+  const std::wstring specPath = JoinPath(directory, Utf8ToUtf16(std::string(git::kSpecFileName)));
+  if (!WriteAllBytes(specPath, specBytes)) {
+    return reportFailure(git::CommandCompletion::launchFailed,
+                         L"写入操作说明书失败：" + FormatWindowsError(::GetLastError()));
   }
 
   // 5) 环境块：继承当前进程环境 + 请求的受控覆盖 + 终端交互保障。
@@ -514,30 +525,36 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
     return reportFailure(git::CommandCompletion::launchFailed, environmentReason);
   }
 
-  // 6) 启动 cmd.exe：显式 lpApplicationName、可写命令行缓冲、新控制台、仓库为工作目录。
-  //    脚本内容不进命令行，因此用户输入不会被 shell 二次解析。
-  const std::wstring cmdPath = JoinPath(SystemDirectoryPath(), L"cmd.exe");
-  std::wstring applicationName = cmdPath;
-  std::wstring commandLineText = QuotePathSegment(cmdPath) + L" /d /k " + QuotePathSegment(scriptPath);
+  // 6) 启动命令窗口辅助进程（本程序自己的隐藏入口）：显式 lpApplicationName、可写命令行
+  //    缓冲、仓库为工作目录、Unicode 环境块。新的控制台由辅助进程自己 AllocConsole，
+  //    所以这里不开 CREATE_NEW_CONSOLE —— 由它自己建控制台，界面进程与它在窗口归属上才不含糊。
+  //    命令行上只有“操作目录 + 随机口令”两项数据，说明书的内容与 Git 的参数都不在其上，
+  //    因此没有任何东西会被 shell 二次解析，这个入口也当不了通用命令执行器。
+  const std::wstring helperPath = CurrentExecutablePath();
+  if (helperPath.empty()) {
+    return reportFailure(git::CommandCompletion::launchFailed, L"无法取得本程序自身的路径。");
+  }
+  std::wstring applicationName = helperPath;
+  std::wstring commandLineText = QuotePathSegment(helperPath) + L" " +
+                                 QuotePathSegment(std::wstring(kCommandWindowHelperSwitch)) + L" " +
+                                 QuotePathSegment(directory) + L" " + QuotePathSegment(nonce);
   std::wstring mutableCommandLine = commandLineText;
   std::wstring workingDirectory = operation.repositoryDirectory;
-  std::wstring titleBuffer = windowTitle;  // startup.lpTitle 需要可写且存活到 CreateProcessW 返回。
 
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESHOWWINDOW;
   startup.wShowWindow = SW_SHOWNORMAL;
-  startup.lpTitle = titleBuffer.data();
   PROCESS_INFORMATION information{};
   const BOOL created =
       ::CreateProcessW(applicationName.data(), mutableCommandLine.data(), nullptr, nullptr,
-                       /*bInheritHandles=*/FALSE, CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+                       /*bInheritHandles=*/FALSE, CREATE_UNICODE_ENVIRONMENT,
                        environmentBlock.data(), workingDirectory.c_str(), &startup, &information);
   if (created == 0) {
     const unsigned long errorCode = ::GetLastError();
     return reportFailure(git::CommandCompletion::launchFailed,
                          L"命令窗口启动失败：" + FormatWindowsError(errorCode) +
-                             L"（程序：" + cmdPath + L"，工作目录：" + operation.repositoryDirectory + L"）");
+                             L"（程序：" + helperPath + L"，工作目录：" + operation.repositoryDirectory + L"）");
   }
 
   auto state = std::make_shared<CommandWindowWatchState>();
@@ -549,7 +566,7 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
   state->repositoryDirectory = operation.repositoryDirectory;
   state->windowTitle = windowTitle;
   state->windowTitleToken = idText;
-  state->statusText = L"已启动命令窗口，等待脚本执行";
+  state->statusText = L"已启动命令窗口，等待辅助进程就绪";
   state->process.Reset(information.hProcess);
   state->thread.Reset(information.hThread);
   state->result.operationId = id;
@@ -649,9 +666,10 @@ void CommandWindowRunner::CloseOperationWindow(uint64_t operationId) {
         window = nullptr;  // 缓存的句柄已随窗口销毁失效：重新查找。
       }
       if (window == nullptr) {
-        // 命令窗口是新建控制台，只能靠标题定位：用标题里的唯一 ASCII 标记做子串匹配，
-        // 因为中文部分经过“系统 ANSI 码页编码 → cmd 按控制台码页解码”可能变形，
-        // 整串精确匹配会失配（实测踩过）。标记跨码页稳定。
+        // 命令窗口是新建控制台，只能靠标题定位：优先用标题里的唯一标记做子串匹配
+        // （标题由辅助进程用 SetConsoleTitleW 原样设置，中文在任何代码页的机器上都不变形；
+        //  标记匹配只是给“标题还没写上”的启动瞬间留一条命中路径），
+        // 命不中再退回整串精确匹配。
         window = FindWindowOwningToken(state->windowTitleToken);
         if (window == nullptr) {
           window = ::FindWindowW(nullptr, state->windowTitle.c_str());
@@ -693,12 +711,12 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
   CommandWindowRunner* runner = this;
   const std::wstring startPath = JoinPath(state.directory, Utf8ToUtf16(std::string(git::kStartMarkerFileName)));
   const std::wstring resultPath = JoinPath(state.directory, Utf8ToUtf16(std::string(git::kResultFileName)));
-  const std::wstring scriptPath = JoinPath(state.directory, Utf8ToUtf16(std::string(git::kScriptFileName)));
+  const std::wstring specPath = JoinPath(state.directory, Utf8ToUtf16(std::string(git::kSpecFileName)));
 
-  const auto readFile = [&startPath, &resultPath, &scriptPath](std::string_view name)
+  const auto readFile = [&startPath, &resultPath, &specPath](std::string_view name)
       -> std::optional<std::string> {
     const std::wstring path =
-        name == git::kStartMarkerFileName ? startPath : (name == git::kResultFileName ? resultPath : scriptPath);
+        name == git::kStartMarkerFileName ? startPath : (name == git::kResultFileName ? resultPath : specPath);
     std::string bytes;
     if (!ReadAllBytes(path, bytes)) {
       return std::nullopt;
@@ -744,7 +762,7 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
       break;
     }
     if (processExited && completion == git::CommandCompletion::terminated) {
-      // cmd 已退出但结果文件缺失：给正在写入的结果文件一小段收尾时间，避免把“写完但未读到”
+      // 辅助进程已退出但结果文件缺失：给正在写入的结果文件一小段收尾时间，避免把“写完但未读到”
       // 误判成提前关窗。
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kProcessExitRetryWindowMs);
       while (std::chrono::steady_clock::now() < deadline) {
@@ -769,8 +787,8 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
       result.consoleExitCode = consoleExitCode;
       if (completion == git::CommandCompletion::terminated) {
         result.failureReason = L"命令窗口在拿到 Git 退出码之前关闭，结果未知。";
-      } else if (completion == git::CommandCompletion::scriptNeverRan) {
-        result.failureReason = L"cmd.exe 未能执行一次性脚本（脚本可能被拒绝访问），结果未知。";
+      } else if (completion == git::CommandCompletion::helperNeverStarted) {
+        result.failureReason = L"命令窗口辅助进程没能开始执行操作（可能被安全软件拦截），结果未知。";
       }
       settled = true;
       break;
@@ -786,7 +804,7 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
       const std::lock_guard<std::mutex> lock(runner->mutex_);
       needLookup = state.consoleWindow == nullptr;
       state.statusText = (completion == git::CommandCompletion::running) ? L"执行中"
-                                                                        : L"已启动命令窗口，等待脚本执行";
+                                                                        : L"已启动命令窗口，等待辅助进程就绪";
     }
     if (needLookup) {
       cached = FindWindowOwningToken(state.windowTitleToken);
@@ -811,7 +829,7 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
     // 标记与结果文件用完即删；目录要等命令窗口退出后才能回收，先挂起。
     ::DeleteFileW(startPath.c_str());
     ::DeleteFileW(resultPath.c_str());
-    ::DeleteFileW(scriptPath.c_str());
+    ::DeleteFileW(specPath.c_str());
     if (::RemoveDirectoryW(state.directory.c_str()) == 0) {
       runner->pendingCleanupDirectories_.push_back(state.directory);
     }
