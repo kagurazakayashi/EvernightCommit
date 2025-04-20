@@ -9,18 +9,11 @@
 namespace gc::git {
 namespace {
 
-bool IsPrintableAscii(std::string_view bytes) {
-  if (bytes.empty()) {
-    return false;
-  }
-  for (const char c : bytes) {
-    const unsigned char u = static_cast<unsigned char>(c);
-    if (u < 0x20u || u > 0x7Eu) {
-      return false;
-    }
-  }
-  return true;
-}
+// 说明书的行分隔与字段分隔：字段名单词、值可以有任何“非控制字符”，
+// 而制表与控制字符在校验里已被拒绝，因此按第一个 TAB 拆分不会歧义。
+constexpr std::wstring_view kSpecMagic = L"evernight-command-window-spec";
+constexpr wchar_t kFieldSeparator = L'\t';
+constexpr std::wstring_view kLineBreak = L"\r\n";
 
 bool IsSafeOperationId(std::wstring_view id) {
   if (id.empty() || id.size() > kMaxOperationIdLength) {
@@ -38,6 +31,12 @@ bool IsSafeOperationId(std::wstring_view id) {
     return false;  // 其余字符（含 & | ^ " % 与空格）一律不许进 ID
   }
   return true;
+}
+
+bool IsAsciiDigit(wchar_t c) noexcept { return c >= L'0' && c <= L'9'; }
+
+bool IsAsciiLetter(wchar_t c) noexcept {
+  return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z');
 }
 
 bool HasQuote(std::wstring_view text) { return text.find(L'"') != std::wstring_view::npos; }
@@ -86,9 +85,12 @@ std::wstring BuildQuotedLine(std::wstring_view program, const std::vector<std::w
   return line;
 }
 
-// 校验“将要写进 cmd 脚本的一行”：引号区域之外不得出现 cmd 元字符。
-// 每个 “ 都被视作区域切换（cmd 的引号逐字符切换，与 CRT 的转义语义不同），
-// 因此关闭引号后若紧跟非空格字符，说明存在字面量引号（可能被 cmd 误判成区域切换），拒绝。
+// 校验“将要交给 CreateProcessW 命令行的一行”：引号区域之外不得出现 shell 元字符。
+// 每个 “ 都被视作区域切换（与 CRT 的转义语义不同），因此关闭引号后若紧跟非空格字符，
+// 说明存在字面量引号（可能被下游 shell/hooks 误判成区域切换），拒绝。
+// 现在的执行链路里没有人再解析这一行（辅助进程直接把字符串交给 CreateProcessW），
+// 保留这道判定是为了让“同一份输入在两层都合法”成为可测试的不变量，
+// 也防止日后又有人把这些值拼进某条 shell 命令。
 bool CommandLineRegionSafe(std::wstring_view line) {
   bool inQuote = false;
   for (size_t index = 0; index < line.size(); ++index) {
@@ -130,31 +132,6 @@ std::wstring TrimTrailingSpaces(std::wstring_view text) {
   return std::wstring(text.substr(0, end));
 }
 
-// 把行里每个 `%` 写成 2^n 个百分号，使 cmd 展开 n 轮之后正好还原成字面 `%`。
-// cmd 的百分号展开与引号无关（实測："x%FOO%y" 在引号内同样被展开成变量值；
-// 单个 `%.` 也会被当成 `%`+首字符的位置参数引用而整段消失），因此路径里的 `%` 必须转义，
-// 否则双击一个名为 `100%.txt` 的档案时送達 Git 的是被改写过的名字。
-// 转义份数按「这行还要经历几轮展开」决定：
-//   * echo 行只经历批处理读取这一轮  -> 每个 `%` 写成 `%%`；
-//   * `call` 行会额外经历 CALL 自己的第二轮展开 -> 每个 `%` 写成 `%%%%`。
-// 两者都只增加 `%` 本身，不引入引号或 `& | < > ^`，因此不影响引号区域校验。
-[[nodiscard]] std::string ExpandPercentSigns(std::string_view text, size_t rounds) {
-  std::string result;
-  result.reserve(text.size());
-  size_t repeats = 1;
-  for (size_t index = 0; index < rounds; ++index) {
-    repeats *= 2;
-  }
-  for (const char c : text) {
-    if (c == '%') {
-      result.append(repeats, '%');
-      continue;
-    }
-    result.push_back(c);
-  }
-  return result;
-}
-
 std::vector<std::wstring> SplitAsciiWords(std::string_view line) {
   std::vector<std::wstring> words;
   size_t start = 0;
@@ -173,6 +150,24 @@ std::vector<std::wstring> SplitAsciiWords(std::string_view line) {
   return words;
 }
 
+void AppendSpecField(std::wstring& text, std::wstring_view name, std::wstring_view value) {
+  text.append(name);
+  text.push_back(kFieldSeparator);
+  text.append(value);
+  text.append(kLineBreak);
+}
+
+[[nodiscard]] bool RejectAs(CommandPlanReject reason, std::wstring message, CommandPlanReject* reject,
+                             std::wstring* detail) {
+  if (reject != nullptr) {
+    *reject = reason;
+  }
+  if (detail != nullptr) {
+    *detail = std::move(message);
+  }
+  return false;
+}
+
 }  // namespace
 
 std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
@@ -188,19 +183,21 @@ std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
     case CommandPlanReject::emptyWorkingDirectory:
       return L"仓库目录为空";
     case CommandPlanReject::quoteInPath:
-      return L"路径含双引号，无法安全交给命令窗口解释";
+      return L"路径含双引号，无法安全交给命令窗口执行";
     case CommandPlanReject::controlCharacterInPath:
-      return L"路径含控制字符，无法安全写入脚本";
+      return L"路径含控制字符，无法安全写入操作说明书";
     case CommandPlanReject::illegalArgument:
       return L"参数含双引号或控制字符";
     case CommandPlanReject::tooManyArguments:
       return L"参数数量超过上限";
     case CommandPlanReject::commandTooLong:
       return L"命令行长度超过上限";
-    case CommandPlanReject::illegalScriptDirectory:
-      return L"临时脚本目录不是纯 ASCII 路径";
-    case CommandPlanReject::nonEncodableCommand:
-      return L"命令行含系统 ANSI 码页无法表示的字符";
+    case CommandPlanReject::illegalNonce:
+      return L"操作口令缺失或含不安全字符（只允许 ASCII 字母与数字）";
+    case CommandPlanReject::illegalOperationDirectory:
+      return L"操作目录名不符合执行器生成的形态（GcOp<进程ID>x<序号>）";
+    case CommandPlanReject::illegalWindowTitle:
+      return L"窗口标题含控制字符或制表符";
   }
   return L"未知原因";
 }
@@ -208,13 +205,7 @@ std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
 bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* gitLine,
                          CommandPlanReject* reject, std::wstring* detail) {
   const auto fail = [&](CommandPlanReject reason, std::wstring message) {
-    if (reject != nullptr) {
-      *reject = reason;
-    }
-    if (detail != nullptr) {
-      *detail = std::move(message);
-    }
-    return false;
+    return RejectAs(reason, std::move(message), reject, detail);
   };
   if (gitLine == nullptr) {
     return fail(CommandPlanReject::emptyOperationId, L"内部错误：缺少输出对象");
@@ -261,7 +252,7 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
 
   const std::wstring line = BuildQuotedLine(operation.gitExecutable, operation.arguments);
   if (!CommandLineRegionSafe(line)) {
-    return fail(CommandPlanReject::quoteInPath, L"命令行存在无法安全交给 cmd 的引号区域：" + line);
+    return fail(CommandPlanReject::quoteInPath, L"命令行存在无法安全交给命令窗口的引号区域：" + line);
   }
   if (line.size() > kMaxDisplayCommandLength) {
     return fail(CommandPlanReject::commandTooLong,
@@ -273,8 +264,8 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
 
 std::wstring MakeSafeConsoleTitle(std::wstring_view prefix, std::wstring_view displayName,
                                   std::wstring_view operationId) {
-  // title 行里会改变 cmd 解析的字符：引号与控制字符已在区域校验里禁止，这里再剔除
-  // & | < > ^ % （% 还可能被当成变量引用）。中文、空格、= 与 ! 都是安全的字面量。
+  // 会改变 shell 行解析或说明书行形态的字符：引号、控制字符，以及 & | < > ^ % （% 还可能被
+  // 当成变量引用）。中文、空格、= 与 ! 都是安全的字面量，一律原样保留。
   static constexpr std::wstring_view kUnsafe = L"\"&|<>^%\r\n\t";
   std::wstring cleaned;
   cleaned.reserve(displayName.size());
@@ -296,78 +287,203 @@ std::wstring MakeSafeConsoleTitle(std::wstring_view prefix, std::wstring_view di
   return title;
 }
 
-bool AssembleCommandWindowScript(std::wstring_view operationId, std::string_view scriptDirectoryAnsi,
-                                 std::wstring_view titleWide, std::string_view titleAnsi,
-                                 std::string_view programAnsi, std::string_view argumentsAnsi,
-                                 CommandWindowPlan* plan) {
-  if (plan == nullptr || !IsSafeOperationId(operationId)) {
+bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
+                               std::wstring_view directoryToken, std::wstring_view title,
+                               std::wstring_view nonce, std::wstring* specText,
+                               CommandPlanReject* reject, std::wstring* detail) {
+  const auto fail = [&](CommandPlanReject reason, std::wstring message) {
+    return RejectAs(reason, std::move(message), reject, detail);
+  };
+  if (specText == nullptr) {
+    return fail(CommandPlanReject::emptyOperationId, L"内部错误：缺少输出对象");
+  }
+  specText->clear();
+
+  // 第一步的校验原样复用：说明书里能出现的值，必须与界面展示、辅助进程将要执行的完全同源。
+  std::wstring displayLine;
+  if (!BuildGitCommandLine(operation, &displayLine, reject, detail)) {
     return false;
   }
-  // 标记与结果文件由重定向创建：目录名会在码页往返中被破坏，只允许纯 ASCII 可打印。
-  if (!IsPrintableAscii(scriptDirectoryAnsi)) {
-    return false;
+  if (!IsSafeNonce(nonce)) {
+    return fail(CommandPlanReject::illegalNonce,
+                std::wstring(CommandPlanRejectLabel(CommandPlanReject::illegalNonce)) + L"：" +
+                    std::wstring(nonce));
   }
-  // 标题的合法性必须按宽字符判定，不能按编码后的字节判定：
-  // 多字节码页（GBK 等）的第二字节可以落进 ASCII 区间，按字节检查会把合法中文误判成元字符
-  // —— 实测因此把标题整体退化成占位文字，丢掉了用于定位窗口的唯一标记。
-  // 中文本身不危险；危险的是引号、控制字符，以及能改写行结构的 & | < > ^ %。
-  // 编码字节只需再确认没有控制字节（多字节码页的组成字节都 >= 0x40，不会误报）。
-  std::string titleBytes(titleAnsi);
-  const bool titleUnsafe = HasControl(titleWide) || HasQuote(titleWide) ||
-                           titleWide.find_first_of(L"&|<>^%") != std::wstring::npos ||
-                           HasControl(AsciiToUtf16(titleAnsi));
-  if (titleUnsafe) {
-    // 回退标题同样带上操作 ID：否则多个窗口同名，按标题找窗口就会关错目标。
-    // operationId 已由 IsSafeOperationId 保证是纯 ASCII，因此逐字符窄化不会丢信息。
-    titleBytes = "Git Command Window - ";
-    for (const wchar_t c : operationId) {
-      titleBytes.push_back(static_cast<char>(c));
+  if (!IsSafeOperationDirectoryName(directoryToken)) {
+    return fail(CommandPlanReject::illegalOperationDirectory,
+                std::wstring(CommandPlanRejectLabel(CommandPlanReject::illegalOperationDirectory)) +
+                    L"：" + std::wstring(directoryToken));
+  }
+  // 标题会原样进说明书并由辅助进程设置控制台标题：只禁止会破坏行形态的字符。
+  // 中文、emoji 等“本机码页装不下”的字符不再有任何理由被拒绝——这条链路上没有码页。
+  if (title.empty() || HasControl(title) || title.find(kFieldSeparator) != std::wstring::npos) {
+    return fail(CommandPlanReject::illegalWindowTitle,
+                std::wstring(CommandPlanRejectLabel(CommandPlanReject::illegalWindowTitle)) + L"：" +
+                    std::wstring(title));
+  }
+
+  std::wstring text;
+  text.reserve(displayLine.size() + title.size() + operation.repositoryDirectory.size() + 256);
+  AppendSpecField(text, kSpecMagic, L"1");
+  AppendSpecField(text, L"token", directoryToken);
+  AppendSpecField(text, L"opid", operation.operationId);
+  AppendSpecField(text, L"nonce", nonce);
+  AppendSpecField(text, L"title", title);
+  AppendSpecField(text, L"program", operation.gitExecutable);
+  AppendSpecField(text, L"cwd", operation.repositoryDirectory);
+  for (const std::wstring& argument : operation.arguments) {
+    AppendSpecField(text, L"arg", argument);
+  }
+  *specText = std::move(text);
+  return true;
+}
+
+bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* outSpec,
+                                std::wstring* failureReason) {
+  const auto fail = [&](std::wstring message) {
+    if (failureReason != nullptr) {
+      *failureReason = std::move(message);
+    }
+    return false;
+  };
+  if (outSpec == nullptr) {
+    return fail(L"内部错误：缺少说明书输出对象");
+  }
+  *outSpec = CommandWindowSpec();
+  if (specText.empty()) {
+    return fail(L"操作说明书为空");
+  }
+
+  CommandWindowSpec parsed;
+  std::wstring cwd;
+  bool versionChecked = false;
+  size_t cursor = 0;
+  size_t lineNumber = 0;
+  while (cursor < specText.size()) {
+    ++lineNumber;
+    size_t stop = specText.find(L'\n', cursor);
+    std::wstring_view line = specText.substr(cursor, stop == std::wstring_view::npos ? std::wstring_view::npos
+                                                                                     : stop - cursor);
+    cursor = stop == std::wstring_view::npos ? specText.size() : stop + 1;
+    if (!line.empty() && line.back() == L'\r') {
+      line.remove_suffix(1);
+    }
+    if (line.empty()) {
+      continue;  // 允许结尾换行与空行。
+    }
+    const size_t separator = line.find(kFieldSeparator);
+    if (separator == std::wstring_view::npos) {
+      return fail(L"操作说明书第 " + std::to_wstring(lineNumber) + L" 行缺少字段分隔符");
+    }
+    const std::wstring_view name = line.substr(0, separator);
+    const std::wstring value(line.substr(separator + 1));
+    if (line.find(kFieldSeparator, separator + 1) != std::wstring_view::npos) {
+      return fail(L"操作说明书第 " + std::to_wstring(lineNumber) + L" 行有多个字段分隔符");
+    }
+    if (HasControl(value)) {
+      return fail(L"操作说明书第 " + std::to_wstring(lineNumber) + L" 行含控制字符");
+    }
+    if (!versionChecked) {
+      // 首行必须是魔数与版本号：版本不符就不猜语义，直接拒绝执行。
+      if (name != kSpecMagic || value != L"1") {
+        return fail(L"操作说明书格式版本不受支持");
+      }
+      versionChecked = true;
+      continue;
+    }
+    if (name == L"token") {
+      if (!parsed.directoryToken.empty()) {
+        return fail(L"操作说明书有重复的 token 字段");
+      }
+      parsed.directoryToken = value;
+    } else if (name == L"opid") {
+      if (!parsed.operationId.empty()) {
+        return fail(L"操作说明书有重复的 opid 字段");
+      }
+      parsed.operationId = value;
+    } else if (name == L"nonce") {
+      if (!parsed.nonce.empty()) {
+        return fail(L"操作说明书有重复的 nonce 字段");
+      }
+      parsed.nonce = value;
+    } else if (name == L"title") {
+      if (!parsed.title.empty()) {
+        return fail(L"操作说明书有重复的 title 字段");
+      }
+      parsed.title = value;
+    } else if (name == L"program") {
+      if (!parsed.gitExecutable.empty()) {
+        return fail(L"操作说明书有重复的 program 字段");
+      }
+      parsed.gitExecutable = value;
+    } else if (name == L"cwd") {
+      if (!cwd.empty()) {
+        return fail(L"操作说明书有重复的 cwd 字段");
+      }
+      cwd = value;
+    } else if (name == L"arg") {
+      parsed.arguments.push_back(value);
+    } else {
+      return fail(L"操作说明书含未知字段：" + std::wstring(name));
     }
   }
-  // 程序段与参数段的字节形态必须再次通过区域校验：
-  // 宽字符版已在 BuildGitCommandLine 判定，这里防止码页往返产生新的引号或元字符。
-  const std::wstring gitLineWide = AsciiToUtf16(std::string(programAnsi) +
-                                                (argumentsAnsi.empty() ? std::string()
-                                                                       : " " + std::string(argumentsAnsi)));
-  if (HasControl(gitLineWide) || !CommandLineRegionSafe(gitLineWide)) {
+
+  if (!versionChecked) {
+    return fail(L"操作说明书缺少首行格式标记");
+  }
+  if (parsed.directoryToken.empty() || parsed.operationId.empty() || parsed.nonce.empty() ||
+      parsed.title.empty() || parsed.gitExecutable.empty() || cwd.empty()) {
+    return fail(L"操作说明书缺少必要字段（token/opid/nonce/title/program/cwd）");
+  }
+  outSpec->directoryToken = std::move(parsed.directoryToken);
+  outSpec->operationId = std::move(parsed.operationId);
+  outSpec->nonce = std::move(parsed.nonce);
+  outSpec->title = std::move(parsed.title);
+  outSpec->gitExecutable = std::move(parsed.gitExecutable);
+  outSpec->workingDirectory = std::move(cwd);
+  outSpec->arguments = std::move(parsed.arguments);
+  return true;
+}
+
+bool IsSafeOperationDirectoryName(std::wstring_view directoryName) {
+  // 执行器只用 “GcOp<进程ID>x<序号>” 这一种形态：前后都必须是十进制数字，
+  // 且整段不含分隔符、引号或通配字符，辅助进程据此核对说明书与目录是同一件事。
+  if (directoryName.size() <= kOperationDirectoryPrefix.size() + 2 ||
+      directoryName.compare(0, kOperationDirectoryPrefix.size(), kOperationDirectoryPrefix) != 0) {
     return false;
   }
-
-  const std::string directory(scriptDirectoryAnsi);
-  std::string gitLine = std::string(programAnsi);
-  if (!argumentsAnsi.empty()) {
-    gitLine.push_back(' ');
-    gitLine.append(argumentsAnsi);
+  std::wstring_view body = directoryName.substr(kOperationDirectoryPrefix.size());
+  const size_t separator = body.find(L'x');
+  if (separator == std::wstring_view::npos || body.find(L'x', separator + 1) != std::wstring_view::npos) {
+    return false;
   }
-  // 回显行与执行行都要转义 `%`，但份数不同（见 ExpandPercentSigns）：
-  // 转义后的回显行显示出来正好是真实命令本身，用户在窗口里看到的与被执行的是一致的。
-  const std::string echoLine = ExpandPercentSigns(gitLine, 1);
-  const std::string callLine = ExpandPercentSigns(gitLine, 2);
+  const std::wstring_view left = body.substr(0, separator);
+  const std::wstring_view right = body.substr(separator + 1);
+  if (left.empty() || right.empty() || left.size() > 10 || right.size() > 20) {
+    return false;
+  }
+  for (const wchar_t c : left) {
+    if (!IsAsciiDigit(c)) {
+      return false;
+    }
+  }
+  for (const wchar_t c : right) {
+    if (!IsAsciiDigit(c)) {
+      return false;
+    }
+  }
+  return true;
+}
 
-  std::string script;
-  script.reserve(gitLine.size() + directory.size() + 512);
-  script += "@echo off\r\n";
-  script += "title " + titleBytes + "\r\n";
-  // 行 1 写开始标记：证明 cmd 确在执行本脚本（区别于“cmd 启动即失败”）。
-  // 标记与结果文件都用“行首重定向”：单一重定向才可靠，组合写法（>nul echo x>"file"）
-  // 实测会让 cmd 报“找不到路径”且不建文件；数字紧邻 > 又会被当成句柄重定向。
-  script += ">\"" + directory + "\\" + kStartMarkerFileName + "\" echo start\r\n";
-  // 回显即将执行的真实命令，让用户在窗口里看到程序做了什么；下一行才是真正执行。
-  script += "echo " + echoLine + "\r\n";
-  // Git 进程调用。程序路径与参数都已通过引号区域校验，
-  // 因此这一行的引号区域与 cmd 的解析一致，不存在元字符二次解释的空间。
-  // `call` 会对自己的参数多做一轮百分号展开，所以这一行的 `%` 已按两轮份数转义，
-  // 送達 Git 的是原样路径；也因为转义到位，这一行不会再发生任何变量展开。
-  script += "call " + callLine + "\r\n";
-  // %ERRORLEVEL% 在同一物理行会在解析期展开，拿不到刚执行完的 Git 退出码，
-  // 所以这一行必须与 call 分成两条物理命令（cmd 逐行解析）。
-  // 重定向必须写在行首：`echo %ERRORLEVEL%>"file"` 展开成 `echo 0>"file"` 后，
-  // 数字紧邻 > 会被 cmd 当作“句柄 0 的重定向”，于是 echo 没有参数、只把
-  // “ECHO is off.” 打到屏幕，结果文件留下 0 字节（实测踩坑）。
-  script += ">\"" + directory + "\\" + kResultFileName + "\" echo %ERRORLEVEL%\r\n";
-  script += "echo [EvernightCommit] Git 已退出，窗口保持打开，可继续查看上方输出。\r\n";
-
-  plan->scriptAnsi = std::move(script);
+bool IsSafeNonce(std::wstring_view nonce) {
+  if (nonce.size() < 8 || nonce.size() > kMaxNonceLength) {
+    return false;
+  }
+  for (const wchar_t c : nonce) {
+    if (!IsAsciiLetter(c) && !IsAsciiDigit(c)) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -418,17 +534,17 @@ std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept 
     case CommandCompletion::launchFailed:
       return L"启动失败";
     case CommandCompletion::launched:
-      return L"已启动，等待脚本执行";
+      return L"已启动，等待命令窗口就绪";
     case CommandCompletion::running:
       return L"执行中";
     case CommandCompletion::finished:
       return L"执行完成";
     case CommandCompletion::gitNotStarted:
-      return L"Git 未能启动（脚本执行完毕但没有调用记录）";
+      return L"Git 未能启动（命令窗口执行完毕但没有调用记录）";
     case CommandCompletion::terminated:
       return L"结果未知（命令窗口被提前关闭或 Git 进程被终止）";
-    case CommandCompletion::scriptNeverRan:
-      return L"启动失败（脚本未能执行）";
+    case CommandCompletion::helperNeverStarted:
+      return L"启动失败（命令窗口辅助进程未能开始执行）";
     case CommandCompletion::stillUnknown:
       return L"结果未知（超过观察期限）";
   }
@@ -460,7 +576,7 @@ CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
     if (outExitCode != nullptr) {
       *outExitCode = facts.exitCode;
     }
-    // cmd 对“要调用的程序不存在”固定返回保留码 9009：脚本跑完了，但 Git 进程从未被创建
+    // 保留码 9009 是“要调用的程序不存在”的专用回答：命令跑完了，但 Git 进程从未被创建
     // （典型场景是执行期间 git.exe 被移除）。其余退出码一律视为 Git 自己的回答。
     return facts.exitCode == kCommandNotFoundExitCode ? CommandCompletion::gitNotStarted
                                                       : CommandCompletion::finished;
@@ -471,10 +587,10 @@ CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
   if (facts.startMarkerSeen) {
     return CommandCompletion::terminated;
   }
-  // 进程已结束却没有 start.txt：cmd 从未执行到脚本第一行。
-  // 可能是脚本无法被 cmd 运行，也可能是窗口在启动瞬间就被关掉 —— 两者都无法取得退出码，
-  // 一律报“脚本未能执行”，绝不谎报成功，也不留在“执行中”。
-  return CommandCompletion::scriptNeverRan;
+  // 进程已结束却没有 start.txt：辅助进程从未执行到“写开始标记”那一行。
+  // 可能是它没能被创建后运行，也可能是窗口在启动瞬间就被关掉 —— 两者都无法取得退出码，
+  // 一律报“未能开始执行”，绝不谎报成功，也不留在“执行中”。
+  return CommandCompletion::helperNeverStarted;
 }
 
 }  // namespace gc::git

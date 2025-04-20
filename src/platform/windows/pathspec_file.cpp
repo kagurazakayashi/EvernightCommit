@@ -81,7 +81,7 @@ PathspecFileWrite WriteNulPathspecFile(const std::vector<std::wstring>& pathspec
     payload.push_back('\0');
   }
 
-  // 文件名前缀也要能安全进命令行（清单路径会出现在 cmd 脚本的 call 行里）：
+  // 文件名前缀也要能安全进命令行（清单路径会作为参数出现在命令窗口执行的那一条里）：
   // 调用方给的是本模块内写死的 ASCII 前缀，这里仍然复核一次，不接受意外形态。
   std::wstring prefix(filePrefix);
   if (prefix.empty() || prefix.size() > 16 ||

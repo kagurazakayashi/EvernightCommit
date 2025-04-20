@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "platform/windows/command_window_helper.h"
+
 namespace gc::test {
 namespace {
 
@@ -92,6 +94,12 @@ int RunAll(std::string_view nameFilter) {
 }  // namespace gc::test
 
 int main(int argc, char** argv) {
+  // 命令窗口执行器启动的是「当前可执行文件」的辅助模式：测试二进制同样要认这个入口，
+  // 集成用例才会走与正式程序完全相同的那条执行链路（新控制台、说明书、CreateProcessW）。
+  int helperExitCode = 0;
+  if (gc::platform::RunCommandWindowHelperIfRequested(&helperExitCode)) {
+    return helperExitCode;
+  }
   // 行缓冲：重定向到文件时也能即时看到进度，不会把最后几行憋在块缓冲区里。
   // MSVC 调试版 CRT 要求显式给出缓冲区大小（0 会触发断言对话框）。
   std::setvbuf(stdout, nullptr, _IOLBF, 512);

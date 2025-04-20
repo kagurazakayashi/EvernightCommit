@@ -81,8 +81,8 @@ target_link_libraries(gc_core PUBLIC gc_build_settings)
 
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
-  src/platform/windows/ansi_text.cpp
   src/platform/windows/author_config.cpp
+  src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp
   src/platform/windows/environment_block.cpp
