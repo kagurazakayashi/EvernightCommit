@@ -1,7 +1,10 @@
 // 外部命令窗口执行器的集成测试（对应 AGENTS.md：自动化测试只在自己创建的临时仓库里跑 Git）。
 // 覆盖：真实退出码（成功/失败）、命令窗口自身的退出码与 Git 退出码不混同、特殊路径与参数、
 // 受控环境覆盖确实传进命令窗口里的 Git、启动前拒绝、提前关窗不卡死、Shutdown 不阻塞，
-// 以及本轮兼容性修复的三条主判据：非 ASCII 临时目录、原样送达的文件名、辅助入口的边界。
+// 兼容性修复的三条主判据（非 ASCII 临时目录、原样送达的文件名、辅助入口的边界），
+// 以及操作目录的生命周期：每次操作的目录名互不相同且用完即回收、
+// 还在进行的操作被下一次清扫误不掉（用只读的 `git hash-object --stdin` 造长任务，不用提交拖时间）、
+// 标记与结果文件在磁盘上的实际形态带着本次口令。
 // 每个用例会打开真实的命令窗口并在结束后关闭，仅在本机桌面环境可完整验证。
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"
@@ -179,6 +182,66 @@ struct RunnerGuard {
     runner->Shutdown();
   }
 };
+
+bool ReadFileBytes(const std::wstring& path, std::string& outBytes) {
+  outBytes.clear();
+  gc::platform::UniqueHandle handle(::CreateFileW(path.c_str(), GENERIC_READ,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                                  nullptr));
+  if (!handle) {
+    return false;
+  }
+  char buffer[1024];
+  for (;;) {
+    DWORD got = 0;
+    if (::ReadFile(handle.get(), buffer, static_cast<DWORD>(sizeof(buffer)), &got, nullptr) == 0) {
+      return false;
+    }
+    if (got == 0) {
+      return true;
+    }
+    outBytes.append(buffer, got);
+  }
+}
+
+// 把活动操作所在的目录推到“已经超过回收阈值”的过去，模拟上一次会话留下的残骸形态。
+// 只用 FILE_WRITE_ATTRIBUTES：只改这一个测试自己的目录的最后写入时间。
+bool MakeDirectoryLookAncient(const std::wstring& directory) {
+  gc::platform::UniqueHandle handle(::CreateFileW(
+      directory.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  if (!handle) {
+    return false;
+  }
+  FILETIME now{};
+  ::GetSystemTimeAsFileTime(&now);
+  const ULONGLONG back =
+      ((static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime) -
+      static_cast<ULONGLONG>(gc::platform::kStaleOperationDirectoryAgeTicks) -
+      120ULL * 10000000ULL;  // 阈值之外再多留两分钟
+  FILETIME stale{};
+  stale.dwLowDateTime = static_cast<DWORD>(back & 0xFFFFFFFFu);
+  stale.dwHighDateTime = static_cast<DWORD>(back >> 32);
+  return ::SetFileTime(handle.get(), nullptr, nullptr, &stale) != 0;
+}
+
+bool DirectoryExists(const std::wstring& path) {
+  std::error_code ec;
+  return std::filesystem::is_directory(std::filesystem::path(path), ec);
+}
+
+// 等到某个操作目录消失（正常结束的收尾是异步的：观察线程落账之后才回收）。
+bool WaitForDirectoryGone(const std::wstring& directory) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!DirectoryExists(directory)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  return !DirectoryExists(directory);
+}
 
 }  // namespace
 
@@ -611,6 +674,140 @@ GC_TEST(command_window_works_with_non_ascii_temp_directory) {
                    "操作目录不在中文临时根下：" + gc::platform::Utf16ToUtf8(result.directory));
 }
 
+GC_TEST(command_window_operation_directories_are_unique_and_reclaimed) {
+  // 每次操作都要有一个猜不到的目录，用完还要收干净：
+  // 名字能被猜到 → 别人可以抢先占住它，甚至往里放一条“旧的成功”；
+  // 用完不收 → %TEMP% 里堆满残骸，回收就成了唯一的清道夫。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+
+  std::wstring dirA;
+  std::wstring dirB;
+  {
+    gc::platform::CommandWindowRunner runner;
+    std::vector<uint64_t> opened;
+    RunnerGuard guard{&runner, &opened};
+    runner.Startup(nullptr);
+
+    uint64_t first = 0;
+    CommandWindowResult failure;
+    GC_REQUIRE_MESSAGE(runner.Start(MakeOperation(fixture, {L"--version"}), &first, &failure),
+                       gc::platform::Utf16ToUtf8(failure.failureReason));
+    opened.push_back(first);
+    uint64_t second = 0;
+    GC_REQUIRE_MESSAGE(runner.Start(MakeOperation(fixture, {L"--version"}), &second, &failure),
+                       gc::platform::Utf16ToUtf8(failure.failureReason));
+    opened.push_back(second);
+
+    dirA = runner.OperationDirectory(first);
+    dirB = runner.OperationDirectory(second);
+    GC_REQUIRE(!dirA.empty() && !dirB.empty(), "操作目录没被登记");
+    GC_CHECK_MESSAGE(dirA != dirB, "两次操作共用了同一个目录：" + gc::platform::Utf16ToUtf8(dirA));
+    const std::wstring leafA = dirA.substr(dirA.find_last_of(L"\\") + 1);
+    const std::wstring leafB = dirB.substr(dirB.find_last_of(L"\\") + 1);
+    GC_CHECK(gc::git::IsSafeOperationDirectoryName(leafA));
+    GC_CHECK(gc::git::IsSafeOperationDirectoryName(leafB));
+    // 分隔 x 之后的随机段必须不同：同一进程里连续两次操作靠它区分，序号已经不参与命名。
+    const size_t splitA = leafA.find(L'x');
+    const size_t splitB = leafB.find(L'x');
+    GC_REQUIRE(splitA != std::wstring::npos && splitB != std::wstring::npos, "目录名形态不对");
+    GC_CHECK(leafA.substr(splitA) != leafB.substr(splitB));
+
+    CommandWindowResult resultA;
+    CommandWindowResult resultB;
+    ExpectResult(runner, first, &resultA, "第一次 --version");
+    ExpectResult(runner, second, &resultB, "第二次 --version");
+    GC_CHECK_MESSAGE(resultA.completion == CommandCompletion::finished && resultA.exitCode == 0,
+                     Describe(resultA));
+    GC_CHECK_MESSAGE(resultB.completion == CommandCompletion::finished && resultB.exitCode == 0,
+                     Describe(resultB));
+  }  // RunnerGuard 析构：关窗 + Shutdown
+
+  GC_CHECK_MESSAGE(WaitForDirectoryGone(dirA),
+                   "正常结束后没有回收自己的目录：" + gc::platform::Utf16ToUtf8(dirA));
+  GC_CHECK_MESSAGE(WaitForDirectoryGone(dirB),
+                   "正常结束后没有回收自己的目录：" + gc::platform::Utf16ToUtf8(dirB));
+}
+
+GC_TEST(command_window_active_operation_survives_stale_sweep) {
+  // 验收项 2 与 7 合起来的真实形态：一次还在跑的操作，目录时间被推到超过阈值之后，
+  // 另一个执行器实例来清扫也必须拿它没办法；等它自己结束才被回收。
+  // 长任务用只读的 `git hash-object --stdin`：它停在控制台输入上等 EOF，
+  // 既没有任何副作用，也不需要造一次提交来拖时间（本用例全程不 commit、不 push）。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+
+  gc::platform::CommandWindowRunner runner;
+  std::vector<uint64_t> opened;
+  RunnerGuard guard{&runner, &opened};
+  runner.Startup(nullptr);
+
+  uint64_t id = 0;
+  CommandWindowResult failure;
+  const bool started =
+      runner.Start(MakeOperation(fixture, {L"hash-object", L"--stdin"}), &id, &failure);
+  GC_REQUIRE_MESSAGE(started, "命令窗口启动失败：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(id);
+
+  // 等到“执行中”：这要求开始标记里的口令在生产链路上核对成功（读不出归属只会停在“已启动”）。
+  std::wstring status;
+  const auto runningDeadline = std::chrono::steady_clock::now() + kOperationBudget;
+  while (std::chrono::steady_clock::now() < runningDeadline) {
+    runner.DescribeOperation(id, &status, nullptr);
+    if (status == L"执行中") {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  GC_REQUIRE_MESSAGE(status == L"执行中",
+                     "活动操作没进入“执行中”，开始标记的归属核对可能失效：" +
+                         gc::platform::Utf16ToUtf8(status));
+
+  const std::wstring directory = runner.OperationDirectory(id);
+  GC_REQUIRE(!directory.empty(), "取不到活动操作的目录");
+  GC_REQUIRE_MESSAGE(MakeDirectoryLookAncient(directory), "把活动目录的时间推到过去失败");
+
+  gc::platform::CommandWindowRunner other;
+  other.Startup(nullptr);  // 启动即清扫一次
+  other.SweepStaleOperationDirectories();
+  GC_CHECK_MESSAGE(DirectoryExists(directory),
+                   "还在进行的操作的目录被下一次清扫误删了：" + gc::platform::Utf16ToUtf8(directory));
+  GC_CHECK(runner.ActiveCount() == 1);
+  runner.DescribeOperation(id, &status, nullptr);
+  GC_CHECK_MESSAGE(status == L"执行中",
+                   "清扫之后活动任务的状态被改写：" + gc::platform::Utf16ToUtf8(status));
+  CommandWindowResult early;
+  GC_CHECK_MESSAGE(!runner.TakeResult(id, &early),
+                   "活动任务还没结束就有结果，疑似把旧结果当成了新的");
+
+  // 保留必须留下记录，而不是“静默没删”。
+  bool recorded = false;
+  for (const std::wstring& entry : other.PreservedOperationDirectories()) {
+    if (entry.find(directory) != std::wstring::npos) {
+      recorded = true;
+    }
+  }
+  GC_CHECK_MESSAGE(recorded, "活动目录被保留时没有记下原因");
+
+  // 收起命令窗口：辅助进程与它握着的开始标记一起结束，操作才有终态、目录才可被回收。
+  other.Shutdown();
+  const auto closeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (std::chrono::steady_clock::now() < closeDeadline && !runner.ConsoleExited(id)) {
+    runner.CloseOperationWindow(id);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  CommandWindowResult result;
+  ExpectResult(runner, id, &result, "关窗后的终态");
+  const bool terminal = result.completion != CommandCompletion::launched &&
+                        result.completion != CommandCompletion::running &&
+                        result.completion != CommandCompletion::launchFailed;
+  GC_CHECK_MESSAGE(terminal, Describe(result));
+  GC_CHECK_MESSAGE(WaitForDirectoryGone(directory),
+                   "操作结束后目录没被回收：" + gc::platform::Utf16ToUtf8(directory));
+}
+
 GC_TEST(command_window_helper_refuses_foreign_requests) {
   // 辅助入口不能沦为“绕过界面确认的通用命令执行通道”。这里绕开执行器，直接按那个命令行
   // 形态启动自己：伪造口令、伪造目录名两种花样，都要求它拒绝执行 ——
@@ -623,7 +820,7 @@ GC_TEST(command_window_helper_refuses_foreign_requests) {
   const DWORD rootLength = ::GetTempPathW(static_cast<DWORD>(MAX_PATH), tempRoot);
   GC_REQUIRE(rootLength > 0 && rootLength < MAX_PATH, "取不到系统临时目录");
   // 目录名必须是执行器会生成的形态，否则第一步就被拒（那种拒绝不针对本用例要验的绑定）。
-  static constexpr std::wstring_view kDirectoryName = L"GcOp900001x900002";
+  static constexpr std::wstring_view kDirectoryName = L"GcOp900001xdeadbeef1234";
   const std::wstring directory = std::wstring(tempRoot, rootLength) + kDirectoryName.data();
   // “目录已存在”不是所有权证明：存在即判为前置失败，绝不往别人的目录里写东西。
   const BOOL created = ::CreateDirectoryW(directory.c_str(), nullptr);
@@ -633,9 +830,7 @@ GC_TEST(command_window_helper_refuses_foreign_requests) {
   public:
     explicit DirectoryGuard(std::wstring path) : path_(std::move(path)) {}
     ~DirectoryGuard() {
-      for (std::string_view name : {std::string_view(gc::git::kSpecFileName),
-                                    std::string_view(gc::git::kStartMarkerFileName),
-                                    std::string_view(gc::git::kResultFileName)}) {
+      for (std::string_view name : gc::git::kOperationFileNames) {
         static_cast<void>(::DeleteFileW(JoinForTest(path_, WideForTest(name)).c_str()));
       }
       static_cast<void>(::RemoveDirectoryW(path_.c_str()));
@@ -718,10 +913,76 @@ GC_TEST(command_window_helper_refuses_foreign_requests) {
            INVALID_FILE_ATTRIBUTES);
 
   // ② 口令相符，但说明书声明的目录名与实际所在目录不符。
-  writeSpec(L"aaaaaaaaaaaaaaaa", L"GcOp1x1");
+  writeSpec(L"aaaaaaaaaaaaaaaa", L"GcOp1xabcd1234");
   const unsigned long wrongTokenExit = runHelper(L"aaaaaaaaaaaaaaaa");
   GC_CHECK_MESSAGE(wrongTokenExit != 0, "目录名不符时辅助入口竟然执行了");
   GC_CHECK(::GetFileAttributesW(
                JoinForTest(directory, WideForTest(gc::git::kStartMarkerFileName)).c_str()) ==
            INVALID_FILE_ATTRIBUTES);
+
+  // ③ 正向路径（同一个入口，口令与目录都对得上）：它照说明书执行 Git，并把执行痕迹写成
+  //    “带本次口令、完整发布”的形态 —— 观察端只认这一份，别人留下的旧记录一概不算成功。
+  //    窗口按设计交给 cmd /k 保留，用例最后按标题里的唯一标记把它收起。
+  const std::string nonceBytes(16, 'a');  // 与下面 writeSpec 用的 L"aaaaaaaaaaaaaaaa" 同一个值
+  writeSpec(L"aaaaaaaaaaaaaaaa", kDirectoryName);
+  const std::wstring positiveArgument = QuoteArgumentForTest(executable) + L" " +
+                                        QuoteArgumentForTest(gc::platform::kCommandWindowHelperSwitch) +
+                                        L" " + QuoteArgumentForTest(directory) + L" " +
+                                        QuoteArgumentForTest(L"aaaaaaaaaaaaaaaa");
+  std::wstring positiveCommandLine = positiveArgument;
+  STARTUPINFOW positiveStartup{};
+  positiveStartup.cb = sizeof(positiveStartup);
+  PROCESS_INFORMATION positiveInfo{};
+  const BOOL positiveLaunched =
+      ::CreateProcessW(executable.c_str(), positiveCommandLine.data(), nullptr, nullptr, FALSE,
+                       CREATE_UNICODE_ENVIRONMENT, nullptr, fixture.RepoDir().c_str(),
+                       &positiveStartup, &positiveInfo);
+  GC_REQUIRE_MESSAGE(positiveLaunched != 0, "正向路径没能启动辅助进程");
+  gc::platform::UniqueHandle positiveProcess(positiveInfo.hProcess);
+  gc::platform::UniqueHandle positiveThread(positiveInfo.hThread);
+
+  const std::wstring markerPath = JoinForTest(directory, WideForTest(gc::git::kStartMarkerFileName));
+  const std::wstring resultPath = JoinForTest(directory, WideForTest(gc::git::kResultFileName));
+  const std::wstring tempResultPath =
+      JoinForTest(directory, WideForTest(gc::git::kResultTempFileName));
+  std::string markerBytes;
+  std::string resultBytes;
+  const auto recordDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (std::chrono::steady_clock::now() < recordDeadline) {
+    static_cast<void>(ReadFileBytes(markerPath, markerBytes));
+    static_cast<void>(ReadFileBytes(resultPath, resultBytes));
+    if (!markerBytes.empty() && !resultBytes.empty()) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  GC_REQUIRE_MESSAGE(!markerBytes.empty() && !resultBytes.empty(),
+                     "正向路径没写出标记或结果：" + DumpOperationDirectory(directory));
+  GC_CHECK_MESSAGE(markerBytes == "start\t" + nonceBytes + "\r\n",
+                   "开始标记不是约定的形态：" + markerBytes);
+  GC_CHECK(gc::git::ParseCommandWindowStartMarker(markerBytes, nonceBytes));
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker(markerBytes, "bbbbbbbbbbbbbbbb"));
+  long gitExit = -1;
+  GC_CHECK_MESSAGE(gc::git::ParseCommandWindowResult(resultBytes, nonceBytes, &gitExit),
+                   "结果行没能按本次口令解析：" + resultBytes);
+  GC_CHECK_MESSAGE(gitExit == 0, "git --version 应当以 0 退出，实际 " + std::to_string(gitExit));
+  GC_CHECK(!gc::git::ParseCommandWindowResult(resultBytes, "bbbbbbbbbbbbbbbb", &gitExit));
+  // 结果由临时名改名发布：正式名一出现内容就是完整的，暂存名不该留下任何痕迹。
+  GC_CHECK_MESSAGE(::GetFileAttributesW(tempResultPath.c_str()) == INVALID_FILE_ATTRIBUTES,
+                   "结果发布后留下了临时名：" + DumpOperationDirectory(directory));
+
+  HWND consoleWindow = nullptr;
+  const auto findDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (std::chrono::steady_clock::now() < findDeadline) {
+    consoleWindow = ::FindWindowW(nullptr, title.c_str());
+    if (consoleWindow != nullptr) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  GC_REQUIRE_MESSAGE(consoleWindow != nullptr,
+                     "正向路径的命令窗口没能按标题找到，用例无法收尾：" +
+                         gc::platform::Utf16ToUtf8(title));
+  static_cast<void>(::PostMessageW(consoleWindow, WM_CLOSE, 0, 0));
+  static_cast<void>(::WaitForSingleObject(positiveProcess.get(), 20000));
 }

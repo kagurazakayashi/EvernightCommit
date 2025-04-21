@@ -115,15 +115,6 @@ bool CommandLineRegionSafe(std::wstring_view line) {
   return !inQuote;  // 引号必须成对闭合。
 }
 
-std::wstring AsciiToUtf16(std::string_view bytes) {
-  std::wstring wide;
-  wide.reserve(bytes.size());
-  for (const char c : bytes) {
-    wide.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
-  }
-  return wide;
-}
-
 std::wstring TrimTrailingSpaces(std::wstring_view text) {
   size_t end = text.size();
   while (end > 0 && (text[end - 1] == L' ' || text[end - 1] == L'\t')) {
@@ -132,29 +123,78 @@ std::wstring TrimTrailingSpaces(std::wstring_view text) {
   return std::wstring(text.substr(0, end));
 }
 
-std::vector<std::wstring> SplitAsciiWords(std::string_view line) {
-  std::vector<std::wstring> words;
-  size_t start = 0;
-  while (start < line.size()) {
-    const size_t space = line.find(' ', start);
-    const std::string_view word =
-        (space == std::string_view::npos) ? line.substr(start) : line.substr(start, space - start);
-    if (!word.empty()) {
-      words.push_back(AsciiToUtf16(word));
-    }
-    if (space == std::string_view::npos) {
-      break;
-    }
-    start = space + 1;
-  }
-  return words;
-}
-
 void AppendSpecField(std::wstring& text, std::wstring_view name, std::wstring_view value) {
   text.append(name);
   text.push_back(kFieldSeparator);
   text.append(value);
   text.append(kLineBreak);
+}
+
+// 开始标记与结果行都是“一行、TAB 分隔”的 ASCII 字节文本：与说明书同一种行形态，
+// 但值只有口令与十进制退出码，因此这里不做任何码页或 UTF 处理。
+constexpr std::string_view kStartMarkerKeyword = "start";
+constexpr std::string_view kResultKeyword = "result";
+constexpr char kByteFieldSeparator = '\t';
+constexpr std::string_view kByteLineBreak = "\r\n";
+
+// 取首行并按 TAB 拆分。没有行尾表示“对方还在写”，返回 false 让观察端继续等；
+// 首行之后还残留别的内容也返回 false —— 一次操作只发布一条记录，多出来的一律视为不可信。
+bool FirstLineFields(std::string_view content, std::vector<std::string_view>* fields) {
+  fields->clear();
+  const size_t newline = content.find('\n');
+  if (newline == std::string_view::npos) {
+    return false;
+  }
+  if (content.find_first_not_of("\r\n", newline + 1) != std::string_view::npos) {
+    return false;
+  }
+  std::string_view line = content.substr(0, newline);
+  if (!line.empty() && line.back() == '\r') {
+    line.remove_suffix(1);
+  }
+  size_t cursor = 0;
+  for (;;) {
+    const size_t tab = line.find(kByteFieldSeparator, cursor);
+    if (tab == std::string_view::npos) {
+      fields->push_back(line.substr(cursor));
+      break;
+    }
+    fields->push_back(line.substr(cursor, tab - cursor));
+    cursor = tab + 1;
+  }
+  return true;
+}
+
+// 十进制整数（允许一个前导负号，CRT 语义下退出码原值写回）；超出 long 范围视为不合格。
+bool ParseAsciiInteger(std::string_view text, long* outValue) {
+  if (text.empty() || outValue == nullptr) {
+    return false;
+  }
+  size_t index = 0;
+  bool negative = false;
+  if (text[0] == '-') {
+    negative = true;
+    index = 1;
+  }
+  if (index >= text.size()) {
+    return false;
+  }
+  std::string digits;
+  digits.reserve(text.size());
+  for (; index < text.size(); ++index) {
+    const char c = text[index];
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    digits.push_back(c);
+  }
+  errno = 0;
+  const long magnitude = std::strtol(digits.c_str(), nullptr, 10);
+  if (errno == ERANGE) {
+    return false;
+  }
+  *outValue = negative ? -magnitude : magnitude;
+  return true;
 }
 
 [[nodiscard]] bool RejectAs(CommandPlanReject reason, std::wstring message, CommandPlanReject* reject,
@@ -195,7 +235,7 @@ std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
     case CommandPlanReject::illegalNonce:
       return L"操作口令缺失或含不安全字符（只允许 ASCII 字母与数字）";
     case CommandPlanReject::illegalOperationDirectory:
-      return L"操作目录名不符合执行器生成的形态（GcOp<进程ID>x<序号>）";
+      return L"操作目录名不符合执行器生成的形态（GcOp<进程ID>x<随机段>）";
     case CommandPlanReject::illegalWindowTitle:
       return L"窗口标题含控制字符或制表符";
   }
@@ -446,8 +486,9 @@ bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* o
 }
 
 bool IsSafeOperationDirectoryName(std::wstring_view directoryName) {
-  // 执行器只用 “GcOp<进程ID>x<序号>” 这一种形态：前后都必须是十进制数字，
-  // 且整段不含分隔符、引号或通配字符，辅助进程据此核对说明书与目录是同一件事。
+  // 执行器只用 “GcOp<进程ID>x<随机十六进制>” 这一种形态：左边是十进制进程号，
+  // 右边是不可预测的小写十六进制随机段，整段不含分隔符、引号或通配字符。
+  // 辅助进程与回收例程都据此核对“说明书/目录是本程序这次造出来的”。
   if (directoryName.size() <= kOperationDirectoryPrefix.size() + 2 ||
       directoryName.compare(0, kOperationDirectoryPrefix.size(), kOperationDirectoryPrefix) != 0) {
     return false;
@@ -459,7 +500,11 @@ bool IsSafeOperationDirectoryName(std::wstring_view directoryName) {
   }
   const std::wstring_view left = body.substr(0, separator);
   const std::wstring_view right = body.substr(separator + 1);
-  if (left.empty() || right.empty() || left.size() > 10 || right.size() > 20) {
+  if (left.empty() || left.size() > kOperationDirectoryPidMaxLength) {
+    return false;
+  }
+  if (right.size() < kOperationDirectoryRandomMinLength ||
+      right.size() > kOperationDirectoryRandomMaxLength) {
     return false;
   }
   for (const wchar_t c : left) {
@@ -468,9 +513,10 @@ bool IsSafeOperationDirectoryName(std::wstring_view directoryName) {
     }
   }
   for (const wchar_t c : right) {
-    if (!IsAsciiDigit(c)) {
-      return false;
+    if (IsAsciiDigit(c) || (c >= L'a' && c <= L'f')) {
+      continue;
     }
+    return false;  // 随机段只有小写十六进制这一种形态：大写、g-z、符号都不接受
   }
   return true;
 }
@@ -487,46 +533,55 @@ bool IsSafeNonce(std::wstring_view nonce) {
   return true;
 }
 
-bool ParseCommandWindowResult(std::string_view content, long* exitCode) {
-  if (exitCode == nullptr || content.empty()) {
+bool NonceToAscii(std::wstring_view nonce, std::string* outBytes) {
+  if (outBytes == nullptr || !IsSafeNonce(nonce)) {
     return false;
   }
-  const size_t newline = content.find('\n');
-  if (newline == std::string_view::npos) {
-    return false;  // 尚未写完：观察端继续等待。
+  std::string bytes;
+  bytes.reserve(nonce.size());
+  for (const wchar_t c : nonce) {
+    bytes.push_back(static_cast<char>(static_cast<unsigned char>(c)));  // IsSafeNonce 已保证 ASCII
   }
-  std::string_view line = content.substr(0, newline);
-  if (!line.empty() && line.back() == '\r') {
-    line.remove_suffix(1);
-  }
-  const std::vector<std::wstring> words = SplitAsciiWords(line);
-  if (words.size() != 1) {
-    return false;
-  }
-  const std::wstring& exitWord = words[0];
-  size_t digitsBegin = 0;
-  bool negative = false;
-  if (!exitWord.empty() && exitWord[0] == L'-') {
-    negative = true;
-    digitsBegin = 1;
-  }
-  if (digitsBegin >= exitWord.size()) {
-    return false;
-  }
-  std::string digits;
-  for (size_t index = digitsBegin; index < exitWord.size(); ++index) {
-    if (exitWord[index] < L'0' || exitWord[index] > L'9') {
-      return false;
-    }
-    digits.push_back(static_cast<char>(exitWord[index]));
-  }
-  errno = 0;
-  const long magnitude = std::strtol(digits.c_str(), nullptr, 10);
-  if (errno == ERANGE) {
-    return false;
-  }
-  *exitCode = negative ? -magnitude : magnitude;
+  *outBytes = std::move(bytes);
   return true;
+}
+
+std::string BuildCommandWindowStartMarkerText(std::string_view asciiNonce) {
+  std::string text(kStartMarkerKeyword);
+  text.push_back(kByteFieldSeparator);
+  text.append(asciiNonce);
+  text.append(kByteLineBreak);
+  return text;
+}
+
+std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode) {
+  std::string text(kResultKeyword);
+  text.push_back(kByteFieldSeparator);
+  text.append(asciiNonce);
+  text.push_back(kByteFieldSeparator);
+  text.append(std::to_string(exitCode));
+  text.append(kByteLineBreak);
+  return text;
+}
+
+bool ParseCommandWindowStartMarker(std::string_view content, std::string_view expectedAsciiNonce) {
+  std::vector<std::string_view> fields;
+  if (!FirstLineFields(content, &fields)) {
+    return false;
+  }
+  return fields.size() == 2 && fields[0] == kStartMarkerKeyword && fields[1] == expectedAsciiNonce;
+}
+
+bool ParseCommandWindowResult(std::string_view content, std::string_view expectedAsciiNonce,
+                              long* exitCode) {
+  std::vector<std::string_view> fields;
+  if (!FirstLineFields(content, &fields)) {
+    return false;
+  }
+  if (fields.size() != 3 || fields[0] != kResultKeyword || fields[1] != expectedAsciiNonce) {
+    return false;
+  }
+  return ParseAsciiInteger(fields[2], exitCode);
 }
 
 std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept {
@@ -552,17 +607,20 @@ std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept 
 }
 
 CommandWindowObservation ObserveCommandWindow(const CommandWindowFileReader& readFile,
-                                              bool createProcessSucceeded, bool processExited) {
+                                              bool createProcessSucceeded, bool processExited,
+                                              std::string_view expectedAsciiNonce) {
   CommandWindowObservation facts;
   facts.createProcessSucceeded = createProcessSucceeded;
   facts.processExited = processExited;
   if (!createProcessSucceeded || !readFile) {
     return facts;
   }
-  facts.startMarkerSeen = readFile(kStartMarkerFileName).has_value();
+  const std::optional<std::string> marker = readFile(kStartMarkerFileName);
+  facts.startMarkerSeen =
+      marker.has_value() && ParseCommandWindowStartMarker(*marker, expectedAsciiNonce);
   const std::optional<std::string> result = readFile(kResultFileName);
   if (result.has_value()) {
-    facts.resultParsed = ParseCommandWindowResult(*result, &facts.exitCode);
+    facts.resultParsed = ParseCommandWindowResult(*result, expectedAsciiNonce, &facts.exitCode);
   }
   return facts;
 }
@@ -587,7 +645,8 @@ CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
   if (facts.startMarkerSeen) {
     return CommandCompletion::terminated;
   }
-  // 进程已结束却没有 start.txt：辅助进程从未执行到“写开始标记”那一行。
+  // 进程已结束却没有合格的 start.txt（内容合格且口令相符）：辅助进程从未执行到“写开始标记”那一行，
+  // 或者那个痕迹属于别的操作。
   // 可能是它没能被创建后运行，也可能是窗口在启动瞬间就被关掉 —— 两者都无法取得退出码，
   // 一律报“未能开始执行”，绝不谎报成功，也不留在“执行中”。
   return CommandCompletion::helperNeverStarted;

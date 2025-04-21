@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -36,19 +37,36 @@ inline constexpr size_t kMaxDisplayCommandLength = 8000;
 // 操作 ID 与说明书里的随机口令（nonce）的长度上限：只用于诊断展示与越界防护。
 inline constexpr size_t kMaxNonceLength = 64;
 
-// 操作目录名前缀：GcOp<进程ID>x<序号>，纯 ASCII，用于清扫残留目录与核对目录归属。
+// 操作目录名前缀：GcOp<进程ID>x<随机段>，纯 ASCII，用于清扫残留目录与核对目录归属。
+// 随机段是不可预测的十六进制小写（长度见下面两个常量）：目录名不是所有权证明，
+// 只有 CreateDirectoryW 真的新建成功才算认领，因此名字冲突时换一个随机段重来即可，
+// 而“换一个重来”要求候选名字无法被别人提前猜到并占住。
 inline constexpr std::wstring_view kOperationDirectoryPrefix = L"GcOp";
+inline constexpr size_t kOperationDirectoryPidMaxLength = 10;  // PID 最大 4294967295：十进制 10 位
+inline constexpr size_t kOperationDirectoryRandomMinLength = 8;
+inline constexpr size_t kOperationDirectoryRandomMaxLength = 32;
 
-// 操作目录内的文件（辅助进程写出，观察端只读）：
-//   start.txt   —— 辅助进程启动后第一件事：命令窗口确实已在执行本操作（区别于“进程根本没起来”）
-//   result.txt  —— 一行十进制整数：Git 的退出码；行尾换行表示写完。
-//                  操作 ID 由独占目录绑定（目录名即 ID），不写进文件。
+// 操作目录内的文件（本程序在一次操作里可能写出的全部名字，回收只针对它们）：
 //   spec.txt    —— 操作说明书；由执行器写入，辅助进程读回后按它执行，用完由本程序删除。
+//   start.txt   —— 辅助进程启动后第一件事：命令窗口确实已在执行本操作（区别于“进程根本没起来”）；
+//                  内容带本次操作的随机口令，观察端据此确认这个痕迹属于本次操作。
+//                  辅助进程写完不放手，一直持有到结果发布完成，因此它是跨进程的“还活着”证据。
+//   result.tmp  —— 结果行的落盘暂存名：写完并 flush 后用 rename 发布成 result.txt，
+//                  避免观察端读到半截内容、或把上一次留下的旧结果当成本次的成功。
+//   result.txt  —— 已发布的结果：口令 + Git 的退出码。
+//   lease.txt   —— 执行器自己持有的活动租约：句柄在 = 本次操作还在本进程的进行中，
+//                  进程异常退出时由系统关闭，于是它同时是“曾经拥有、如今无人持有”的证据。
 // Git 程序的存在性由执行器在启动命令窗口之前检查（不是文件则根本不启动，报启动失败）；
 // 辅助进程再查一次，专防“执行期间 git.exe 被移动或删除”，此时用保留码 9009 上报。
 inline constexpr const char* kStartMarkerFileName = "start.txt";
 inline constexpr const char* kResultFileName = "result.txt";
 inline constexpr const char* kSpecFileName = "spec.txt";
+inline constexpr const char* kResultTempFileName = "result.tmp";
+inline constexpr const char* kLeaseFileName = "lease.txt";
+
+// 回收与善后统一按这份名单逐个处理，绝不递归删除目录里来历不明的内容。
+inline constexpr std::array<std::string_view, 5> kOperationFileNames = {
+    kSpecFileName, kStartMarkerFileName, kResultTempFileName, kResultFileName, kLeaseFileName};
 
 // 一条环境覆盖：value 有值时写入（大小写不敏感替换），无值时从环境块删除该变量。
 struct EnvironmentOverride {
@@ -104,7 +122,7 @@ enum class CommandPlanReject {
 // 第二步：把校验过的操作序列化成说明书文本（UTF-16；落盘编码由平台层严格转成 UTF-8）。
 // 行格式固定为“字段名<TAB>值”，每行一个字段：值里不可能含制表符与控制字符
 // （第一步的校验已经把这类输入拒绝在边界上），因此拆分无歧义，参数只按数据传递。
-// directoryToken 是操作独占目录的目录名（GcOp<进程ID>x<序号>）：说明书与目录互相绑定，
+// directoryToken 是操作独占目录的目录名（GcOp<进程ID>x<随机段>）：说明书与目录互相绑定，
 // 辅助进程核对两者一致才肯执行。nonce 是本次操作的随机口令：执行器用 Unicode 命令行把它
 // 交给辅助进程，辅助进程要求说明书里的 nonce 与之相符，防止有人用别的目录来驱动这个入口。
 [[nodiscard]] bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
@@ -130,16 +148,35 @@ struct CommandWindowSpec {
 [[nodiscard]] bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* outSpec,
                                               std::wstring* failureReason);
 
-// 操作目录名（不含父目录）是否是执行器会生成的形态：GcOp 开头、纯 ASCII 字母数字、
-// 只允许一个分隔 x、长度受限。辅助进程用它核对“说明书与所在目录是同一件事”。
+// 操作目录名（不含父目录）是否是执行器会生成的形态：GcOp 开头、十进制进程 ID、
+// 一个分隔 x、结尾是不可预测的十六进制小写随机段。辅助进程用它核对“说明书与所在目录是同一件事”，
+// 回收例程用它核对“这个目录是本程序会造出来的名字”。
 [[nodiscard]] bool IsSafeOperationDirectoryName(std::wstring_view directoryName);
 
 // 随机口令是否是执行器会生成的形态：纯 ASCII 字母数字，长度 8..kMaxNonceLength。
 [[nodiscard]] bool IsSafeNonce(std::wstring_view nonce);
 
-// 解析 result.txt 全文（首行为十进制退出码；可为负数，CRT 语义下原值写回）。
-// 未写完（无换行结尾）或内容不合约定一律返回 false，由观察端继续等待。
-[[nodiscard]] bool ParseCommandWindowResult(std::string_view content, long* exitCode);
+// 把已通过 IsSafeNonce 校验的口令取成 ASCII 字节形态：标记文件与结果文件是字节文件，
+// 里面的口令必须与说明书里的同一个值逐字节一致。非 ASCII 字母数字一律返回 false（不猜、不修）。
+[[nodiscard]] bool NonceToAscii(std::wstring_view nonce, std::string* outBytes);
+
+// 开始标记与结果行的文本形态（两者都是一行“标记<TAB>字段…”加行尾 CRLF）：
+//   start.txt   —— start<TAB><口令>
+//   result.txt  —— result<TAB><口令>TAB><十进制退出码>
+// 口令进文件而不是只靠目录名绑定，为的是让“这条痕迹属于本次操作”成为一个可核对的事实：
+// 目录名可以被复用，口令每次启动都重新生成且不可预测。
+[[nodiscard]] std::string BuildCommandWindowStartMarkerText(std::string_view asciiNonce);
+[[nodiscard]] std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode);
+
+// 解析开始标记：格式不合格、口令与本次操作不符都返回 false（观察端据此认为“没有执行痕迹”）。
+// 半写（缺行尾）同样返回 false：辅助进程写完才发布，读到这里说明还没写完。
+[[nodiscard]] bool ParseCommandWindowStartMarker(std::string_view content,
+                                                 std::string_view expectedAsciiNonce);
+
+// 解析 result.txt 全文（首行必须是完整一行，且口令相符；退出码可为负数，CRT 语义下原值写回）。
+// 未写完、格式不合约定、口令不属于本次操作（陈旧结果或别人塞进来的结果）一律返回 false。
+[[nodiscard]] bool ParseCommandWindowResult(std::string_view content,
+                                            std::string_view expectedAsciiNonce, long* exitCode);
 
 // “要调用的程序不存在”的保留码：辅助进程 CreateProcessW(git.exe) 失败时用它在 result.txt
 // 上报同一形态。其余退出码一律视为 Git 自己的回答。
@@ -163,17 +200,20 @@ enum class CommandCompletion {
 struct CommandWindowObservation {
   bool createProcessSucceeded = false;
   bool processExited = false;
-  bool startMarkerSeen = false;       // start.txt 存在
-  bool resultParsed = false;          // result.txt 已完整且解析成功
-  long exitCode = 0;                  // resultParsed 时有效
+  bool startMarkerSeen = false;  // start.txt 完整、格式正确，且口令就是本次操作的口令
+  bool resultParsed = false;     // result.txt 已发布完整、格式正确，且口令与本次操作相符
+  long exitCode = 0;             // resultParsed 时有效
 };
 
 // 观察器读文件用的接口：返回 nullopt 表示“不存在或暂时读不到”。
 using CommandWindowFileReader = std::function<std::optional<std::string>(std::string_view fileName)>;
 
 // 用注入的读文件回调收集事实（平台层绑定真实目录读取，测试绑定桩）。
+// expectedAsciiNonce 是本次操作的随机口令：文件里是别的口令（陈旧内容、被别人塞进来的“成功”）
+// 就当没有这条痕迹，绝不据此判定完成。
 [[nodiscard]] CommandWindowObservation ObserveCommandWindow(
-    const CommandWindowFileReader& readFile, bool createProcessSucceeded, bool processExited);
+    const CommandWindowFileReader& readFile, bool createProcessSucceeded, bool processExited,
+    std::string_view expectedAsciiNonce);
 
 // 把事实合并为终态或中间态；outExitCode 仅在 finished 时写入。
 [[nodiscard]] CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,

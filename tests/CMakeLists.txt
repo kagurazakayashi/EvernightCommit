@@ -4,6 +4,8 @@ add_executable(gc_tests
   app_state_tests.cpp
   author_config_tests.cpp
   author_config_fixture_tests.cpp
+  command_window_directory_tests.cpp
+  command_window_directory_tests.cpp
   command_window_fixture_tests.cpp
   command_window_plan_tests.cpp
   commit_date_tests.cpp
