@@ -214,19 +214,19 @@ GC_TEST(command_spec_round_trips_every_field_verbatim) {
                     {L"diff", L"--", L"100%.txt", L"特殊 &^%!(x) 文件.txt"},
                     L"D:\\仓库 with spaces\\工作区");
   const std::wstring title =
-      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"status", L"GcOp12x3");
+      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"status", L"GcOp12xabcd1234");
   bool ok = false;
   CommandPlanReject reject = CommandPlanReject::none;
   std::wstring detail;
   const std::wstring specText =
-      BuildSpec(operation, L"GcOp12x3", title, L"abcdef0123456789", &ok, &reject, &detail);
+      BuildSpec(operation, L"GcOp12xabcd1234", title, L"abcdef0123456789", &ok, &reject, &detail);
   GC_REQUIRE_MESSAGE(ok, Describe(detail));
 
   CommandWindowSpec parsed;
   std::wstring parseReason;
   GC_REQUIRE_MESSAGE(gc::git::ParseCommandWindowSpecText(specText, &parsed, &parseReason),
                      Describe(parseReason));
-  GC_CHECK(parsed.directoryToken == L"GcOp12x3");
+  GC_CHECK(parsed.directoryToken == L"GcOp12xabcd1234");
   GC_CHECK(parsed.operationId == operation.operationId);
   GC_CHECK(parsed.nonce == L"abcdef0123456789");
   GC_CHECK(parsed.title == title);  // 中文标题原样保留：不再有“装不下就退回占位文字”的分支
@@ -245,7 +245,7 @@ GC_TEST(command_spec_first_line_is_version_marker) {
   const CommandWindowOperation operation = MakeOperation(L"C:\\git.exe", {L"status"});
   bool ok = false;
   const std::wstring specText =
-      BuildSpec(operation, L"GcOp1x1", L"Git status - GcOp1x1", L"abcdef0123456789", &ok, nullptr,
+      BuildSpec(operation, L"GcOp1xabcd1234", L"Git status - GcOp1xabcd1234", L"abcdef0123456789", &ok, nullptr,
                 nullptr);
   GC_REQUIRE(ok, "常规操作应能生成说明书");
   const std::string first = FirstLineStartingWith(specText, L"evernight-command-window-spec");
@@ -267,17 +267,30 @@ GC_TEST(command_spec_rejects_unsafe_nonce_and_directory) {
   for (const std::wstring& bad : badNonces) {
     CommandPlanReject reject = CommandPlanReject::none;
     std::wstring detail;
-    specText = BuildSpec(operation, L"GcOp1x1", L"Git status", bad, &ok, &reject, &detail);
+    specText = BuildSpec(operation, L"GcOp1xabcd1234", L"Git status", bad, &ok, &reject, &detail);
     GC_CHECK_MESSAGE(!ok && reject == CommandPlanReject::illegalNonce,
                      "口令应被拒绝：" + gc::platform::Utf16ToUtf8(bad) + " -> " +
                          gc::platform::Utf16ToUtf8(detail));
     GC_CHECK(specText.empty());
   }
   // 目录名同理：不是执行器生成的形态，就说明说明书与它所在的目录不是同一件事。
-  const std::vector<std::wstring> badTokens = {L"",         L"GcOp",   L"GcOp1x",
-                                              L"x1x1",      L"GcOp1x1x2", L"GcOp1;x1",
-                                              L"GcOp1x1\\sub", L"temp1x1", L"GcOp1x",
-                                              L"GcOp1x012345678901234567890"};
+  const std::vector<std::wstring> badTokens = {
+      L"",                     // 空
+      L"GcOp",                 // 只有前缀
+      L"GcOp1x",               // 随机段缺失
+      L"x1x1",                 // 没有前缀
+      L"GcOp1xabcd1234x5678",  // 两个分隔符
+      L"GcOp1xabcd;1234",      // 分号
+      L"GcOp1xabcd1234\\sub",  // 路径分隔
+      L"temp1xabcd1234",       // 前缀不对
+      L"GcOp1xabcd123",        // 随机段短于下限
+      L"GcOp1xABCD1234",       // 大写不是执行器生成的形态
+      L"GcOp1xabcd123g",       // 不是十六进制
+      L"GcOp1xyz9876543210",   // 随机段里出现非十六进制字母
+      L"GcOp0x1abcd",          // 随机段太短
+      L"GcOp1xabcd1234abcd1234abcd1234abcd1234abcd1234",  // 超过上限
+      L"GcOp-1xabcd1234",      // 进程 ID 段含负号
+  };
   for (const std::wstring& bad : badTokens) {
     CommandPlanReject reject = CommandPlanReject::none;
     std::wstring detail;
@@ -285,7 +298,9 @@ GC_TEST(command_spec_rejects_unsafe_nonce_and_directory) {
     GC_CHECK_MESSAGE(!ok && reject == CommandPlanReject::illegalOperationDirectory,
                      "目录名应被拒绝：" + gc::platform::Utf16ToUtf8(bad));
   }
-  GC_CHECK(gc::git::IsSafeOperationDirectoryName(L"GcOp12345x67890"));
+  GC_CHECK(gc::git::IsSafeOperationDirectoryName(L"GcOp12345xabcd1234"));
+  GC_CHECK(gc::git::IsSafeOperationDirectoryName(
+      L"GcOp4294967295x0123456789abcdef0123456789abcdef"));  // 两段都取到上界
   GC_CHECK(gc::git::IsSafeNonce(L"ABCdef0123456789"));
   GC_CHECK(!gc::git::IsSafeNonce(std::wstring(65, L'a')));
 }
@@ -300,8 +315,8 @@ GC_TEST(command_spec_rejects_malformed_documents) {
   };
   const std::wstring valid =
       L"evernight-command-window-spec\t1\r\n"
-      L"token\tGcOp1x1\r\nopid\tstatus\r\nnonce\tabcdef0123456789\r\n"
-      L"title\tGit status - GcOp1x1\r\nprogram\tC:\\git.exe\r\ncwd\tC:\\repo\r\narg\tstatus\r\n";
+      L"token\tGcOp1xabcd1234\r\nopid\tstatus\r\nnonce\tabcdef0123456789\r\n"
+      L"title\tGit status - GcOp1xabcd1234\r\nprogram\tC:\\git.exe\r\ncwd\tC:\\repo\r\narg\tstatus\r\n";
 
   GC_CHECK(refused(L""));                                                       // 空文档
   GC_CHECK(refused(L"evernight-command-window-spec\t2\r\narg\tx\r\n"));         // 版本不符
@@ -334,11 +349,11 @@ GC_TEST(command_spec_survives_strict_utf8_round_trip) {
       L"D:\\用户\\仓库 with spaces & 中文");
   operation.operationId = L"stage";
   const std::wstring title =
-      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"加入暂存区", L"GcOp9x9");
+      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"加入暂存区", L"GcOp9xdeadbeef");
   bool ok = false;
   std::wstring detail;
   const std::wstring specText =
-      BuildSpec(operation, L"GcOp9x9", title, L"deadbeefcafebabe", &ok, nullptr, &detail);
+      BuildSpec(operation, L"GcOp9xdeadbeef", title, L"deadbeefcafebabe", &ok, nullptr, &detail);
   GC_REQUIRE_MESSAGE(ok, Describe(detail));
 
   // 平台层的严格 UTF-8 往返：一个码元都不能改，改了就等于把用户的文件名换成别的名字。
@@ -403,16 +418,16 @@ GC_TEST(command_title_is_kept_even_when_system_codepage_cannot_encode_it) {
   // 计划阶段不再有“码页可表示性”判定，因此这类操作必然能启动。
   const CommandWindowOperation operation = MakeOperation(L"C:\\git.exe", {L"status"});
   const std::wstring title =
-      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"提交", L"GcOp4x4");
+      gc::git::MakeSafeConsoleTitle(L"Git 提交工具 - 命令窗口", L"提交", L"GcOp4xabcd4444");
   bool ok = false;
-  const std::wstring specText = BuildSpec(operation, L"GcOp4x4", title, L"abcdef0123456789", &ok,
+  const std::wstring specText = BuildSpec(operation, L"GcOp4xabcd4444", title, L"abcdef0123456789", &ok,
                                           nullptr, nullptr);
   GC_CHECK(ok);
   CommandWindowSpec parsed;
   std::wstring reason;
   GC_CHECK(gc::git::ParseCommandWindowSpecText(specText, &parsed, &reason));
   GC_CHECK(parsed.title.find(L"提交") != std::wstring::npos);
-  GC_CHECK(parsed.title.find(L"GcOp4x4") != std::wstring::npos);  // 唯一标记保留
+  GC_CHECK(parsed.title.find(L"GcOp4xabcd4444") != std::wstring::npos);  // 唯一标记保留
 }
 
 GC_TEST(command_spec_rejects_operation_the_plan_validation_refuses) {
@@ -422,10 +437,10 @@ GC_TEST(command_spec_rejects_operation_the_plan_validation_refuses) {
   bool ok = true;
   CommandPlanReject reject = CommandPlanReject::none;
   std::wstring detail;
-  BuildSpec(evilPath, L"GcOp1x1", L"Git status", L"abcdef0123456789", &ok, &reject, &detail);
+  BuildSpec(evilPath, L"GcOp1xabcd1234", L"Git status", L"abcdef0123456789", &ok, &reject, &detail);
   GC_CHECK(!ok);
   GC_CHECK(reject == CommandPlanReject::quoteInPath);
-  BuildSpec(evilArgument, L"GcOp1x1", L"Git status", L"abcdef0123456789", &ok, &reject, &detail);
+  BuildSpec(evilArgument, L"GcOp1xabcd1234", L"Git status", L"abcdef0123456789", &ok, &reject, &detail);
   GC_CHECK(!ok);
   GC_CHECK(reject == CommandPlanReject::illegalArgument);
 }
@@ -436,31 +451,79 @@ GC_TEST(command_spec_rejects_unencodable_title) {
   bool ok = true;
   CommandPlanReject reject = CommandPlanReject::none;
   std::wstring detail;
-  BuildSpec(operation, L"GcOp1x1", std::wstring(L"标题") + wchar_t(0x01), L"abcdef0123456789", &ok,
+  BuildSpec(operation, L"GcOp1xabcd1234", std::wstring(L"标题") + wchar_t(0x01), L"abcdef0123456789", &ok,
             &reject, &detail);
   GC_CHECK(!ok);
   GC_CHECK(reject == CommandPlanReject::illegalWindowTitle);
   // 制表符同样会多出一个字段分隔符。
-  BuildSpec(operation, L"GcOp1x1", L"标题\tGcOp1x1", L"abcdef0123456789", &ok, &reject, &detail);
+  BuildSpec(operation, L"GcOp1xabcd1234", L"标题\tGcOp1xabcd1234", L"abcdef0123456789", &ok, &reject, &detail);
   GC_CHECK(!ok);
   GC_CHECK(reject == CommandPlanReject::illegalWindowTitle);
   // emoji（超出传统代码页）是合法标题：这正是本次修复要放开的那一类。
-  BuildSpec(operation, L"GcOp1x1", L"Git 提交工具 😀 - GcOp1x1", L"abcdef0123456789", &ok, &reject,
+  BuildSpec(operation, L"GcOp1xabcd1234", L"Git 提交工具 😀 - GcOp1xabcd1234", L"abcdef0123456789", &ok, &reject,
             &detail);
   GC_CHECK_MESSAGE(ok, Describe(detail));
 }
 
 GC_TEST(command_result_parsing_accepts_only_complete_lines) {
+  static constexpr std::string_view kNonce = "abcdef0123456789";
   long exitCode = -1;
-  GC_CHECK(!gc::git::ParseCommandWindowResult("", &exitCode));
-  GC_CHECK(!gc::git::ParseCommandWindowResult("123", &exitCode));       // 没有换行：可能正在写
-  GC_CHECK(!gc::git::ParseCommandWindowResult("abc\n", &exitCode));     // 不是整数
-  GC_CHECK(!gc::git::ParseCommandWindowResult("1 2\n", &exitCode));     // 多余字段
-  GC_CHECK(!gc::git::ParseCommandWindowResult("\n", &exitCode));
-  GC_CHECK(gc::git::ParseCommandWindowResult("0\r\n", &exitCode) && exitCode == 0);
-  GC_CHECK(gc::git::ParseCommandWindowResult("128\n", &exitCode) && exitCode == 128);
-  GC_CHECK(gc::git::ParseCommandWindowResult("-2\r\n", &exitCode) && exitCode == -2);
-  GC_CHECK(!gc::git::ParseCommandWindowResult("99999999999999999999\n", &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("", kNonce, &exitCode));
+  // 没有行尾：可能正在写。发布协议里改名是原子的，因此“没有行尾”只可能是外部塞进来的半成品，
+  // 观察端必须继续等，绝不能拿半截内容当成一次回答。
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0", kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\tabc\n", kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t1 2\n", kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("\n", kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("0\r\n", kNonce, &exitCode));  // 旧格式：没有口令
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\n", kNonce, &exitCode));
+  // 首行之后还有内容：一次操作只发布一条结果，多出来的当作不可信。
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\r\nresult\tabcdef0123456789\t9\r\n",
+                                              kNonce, &exitCode));
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\r\n", kNonce, &exitCode) &&
+           exitCode == 0);
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t128\n", kNonce, &exitCode) &&
+           exitCode == 128);
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t-2\r\n", kNonce, &exitCode) &&
+           exitCode == -2);
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t99999999999999999999\n",
+                                              kNonce, &exitCode));
+  // 标识不符：上一次留下的、或别人塞进来的“成功”，都不算本次操作的结果。
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tfedcba9876543210\t0\r\n", kNonce, &exitCode));
+  GC_CHECK(exitCode == -2);  // 拒绝时不写回退出码，避免调用方误用一个没被承认的值
+}
+
+GC_TEST(command_start_marker_carries_this_operation_nonce) {
+  static constexpr std::string_view kNonce = "abcdef0123456789";
+  const std::string marker = gc::git::BuildCommandWindowStartMarkerText(kNonce);
+  GC_CHECK(marker == "start\tabcdef0123456789\r\n");
+  GC_CHECK(gc::git::ParseCommandWindowStartMarker(marker, kNonce));
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker(marker, "fedcba9876543210"));  // 别的操作留下的
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker("start\r\n", kNonce));         // 旧格式：没有归属
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker("start\tabcdef0123456789", kNonce));  // 半写
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker("result\tabcdef0123456789\t0\r\n", kNonce));
+  GC_CHECK(!gc::git::ParseCommandWindowStartMarker("", kNonce));
+  // 结果行与开始标记用的是同一份口令：由同一个来源（说明书）派生，逐字节一致。
+  std::string ascii;
+  GC_REQUIRE(gc::git::NonceToAscii(L"abcdef0123456789", &ascii), "口令应能取成 ASCII 字节");
+  GC_CHECK(ascii == std::string(kNonce));
+  std::string rejected;
+  GC_CHECK(!gc::git::NonceToAscii(L"bad nonce!", &rejected));  // 含空格与 !：不是执行器生成的形态
+  GC_CHECK(rejected.empty());
+}
+
+GC_TEST(command_operation_file_names_are_the_reclaim_scope) {
+  // 回收与善后只针对这份名单，名单必须覆盖一次操作可能落下的每一个文件：
+  // 漏一个就等于“别人写过的东西没人收尾”，或多一个就等于“删到别人的文件”。
+  const std::vector<std::string_view> expected = {gc::git::kSpecFileName,
+                                                  gc::git::kStartMarkerFileName,
+                                                  gc::git::kResultTempFileName,
+                                                  gc::git::kResultFileName, gc::git::kLeaseFileName};
+  GC_CHECK(expected.size() == gc::git::kOperationFileNames.size());
+  for (size_t index = 0; index < expected.size(); ++index) {
+    GC_CHECK_MESSAGE(gc::git::kOperationFileNames[index] == expected[index],
+                     "回收名单的顺序或内容变了，第 " + std::to_string(index) + " 项");
+  }
 }
 
 namespace {
@@ -505,9 +568,10 @@ GC_TEST(command_completion_distinguishes_all_outcomes) {
 }
 
 GC_TEST(command_observer_reads_injected_files) {
+  static constexpr std::string_view kNonce = "abcdef0123456789";
   const std::map<std::string, std::string> files{
-      {"start.txt", "start"},
-      {"result.txt", "42\r\n"},
+      {"start.txt", "start\tabcdef0123456789\r\n"},
+      {"result.txt", "result\tabcdef0123456789\t42\r\n"},
   };
   const auto reader = [&files](std::string_view name) -> std::optional<std::string> {
     const auto found = files.find(std::string(name));
@@ -517,8 +581,8 @@ GC_TEST(command_observer_reads_injected_files) {
     return found->second;
   };
 
-  const gc::git::CommandWindowObservation facts =
-      gc::git::ObserveCommandWindow(reader, /*createProcessSucceeded=*/true, /*processExited=*/false);
+  const gc::git::CommandWindowObservation facts = gc::git::ObserveCommandWindow(
+      reader, /*createProcessSucceeded=*/true, /*processExited=*/false, kNonce);
 
   GC_CHECK(facts.startMarkerSeen);
   GC_CHECK(facts.resultParsed);
@@ -527,10 +591,49 @@ GC_TEST(command_observer_reads_injected_files) {
   GC_CHECK(gc::git::DecideCommandCompletion(facts, &exitCode) == gc::git::CommandCompletion::finished);
 }
 
+GC_TEST(command_observer_ignores_foreign_or_partial_files) {
+  // “文件在那里”不等于“这条痕迹属于本次操作”：口令不符（上一次留下的、别人塞进来的）、
+  // 格式是旧形态、或内容只写了一半，观察端都必须当作没有，绝不合成一次“成功”。
+  static constexpr std::string_view kNonce = "abcdef0123456789";
+  const std::map<std::string, std::string> files{
+      {"start.txt", "start\tfedcba9876543210\r\n"},                // 别的操作的口令
+      {"result.txt", "result\tabcdef0123456789\t0"},               // 同一口令，但还没写完
+  };
+  const auto reader = [&files](std::string_view name) -> std::optional<std::string> {
+    const auto found = files.find(std::string(name));
+    if (found == files.end()) {
+      return std::nullopt;
+    }
+    return found->second;
+  };
+  const gc::git::CommandWindowObservation facts =
+      gc::git::ObserveCommandWindow(reader, true, /*processExited=*/false, kNonce);
+  GC_CHECK(!facts.startMarkerSeen);
+  GC_CHECK(!facts.resultParsed);
+  long exitCode = 0;
+  // 进程还在，两条痕迹都不认：只能是“已启动，等待就绪”，不能是执行中，更不能是完成。
+  GC_CHECK(gc::git::DecideCommandCompletion(facts, &exitCode) == gc::git::CommandCompletion::launched);
+
+  // 同一条痕迹换成正确的口令就都成立：证明判定看的是归属，不是“有没有读到字节”。
+  const std::map<std::string, std::string> ours{
+      {"start.txt", "start\tabcdef0123456789\r\n"},
+      {"result.txt", "result\tabcdef0123456789\t0\r\n"},
+  };
+  const auto ourReader = [&ours](std::string_view name) -> std::optional<std::string> {
+    const auto found = ours.find(std::string(name));
+    return found == ours.end() ? std::nullopt : std::optional<std::string>(found->second);
+  };
+  const gc::git::CommandWindowObservation goodFacts =
+      gc::git::ObserveCommandWindow(ourReader, true, true, kNonce);
+  GC_CHECK(goodFacts.startMarkerSeen && goodFacts.resultParsed);
+  GC_CHECK(gc::git::DecideCommandCompletion(goodFacts, &exitCode) ==
+           gc::git::CommandCompletion::finished);
+}
+
 GC_TEST(command_observer_treats_missing_files_as_absent) {
   const auto reader = [](std::string_view) -> std::optional<std::string> { return std::nullopt; };
   const gc::git::CommandWindowObservation facts =
-      gc::git::ObserveCommandWindow(reader, true, true);
+      gc::git::ObserveCommandWindow(reader, true, true, "abcdef0123456789");
   GC_CHECK(!facts.startMarkerSeen);
   GC_CHECK(!facts.resultParsed);
   long exitCode = 0;
@@ -540,7 +643,8 @@ GC_TEST(command_observer_treats_missing_files_as_absent) {
 
 GC_TEST(command_observer_keeps_running_until_result_written) {
   // 辅助进程已开跑、结果还没写出，进程也还活着：必须是中间态“执行中”，既不能报成功也不能报失败。
-  const std::map<std::string, std::string> files{{"start.txt", "start"}};
+  const std::map<std::string, std::string> files{
+      {"start.txt", "start\tabcdef0123456789\r\n"}};
   const auto reader = [&files](std::string_view name) -> std::optional<std::string> {
     const auto found = files.find(std::string(name));
     if (found == files.end()) {
@@ -548,8 +652,8 @@ GC_TEST(command_observer_keeps_running_until_result_written) {
     }
     return found->second;
   };
-  const gc::git::CommandWindowObservation facts =
-      gc::git::ObserveCommandWindow(reader, true, /*processExited=*/false);
+  const gc::git::CommandWindowObservation facts = gc::git::ObserveCommandWindow(
+      reader, true, /*processExited=*/false, "abcdef0123456789");
   long exitCode = 0;
   GC_CHECK(gc::git::DecideCommandCompletion(facts, &exitCode) == gc::git::CommandCompletion::running);
 }

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "git/command_window.h"
@@ -107,13 +108,74 @@ bool WriteBytes(std::wstring_view path, std::string_view bytes) {
   if (!handle) {
     return false;
   }
-  if (bytes.empty()) {
-    return ::SetEndOfFile(handle.get()) != 0;
+  if (!bytes.empty()) {
+    DWORD written = 0;
+    if (::WriteFile(handle.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written,
+                    nullptr) == 0 ||
+        written != static_cast<DWORD>(bytes.size())) {
+      return false;
+    }
   }
-  DWORD written = 0;
-  return ::WriteFile(handle.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &written,
-                     nullptr) != 0 &&
-         written == bytes.size();
+  // 观察端是另一个进程：写完必须先确认内容真的落到文件系统再放手句柄，
+  // 否则会出现“文件已存在但读不到内容”，被误判成没写。
+  return ::FlushFileBuffers(handle.get()) != 0;
+}
+
+// 短暂的共享冲突重试：另一个执行器实例的回收探测（以及杀软、索引器）只会占住文件极短一瞬间，
+// 撞上一次不该让整次操作丢掉 Git 的退出码。次数与间隔都有上限，试不出来就照实报告失败，
+// 绝不假装写成功。
+template <typename Call>
+[[nodiscard]] bool WithBriefRetry(Call&& attempt) {
+  for (int index = 0; index < 4; ++index) {
+    if (attempt()) {
+      return true;
+    }
+    ::Sleep(100);
+  }
+  return false;
+}
+
+// 独占创建并持有开始标记。共享模式给 READ|DELETE，为的是两件事都成立：
+//   * 观察端（执行器）能读它 —— 里面写着本次操作的随机口令，读得出且对得上才算“已在执行”；
+//   * 回收例程用“只读 + 共享 0”独占探测它时必定撞上本句柄 ——
+//     于是这个句柄本身就是跨进程的“辅助进程还活着”的证据：进程被杀或自己退出时系统会关掉它，
+//     证据随之消失，那一个目录才可能被回收。
+// 句柄由调用方持有到结果发布完成（见 Execute 里的 publishResult）。
+bool CreateHeldStartMarker(std::wstring_view path, std::string_view text, UniqueHandle* outHeld,
+                           std::wstring* failureReason) {
+  if (outHeld != nullptr) {
+    outHeld->Reset();
+  }
+  std::wstring lastFailure;
+  const bool created = WithBriefRetry([&]() -> bool {
+    UniqueHandle handle(::CreateFileW(path.data(), GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!handle) {
+      lastFailure = L"创建开始标记失败：" + FormatError(::GetLastError());
+      return false;
+    }
+    DWORD written = 0;
+    if (::WriteFile(handle.get(), text.data(), static_cast<DWORD>(text.size()), &written,
+                    nullptr) == 0 ||
+        written != static_cast<DWORD>(text.size())) {
+      lastFailure = L"写开始标记失败：" + FormatError(::GetLastError());
+      return false;
+    }
+    // 观察端是另一个进程：先确认内容真的落到文件系统，再把句柄交给调用方继续持有。
+    if (::FlushFileBuffers(handle.get()) == 0) {
+      lastFailure = L"开始标记未能落盘：" + FormatError(::GetLastError());
+      return false;
+    }
+    if (outHeld != nullptr) {
+      *outHeld = std::move(handle);
+    }
+    return true;
+  });
+  if (!created && failureReason != nullptr) {
+    *failureReason = lastFailure;
+  }
+  return created;
 }
 
 // 读全文，超过上限视为不可信（说明书只可能是几百字节）。
@@ -279,6 +341,7 @@ bool RunInheritedConsole(const ConsoleStreams& streams, const std::wstring& prog
 struct HelperContext {
   std::wstring operationDirectory;
   std::wstring expectedNonce;
+  std::string asciiNonce;  // 同一个口令的 ASCII 形态：写进开始标记与结果行，供观察端核对归属
   std::wstring title;
   std::wstring gitExecutable;
   std::wstring workingDirectory;
@@ -290,6 +353,40 @@ struct HelperContext {
 // 说明书与标记文件的名字与执行器共用同一份常量（git::k*FileName 是 ASCII 字面量）。
 std::wstring InOperationDirectory(const HelperContext& context, std::string_view fileName) {
   return JoinPath(context.operationDirectory, Utf8ToUtf16(std::string(fileName)));
+}
+
+// 发布结果：先写 result.tmp，flush 之后改名成 result.txt。同一目录内的改名是原子操作，
+// 因此观察端只会看见“还没有结果”或“完整的一条结果”两种状态：既读不到写了一半的内容，
+// 也不可能把上一次留下的旧结果当成本次操作的回答。
+// 万一改名不成（杀软或索引器短暂占用），退回去把正式名一次写完再 flush：
+// 行尾换行仍然是“写完了”的记号，口令核对与格式判定都不因发布方式不同而放松。
+bool PublishResult(const HelperContext& context, std::string_view text, std::wstring* failureReason) {
+  const std::wstring tempPath = InOperationDirectory(context, git::kResultTempFileName);
+  const std::wstring resultPath = InOperationDirectory(context, git::kResultFileName);
+  std::wstring lastFailure;
+  const bool published = WithBriefRetry([&]() -> bool {
+    if (WriteBytes(tempPath, text)) {
+      if (::MoveFileExW(tempPath.c_str(), resultPath.c_str(), MOVEFILE_WRITE_THROUGH) != 0) {
+        return true;
+      }
+      lastFailure = L"发布结果文件失败：" + FormatError(::GetLastError());
+      static_cast<void>(::DeleteFileW(tempPath.c_str()));
+    } else {
+      lastFailure = L"写结果暂存文件失败：" + FormatError(::GetLastError());
+    }
+    // 改名不成时退回去把正式名一次写完再 flush：行尾换行仍然是“写完了”的记号，
+    // 口令核对与格式判定都不因发布方式不同而放松。
+    if (WriteBytes(resultPath, text)) {
+      lastFailure.clear();
+      return true;
+    }
+    lastFailure += L"，直接写正式名也没成：" + FormatError(::GetLastError());
+    return false;
+  });
+  if (!published && failureReason != nullptr) {
+    *failureReason = lastFailure.empty() ? L"写结果文件失败。" : lastFailure;
+  }
+  return published;
 }
 
 // 说明书读回并校验：任何不合格式都返回 false，绝不猜、绝不修。
@@ -314,6 +411,13 @@ bool LoadAndValidateSpec(HelperContext& context) {
   }
   if (spec.nonce != context.expectedNonce) {
     context.failureReason = L"操作说明书的口令与本次启动不符，拒绝执行。";
+    return false;
+  }
+  // 口令还要以 ASCII 字节形态写进开始标记与结果行（那两个文件是字节文件）。
+  // 说明书里的口令刚刚已经与被启动时传来的那一个逐字比过，这里只是把它安全地取成字节；
+  // 取不成说明形态不符合约定，宁可不执行。
+  if (!git::NonceToAscii(spec.nonce, &context.asciiNonce)) {
+    context.failureReason = L"操作口令的形态不符合约定，拒绝执行。";
     return false;
   }
   const std::wstring directoryName = LastSegment(context.operationDirectory);
@@ -350,7 +454,6 @@ bool LoadAndValidateSpec(HelperContext& context) {
 
 int Execute(const HelperContext& context) {
   const std::wstring startPath = InOperationDirectory(context, git::kStartMarkerFileName);
-  const std::wstring resultPath = InOperationDirectory(context, git::kResultFileName);
 
   // 标题用 Unicode API 设置：中文标题在任何代码页的机器上都原样显示，
   // 也不再因为“某个码页装不下”而让一次合法操作失败。
@@ -359,22 +462,42 @@ int Execute(const HelperContext& context) {
   static_cast<void>(::SetConsoleOutputCP(CP_UTF8));
   static_cast<void>(::SetConsoleCP(CP_UTF8));
 
-  if (!WriteBytes(startPath, "start\r\n")) {
-    ConsoleWrite(context.streams, L"[EvernightCommit] 无法写出开始标记，操作未执行。\r\n");
+  // 开始标记带着本次操作的口令写出，并且句柄一直握在辅助进程手里，直到结果发布完成才放手：
+  // 期间任何回收例程独占探测这个文件都会撞墙，于是“命令窗口正在跑这次操作”是一个查得到的事实，
+  // 而不是一句推测 —— 停在“输入口令”上等上一小时，也不会有谁把这个目录当成死残骸清掉。
+  UniqueHandle startMarker;
+  std::wstring markerFailure;
+  if (!CreateHeldStartMarker(startPath, git::BuildCommandWindowStartMarkerText(context.asciiNonce),
+                             &startMarker, &markerFailure)) {
+    ConsoleWrite(context.streams, L"[EvernightCommit] 无法写出开始标记，操作未执行。（" +
+                                      markerFailure + L"）\r\n");
     return 2;
   }
   // 窗口里显示的就是即将执行的那一条命令（原样宽字符，不含任何转义形态）。
   ConsoleWrite(context.streams, context.commandLine + L"\r\n");
 
+  // 结果一律走“临时名 + 改名发布”的协议，并在发布完成后放手开始标记的句柄：
+  // 从这一刻起本次操作已经有了回答，目录里不再有“还在被用”的东西，可以被安全回收。
+  const auto publishResult = [&](long exitCode) {
+    std::wstring reason;
+    const bool published = PublishResult(
+        context, git::BuildCommandWindowResultText(context.asciiNonce, exitCode), &reason);
+    startMarker.Reset();
+    if (!published) {
+      ConsoleWrite(context.streams, L"[EvernightCommit] " + reason + L"\r\n");
+    }
+    return published;
+  };
+
   if (!IsExistingRegularFile(context.gitExecutable)) {
     // 与 cmd 时代的 9009 同形态：执行器据此报告“Git 未能启动”，而不是“执行完成 + 非 0 退出码”。
-    static_cast<void>(WriteBytes(resultPath, std::to_string(git::kCommandNotFoundExitCode) + "\r\n"));
+    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
     ConsoleWrite(context.streams,
                  L"[EvernightCommit] Git 程序不存在或已被移除：" + context.gitExecutable + L"\r\n");
     return 3;
   }
   if (!IsExistingDirectory(context.workingDirectory)) {
-    static_cast<void>(WriteBytes(resultPath, std::to_string(git::kCommandNotFoundExitCode) + "\r\n"));
+    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
     ConsoleWrite(context.streams,
                  L"[EvernightCommit] 仓库目录不存在或已被移除：" + context.workingDirectory + L"\r\n");
     return 3;
@@ -384,17 +507,13 @@ int Execute(const HelperContext& context) {
   std::wstring launchFailure;
   if (!RunInheritedConsole(context.streams, context.gitExecutable, context.commandLine,
                            context.workingDirectory, &gitExitCode, &launchFailure)) {
-    static_cast<void>(WriteBytes(resultPath, std::to_string(git::kCommandNotFoundExitCode) + "\r\n"));
+    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
     ConsoleWrite(context.streams, L"[EvernightCommit] Git 进程未能创建：" + launchFailure + L"\r\n");
     return 3;
   }
 
   // 退出码按有符号 32 位写回，与过去 cmd 的 %ERRORLEVEL% 形态一致（例如 -2 而不是 4294967294）。
-  const std::string resultText =
-      std::to_string(static_cast<long>(static_cast<std::int32_t>(gitExitCode))) + "\r\n";
-  if (!WriteBytes(resultPath, resultText)) {
-    ConsoleWrite(context.streams, L"[EvernightCommit] 无法写出结果文件，本程序不会得知 Git 的退出码。\r\n");
-  }
+  static_cast<void>(publishResult(static_cast<long>(static_cast<std::int32_t>(gitExitCode))));
   ConsoleWrite(context.streams,
                L"[EvernightCommit] Git 已退出，窗口保持打开，可继续查看上方输出。\r\n");
 
