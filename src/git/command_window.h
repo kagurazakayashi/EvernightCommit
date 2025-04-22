@@ -53,11 +53,12 @@ inline constexpr size_t kOperationDirectoryRandomMaxLength = 32;
 //                  辅助进程写完不放手，一直持有到结果发布完成，因此它是跨进程的“还活着”证据。
 //   result.tmp  —— 结果行的落盘暂存名：写完并 flush 后用 rename 发布成 result.txt，
 //                  避免观察端读到半截内容、或把上一次留下的旧结果当成本次的成功。
-//   result.txt  —— 已发布的结果：口令 + Git 的退出码。
+//   result.txt  —— 已发布的结果：口令 + Git 的退出码 + Git 进程是否被创建（CreateProcess 的事实）。
 //   lease.txt   —— 执行器自己持有的活动租约：句柄在 = 本次操作还在本进程的进行中，
 //                  进程异常退出时由系统关闭，于是它同时是“曾经拥有、如今无人持有”的证据。
 // Git 程序的存在性由执行器在启动命令窗口之前检查（不是文件则根本不启动，报启动失败）；
-// 辅助进程再查一次，专防“执行期间 git.exe 被移动或删除”，此时用保留码 9009 上报。
+// 辅助进程再查一次，专防“执行期间 git.exe 被移动或删除”。上报形态见下面的结果行协议：
+// “Git 进程没有被创建”是辅助进程手里 CreateProcessW 的直接事实，不再借道任何退出码数值。
 inline constexpr const char* kStartMarkerFileName = "start.txt";
 inline constexpr const char* kResultFileName = "result.txt";
 inline constexpr const char* kSpecFileName = "spec.txt";
@@ -162,11 +163,15 @@ struct CommandWindowSpec {
 
 // 开始标记与结果行的文本形态（两者都是一行“标记<TAB>字段…”加行尾 CRLF）：
 //   start.txt   —— start<TAB><口令>
-//   result.txt  —— result<TAB><口令>TAB><十进制退出码>
+//   result.txt  —— result<TAB><口令>TAB><十进制退出码>TAB><Git 启动事实>
 // 口令进文件而不是只靠目录名绑定，为的是让“这条痕迹属于本次操作”成为一个可核对的事实：
 // 目录名可以被复用，口令每次启动都重新生成且不可预测。
+// Git 启动事实是辅助进程创建 Git 进程时 CreateProcessW 的直接回答（started / notstarted），
+// 不是从某个退出码数值反推的猜测：notstarted 表示 Git 进程从未被创建（如 git.exe 中途消失、
+// 或系统拒绝创建进程），此时退出码字段没有 Git 语义，固定写 0。
 [[nodiscard]] std::string BuildCommandWindowStartMarkerText(std::string_view asciiNonce);
-[[nodiscard]] std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode);
+[[nodiscard]] std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode,
+                                                       bool gitProcessLaunched);
 
 // 解析开始标记：格式不合格、口令与本次操作不符都返回 false（观察端据此认为“没有执行痕迹”）。
 // 半写（缺行尾）同样返回 false：辅助进程写完才发布，读到这里说明还没写完。
@@ -174,25 +179,44 @@ struct CommandWindowSpec {
                                                  std::string_view expectedAsciiNonce);
 
 // 解析 result.txt 全文（首行必须是完整一行，且口令相符；退出码可为负数，CRT 语义下原值写回）。
+// gitProcessLaunched 只有在返回 true 时才被写入：取值必须是 started/notstarted 之一，
+// 缺字段、拼写不符都视为不合格（协议两端都是本程序自己，没有“旧格式将就认”的空间）。
 // 未写完、格式不合约定、口令不属于本次操作（陈旧结果或别人塞进来的结果）一律返回 false。
 [[nodiscard]] bool ParseCommandWindowResult(std::string_view content,
-                                            std::string_view expectedAsciiNonce, long* exitCode);
-
-// “要调用的程序不存在”的保留码：辅助进程 CreateProcessW(git.exe) 失败时用它在 result.txt
-// 上报同一形态。其余退出码一律视为 Git 自己的回答。
-inline constexpr long kCommandNotFoundExitCode = 9009;
+                                            std::string_view expectedAsciiNonce, long* exitCode,
+                                            bool* gitProcessLaunched);
 
 // 完成状态：六个终态 + 两个中间态，界面、事件与测试一律以它为准。
+// 状态与证据的对应关系（观察端合成时逐条核对，见 DecideCommandCompletion）：
+//   启动失败            —— CreateProcessW 就没成功（或执行器在启动前拒绝）：没有进程，也没有痕迹。
+//   等待脚本/已启动     —— 进程已创建、开始标记还没出现（中间态）。
+//   运行/执行中         —— 开始标记已出现、结果还没写出（中间态；含 Git 停在凭据提问上的时候）。
+//   正常结束 / 非零退出 —— result.txt 完整且口令相符、行内写着 Git 进程确实被创建：
+//                          同一个状态，退出码 0 与非 0 的差别只在成败判定策略，不在状态本身。
+//   Git 未启动          —— result.txt 完整且口令相符、但行内写着 Git 进程从未被创建：
+//                          这是辅助进程 CreateProcessW 失败（或启动前发现程序/目录已消失）的直接上报，
+//                          不从任何退出码数值反推。Git 自己返回 9009 也只会被当作一次非零退出。
+//   捕获/结果异常       —— 结果缺失、半写、口令不符等一律“没有这条痕迹”：进程还活着就继续等，
+//                          进程已退出且开始标记在，落入“窗口提前关闭”；没有标记落入“从未开始执行”。
+//   窗口提前关闭        —— 辅助进程已退出、开始标记在、却拿不到合格结果：Git 可能跑到一半被带走。
+//   从未开始执行        —— 辅助进程已退出而连开始标记都没有。
+//   未知/超过观察期限   —— 进程活着但迟迟没有任何可承认的痕迹（由观察端按时限判定后传入）。
+// 除“等待脚本”“运行”外都是终态：终态一经合成，观察端必须立刻结案，
+// 绝不依赖保留的命令窗口（cmd /k）何时关闭——它可以永远开着。
 enum class CommandCompletion {
   launchFailed = 0,  // 命令窗口辅助进程未能启动（CreateProcessW 失败，附 Windows 错误码）
   launched,          // 进程已创建，辅助进程尚未写出开始标记（中间态）
   running,           // 辅助进程已接管命令窗口，等待 Git 退出码（中间态）
-  finished,          // 拿到 Git 退出码（exitCode==0 视为成功）
-  gitNotStarted,     // 辅助进程跑完了但 Git 进程从未被创建（如 git.exe 中途消失）
+  finished,          // 拿到 Git 退出码（exitCode==0 视为成功；Git 进程确实被创建过）
+  gitNotStarted,     // 辅助进程报告 Git 进程从未被创建：没有任何 Git 输出，也没有退出码可谈
   terminated,        // 窗口被提前关闭：Git 已开跑但拿不到退出码，结果未知
   helperNeverStarted,  // 辅助进程已退出却连 start.txt 都没有：从未真正开始执行
   stillUnknown,      // 进程存活超过观察期限仍无结果：结果未知，不谎报也不永远“执行中”
 };
+
+// 终态判定：六个终态一次判完，观察循环据此结案。中间态（launched、running）返回 false，
+// 意味着“还不能下结论”，而不是“永远等下去”——超时降级由观察端负责合成 stillUnknown。
+[[nodiscard]] bool IsCommandCompletionTerminal(CommandCompletion completion) noexcept;
 
 [[nodiscard]] std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept;
 
@@ -202,7 +226,8 @@ struct CommandWindowObservation {
   bool processExited = false;
   bool startMarkerSeen = false;  // start.txt 完整、格式正确，且口令就是本次操作的口令
   bool resultParsed = false;     // result.txt 已发布完整、格式正确，且口令与本次操作相符
-  long exitCode = 0;             // resultParsed 时有效
+  long exitCode = 0;             // resultParsed 且 gitProcessLaunched 时有效（Git 的退出码）
+  bool gitProcessLaunched = false;  // resultParsed 时有效：结果行上报的 CreateProcess 事实
 };
 
 // 观察器读文件用的接口：返回 nullopt 表示“不存在或暂时读不到”。
@@ -215,7 +240,8 @@ using CommandWindowFileReader = std::function<std::optional<std::string>(std::st
     const CommandWindowFileReader& readFile, bool createProcessSucceeded, bool processExited,
     std::string_view expectedAsciiNonce);
 
-// 把事实合并为终态或中间态；outExitCode 仅在 finished 时写入。
+// 把事实合并为终态或中间态。outExitCode 仅在 finished 时写入（那是 Git 自己的回答）；
+// gitNotStarted 没有退出码可谈——Git 进程从未存在，任何数值都不是它的输出。
 [[nodiscard]] CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
                                                         long* outExitCode) noexcept;
 

@@ -13,9 +13,11 @@ namespace {
 
 [[nodiscard]] std::wstring Number(unsigned long long value) { return std::to_wstring(value); }
 
-// 該終態是否帶有意義的 Git 退出碼：只有腳本真的跑完並寫出結果文件時才是。
+// 该终态是否带有意义的 Git 退出码：只有 Git 进程真的被创建并跑完（辅助进程在结果行里
+// 上报了 CreateProcess 的事实）才是。gitNotStarted 与其余未知/失败形态都没有退出码可谈，
+// 文案改走 failureReason，绝不印出一个不属于 Git 的“退出码”。
 [[nodiscard]] bool HasExitCode(git::CommandCompletion completion) noexcept {
-  return completion == git::CommandCompletion::finished || completion == git::CommandCompletion::gitNotStarted;
+  return completion == git::CommandCompletion::finished;
 }
 
 }  // namespace
@@ -134,9 +136,7 @@ OperationOutcome TaskCoordinator::FinishOperation(unsigned long long serial, git
   std::wstring note = outcome.displayName + L" " + std::wstring(git::CommandCompletionLabel(completion));
   if (HasExitCode(completion)) {
     note += L"，Git 退出码 " + Number(static_cast<unsigned long long>(exitCode));
-    if (completion == git::CommandCompletion::gitNotStarted) {
-      note += L"（Git 进程未被创建，命令窗口里的输出可核对原因）";
-    } else if (viewOperation) {
+    if (viewOperation) {
       // 查看类操作的 0/1 含义由发起方（git::DescribeDiffViewExitCode）解释：
       // `git diff` 与 `git diff --no-index` 对「有没有差异」用的退出码并不一样，
       // 协调器只知道“这两种都算正常完成”，不该替它下结论。

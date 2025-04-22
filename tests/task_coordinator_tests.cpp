@@ -165,7 +165,8 @@ GC_TEST(operation_outcomes_follow_git_exit_code) {
   const std::vector<Expectation> cases{
       {gc::git::CommandCompletion::finished, 0, true},
       {gc::git::CommandCompletion::finished, 1, false},
-      {gc::git::CommandCompletion::gitNotStarted, 9009, false},
+      // Git 进程从未被创建：没有退出码可谈（执行器侧固定交回 0），文案走 failureReason。
+      {gc::git::CommandCompletion::gitNotStarted, 0, false},
       {gc::git::CommandCompletion::terminated, 0, false},
       {gc::git::CommandCompletion::launchFailed, 0, false},
   };
@@ -252,6 +253,55 @@ GC_TEST(operation_conclusion_untouched_by_other_operation_ids) {
       tasks.FinishOperation(serial + 1, gc::git::CommandCompletion::finished, 0, std::wstring_view{});
   GC_CHECK(!unknown.recognised);
   GC_CHECK(tasks.OperationInFlight());
+}
+
+GC_TEST(completion_notification_cannot_settle_the_same_operation_twice) {
+  // 重复的完成通知（消息重投递、轮询兜底与通知赛跑）只能结案一次：
+  // 第二次必须原样被拒——不释放别人的槽位、不产生第二份结论，也不覆盖新任务的结果。
+  TaskCoordinator tasks;
+  LoadOnce(tasks, kGitA, kRepoA);
+  unsigned long long first = 0;
+  GC_REQUIRE_MESSAGE(tasks.BeginOperation(L"commit", &first), "首次发起操作应成功占用槽位");
+  const OperationOutcome settled = tasks.FinishOperation(
+      first, gc::git::CommandCompletion::finished, 0, std::wstring_view{});
+  GC_CHECK(settled.recognised);
+
+  // 同一个序号的重复通知：此时槽位已经空着，没有任何“在途操作”可被它结案。
+  const OperationOutcome repeat =
+      tasks.FinishOperation(first, gc::git::CommandCompletion::finished, 128, std::wstring_view{});
+  GC_CHECK_MESSAGE(!repeat.recognised, "重复通知不得再次结案");
+  GC_CHECK(!repeat.refreshRequested);
+  GC_CHECK(!tasks.OperationInFlight());
+
+  // 新操作开始后又收到旧序号的迟到通知：新操作的槽位与判定一个字都不能动。
+  unsigned long long second = 0;
+  GC_REQUIRE_MESSAGE(tasks.BeginOperation(L"push", &second), "第二个操作应能占用已释放的槽位");
+  const OperationOutcome late =
+      tasks.FinishOperation(first, gc::git::CommandCompletion::terminated, 0, L"迟到");
+  GC_CHECK(!late.recognised);
+  GC_CHECK(tasks.OperationInFlight());  // 新操作仍在途
+  const OperationOutcome real = tasks.FinishOperation(
+      second, gc::git::CommandCompletion::finished, 0, std::wstring_view{});
+  GC_CHECK(real.recognised);
+  GC_CHECK(real.succeeded);  // 迟到通知没能把它替换成“结果未知”
+}
+
+GC_TEST(git_not_started_outcome_reports_reason_without_exit_code) {
+  // Git 进程从未被创建：结论里不该出现“Git 退出码 0”这种像真话的假话，
+  // 取而代之的是执行器给出的具体原因。
+  TaskCoordinator tasks;
+  LoadOnce(tasks, kGitA, kRepoA);
+  unsigned long long serial = 0;
+  GC_REQUIRE_MESSAGE(tasks.BeginOperation(L"status", &serial), "发起操作应成功占用槽位");
+  const OperationOutcome outcome = tasks.FinishOperation(
+      serial, gc::git::CommandCompletion::gitNotStarted, 0, L"Git 进程未能创建（辅助进程直接报告）");
+  GC_CHECK(outcome.recognised);
+  GC_CHECK(!outcome.succeeded);
+  GC_CHECK(outcome.refreshRequested);  // 无论成败都要重读：仓库状态只有 Git 自己知道
+  GC_CHECK_MESSAGE(outcome.note.find(L"退出码") == std::wstring::npos,
+                   "Git 从未运行，结论里不该报任何 Git 退出码");
+  GC_CHECK_MESSAGE(outcome.note.find(L"Git 进程未能创建") != std::wstring::npos,
+                   "结论要带上执行器给出的原因");
 }
 
 GC_TEST(lost_completion_notification_releases_slot_and_refreshes) {

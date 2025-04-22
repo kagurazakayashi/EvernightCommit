@@ -478,10 +478,14 @@ int Execute(const HelperContext& context) {
 
   // 结果一律走“临时名 + 改名发布”的协议，并在发布完成后放手开始标记的句柄：
   // 从这一刻起本次操作已经有了回答，目录里不再有“还在被用”的东西，可以被安全回收。
-  const auto publishResult = [&](long exitCode) {
+  // gitProcessLaunched 是本进程 CreateProcessW 的直接事实，由观察端区分“Git 的回答”与
+  // “Git 从未被创建”：不再借道任何退出码数值（cmd 时代的 9009 已随批处理一起退役）。
+  // 这份证据也伪装不了：结果行带着本次操作的口令、由 nonce 绑定的独占目录发布，
+  // 继承环境里就算有人预设了同名变量（ERRORLEVEL、GIT_* 之类）也影响不到它的内容。
+  const auto publishResult = [&](long exitCode, bool gitLaunched) {
     std::wstring reason;
     const bool published = PublishResult(
-        context, git::BuildCommandWindowResultText(context.asciiNonce, exitCode), &reason);
+        context, git::BuildCommandWindowResultText(context.asciiNonce, exitCode, gitLaunched), &reason);
     startMarker.Reset();
     if (!published) {
       ConsoleWrite(context.streams, L"[EvernightCommit] " + reason + L"\r\n");
@@ -490,14 +494,15 @@ int Execute(const HelperContext& context) {
   };
 
   if (!IsExistingRegularFile(context.gitExecutable)) {
-    // 与 cmd 时代的 9009 同形态：执行器据此报告“Git 未能启动”，而不是“执行完成 + 非 0 退出码”。
-    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
+    // 启动前的存在性核查由执行器与本进程各做一次：这一条防的是“执行期间 git.exe 被移动或删除”。
+    // Git 进程根本没机会被创建，如实上报 notstarted，而不是冒充一个 Git 退出码。
+    static_cast<void>(publishResult(0, /*gitLaunched=*/false));
     ConsoleWrite(context.streams,
                  L"[EvernightCommit] Git 程序不存在或已被移除：" + context.gitExecutable + L"\r\n");
     return 3;
   }
   if (!IsExistingDirectory(context.workingDirectory)) {
-    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
+    static_cast<void>(publishResult(0, /*gitLaunched=*/false));
     ConsoleWrite(context.streams,
                  L"[EvernightCommit] 仓库目录不存在或已被移除：" + context.workingDirectory + L"\r\n");
     return 3;
@@ -507,21 +512,32 @@ int Execute(const HelperContext& context) {
   std::wstring launchFailure;
   if (!RunInheritedConsole(context.streams, context.gitExecutable, context.commandLine,
                            context.workingDirectory, &gitExitCode, &launchFailure)) {
-    static_cast<void>(publishResult(git::kCommandNotFoundExitCode));
+    // CreateProcessW 失败：Git 进程从未存在，它没有任何“退出码”可上报。
+    static_cast<void>(publishResult(0, /*gitLaunched=*/false));
     ConsoleWrite(context.streams, L"[EvernightCommit] Git 进程未能创建：" + launchFailure + L"\r\n");
     return 3;
   }
 
-  // 退出码按有符号 32 位写回，与过去 cmd 的 %ERRORLEVEL% 形态一致（例如 -2 而不是 4294967294）。
-  static_cast<void>(publishResult(static_cast<long>(static_cast<std::int32_t>(gitExitCode))));
+  // Git 进程确实被创建并跑完了：退出码按有符号 32 位写回（例如 -2 而不是 4294967294）。
+  // 无论 0、普通非零、还是历史上曾被别的 shell 赋予特殊含义的数值（如 9009），
+  // 在这里都只是 Git 自己的回答，观察端不再按数值改判。
+  static_cast<void>(publishResult(static_cast<long>(static_cast<std::int32_t>(gitExitCode)),
+                                  /*gitLaunched=*/true));
   ConsoleWrite(context.streams,
                L"[EvernightCommit] Git 已退出，窗口保持打开，可继续查看上方输出。\r\n");
 
   // 把窗口交给 cmd /k：命令跑完后仍是交互提示符，用户可以继续翻看与操作。
   // 这一步失败不影响成败判定 —— 结果文件已经落账，执行器要的是 Git 的退出码。
+  // 旗标显式给全，防止用户机器的注册表/环境把这个保留窗口变成另一个样子：
+  //   /d      跳过注册表 AutoRun（HKCU/HKLM Command Processor 的 AutoRun 不执行）；
+  //   /v:off  关闭延迟展开——交互提示符里 `!` 保持字面量，与上面送进 Git 的参数语义一致；
+  //   /e:on   命令扩展显式开启（命令行旗标优先于注册表 EnableExtensions 的整机开关）。
+  // 注意：本次操作的程序与参数从头到尾没有经过这个 cmd（它们由上面的 CreateProcessW 按数据送达），
+  // 这些旗标只约束“用户之后在保留窗口里交互输入”的形态；本程序不读写任何用户注册表或系统设置。
   const std::wstring cmdPath = JoinPath(SystemDirectoryPath(), L"cmd.exe");
   std::wstring shellFailure;
-  if (!RunInheritedConsole(context.streams, cmdPath, QuoteArgument(cmdPath) + L" /d /k",
+  if (!RunInheritedConsole(context.streams, cmdPath,
+                           QuoteArgument(cmdPath) + L" /d /v:off /e:on /k",
                            context.workingDirectory, nullptr, &shellFailure)) {
     ConsoleWrite(context.streams,
                  L"[EvernightCommit] 交互提示符未能启动（" + shellFailure + L"），窗口即将关闭。\r\n");

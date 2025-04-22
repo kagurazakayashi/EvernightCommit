@@ -507,7 +507,7 @@ GC_TEST(directory_observer_rejects_stale_and_partial_results_from_disk) {
                            "start\t" + std::string(kForeignNonce) + "\r\n"),
              "写陈旧标记失败");
   GC_REQUIRE(WriteTestFile(JoinTest(directory, gc::git::kResultFileName),
-                           "result\t" + std::string(kForeignNonce) + "\t0\r\n"),
+                           "result\t" + std::string(kForeignNonce) + "\t0\tstarted\r\n"),
              "写陈旧结果失败");
   facts = gc::git::ObserveCommandWindow(reader, true, true, kOurNonce);
   GC_CHECK(!facts.startMarkerSeen);
@@ -530,7 +530,7 @@ GC_TEST(directory_observer_rejects_stale_and_partial_results_from_disk) {
 
   // 完整发布 + 本次口令：这时候才允许判定完成，退出码也才可用。
   GC_REQUIRE(WriteTestFile(JoinTest(directory, gc::git::kResultFileName),
-                           "result\t" + std::string(kOurNonce) + "\t128\r\n"),
+                           "result\t" + std::string(kOurNonce) + "\t128\tstarted\r\n"),
              "写完整结果失败");
   facts = gc::git::ObserveCommandWindow(reader, true, true, kOurNonce);
   GC_CHECK(facts.resultParsed && facts.exitCode == 128);

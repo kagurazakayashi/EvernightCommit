@@ -1812,10 +1812,10 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   }
   // 结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
   std::wstring conclusion = outcome.note;
-  if (viewKind.has_value() && (result.completion == git::CommandCompletion::finished ||
-                               result.completion == git::CommandCompletion::gitNotStarted)) {
+  if (viewKind.has_value() && result.completion == git::CommandCompletion::finished) {
     // 查看类操作的退出码语义在这里补完整：`git diff` 有差异时也是 0，
     // `git diff --no-index` 则用 1 表示“有差异”。不解释就会被读成“操作失败”。
+    // gitNotStarted 等没有退出码的终态不走这里：那句解释需要的是一个 Git 真实给过的数值。
     conclusion += git::DescribeDiffViewExitCode(*viewKind, result.exitCode);
   }
   // 撤回成功的结论必须带上恢复线索（原提交完整 ID + 找回方式）：用户之后在状态栏里
@@ -2841,8 +2841,9 @@ std::wstring MainWindow::ReportPullIntegrateFailure(HWND window, git::CommandCom
 
   std::wstring text;
   text += L"命令窗口里的那次整合没有完成（" + std::wstring(git::CommandCompletionLabel(completion));
-  if (completion == git::CommandCompletion::finished ||
-      completion == git::CommandCompletion::gitNotStarted) {
+  if (completion == git::CommandCompletion::finished) {
+    // 只有 finished 携带 Git 真实给过的退出码；gitNotStarted 与未知形态没有数值可列，
+    // 由状态标签本身说明情况。
     text += L"，Git 退出码 " + std::to_wstring(static_cast<long long>(exitCode));
   }
   text += L"）。\n\n";
