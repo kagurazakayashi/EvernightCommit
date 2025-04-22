@@ -197,6 +197,12 @@ bool ParseAsciiInteger(std::string_view text, long* outValue) {
   return true;
 }
 
+// 结果行的第四字段：Git 进程是否被创建，由辅助进程按 CreateProcessW 的直接结果上报。
+// 只有这两个写法；缺字段或别的拼写一律视为不合格——协议两端都是本程序自己，
+// 没有“旧格式将就认”的空间（把不认识的行当“没有结果”继续等，比猜一个语义安全得多）。
+constexpr std::string_view kGitLaunchedToken = "started";
+constexpr std::string_view kGitNotStartedToken = "notstarted";
+
 [[nodiscard]] bool RejectAs(CommandPlanReject reason, std::wstring message, CommandPlanReject* reject,
                              std::wstring* detail) {
   if (reject != nullptr) {
@@ -554,12 +560,15 @@ std::string BuildCommandWindowStartMarkerText(std::string_view asciiNonce) {
   return text;
 }
 
-std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode) {
+std::string BuildCommandWindowResultText(std::string_view asciiNonce, long exitCode,
+                                         bool gitProcessLaunched) {
   std::string text(kResultKeyword);
   text.push_back(kByteFieldSeparator);
   text.append(asciiNonce);
   text.push_back(kByteFieldSeparator);
   text.append(std::to_string(exitCode));
+  text.push_back(kByteFieldSeparator);
+  text.append(gitProcessLaunched ? kGitLaunchedToken : kGitNotStartedToken);
   text.append(kByteLineBreak);
   return text;
 }
@@ -573,15 +582,39 @@ bool ParseCommandWindowStartMarker(std::string_view content, std::string_view ex
 }
 
 bool ParseCommandWindowResult(std::string_view content, std::string_view expectedAsciiNonce,
-                              long* exitCode) {
+                              long* exitCode, bool* gitProcessLaunched) {
   std::vector<std::string_view> fields;
   if (!FirstLineFields(content, &fields)) {
     return false;
   }
-  if (fields.size() != 3 || fields[0] != kResultKeyword || fields[1] != expectedAsciiNonce) {
+  if (fields.size() != 4 || fields[0] != kResultKeyword || fields[1] != expectedAsciiNonce) {
     return false;
   }
-  return ParseAsciiInteger(fields[2], exitCode);
+  if (fields[3] == kGitLaunchedToken) {
+    if (!ParseAsciiInteger(fields[2], exitCode)) {
+      return false;
+    }
+    if (gitProcessLaunched != nullptr) {
+      *gitProcessLaunched = true;
+    }
+    return true;
+  }
+  if (fields[3] == kGitNotStartedToken) {
+    // “Git 未被创建”那一行的退出码字段没有 Git 语义（协议规定写 0）：仍然要求它是合法整数，
+    // 否则整行不合格——不认识的行一律当“没有结果”，绝不挑一半信一半。
+    long ignoredCode = 0;
+    if (!ParseAsciiInteger(fields[2], &ignoredCode)) {
+      return false;
+    }
+    if (gitProcessLaunched != nullptr) {
+      *gitProcessLaunched = false;
+    }
+    if (exitCode != nullptr) {
+      *exitCode = 0;
+    }
+    return true;
+  }
+  return false;
 }
 
 std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept {
@@ -595,7 +628,7 @@ std::wstring_view CommandCompletionLabel(CommandCompletion completion) noexcept 
     case CommandCompletion::finished:
       return L"执行完成";
     case CommandCompletion::gitNotStarted:
-      return L"Git 未能启动（命令窗口执行完毕但没有调用记录）";
+      return L"Git 未能启动（命令窗口里 Git 进程未被创建）";
     case CommandCompletion::terminated:
       return L"结果未知（命令窗口被提前关闭或 Git 进程被终止）";
     case CommandCompletion::helperNeverStarted:
@@ -620,9 +653,26 @@ CommandWindowObservation ObserveCommandWindow(const CommandWindowFileReader& rea
       marker.has_value() && ParseCommandWindowStartMarker(*marker, expectedAsciiNonce);
   const std::optional<std::string> result = readFile(kResultFileName);
   if (result.has_value()) {
-    facts.resultParsed = ParseCommandWindowResult(*result, expectedAsciiNonce, &facts.exitCode);
+    facts.resultParsed = ParseCommandWindowResult(*result, expectedAsciiNonce, &facts.exitCode,
+                                                  &facts.gitProcessLaunched);
   }
   return facts;
+}
+
+bool IsCommandCompletionTerminal(CommandCompletion completion) noexcept {
+  switch (completion) {
+    case CommandCompletion::launchFailed:
+    case CommandCompletion::finished:
+    case CommandCompletion::gitNotStarted:
+    case CommandCompletion::terminated:
+    case CommandCompletion::helperNeverStarted:
+    case CommandCompletion::stillUnknown:
+      return true;
+    case CommandCompletion::launched:
+    case CommandCompletion::running:
+      return false;  // 只有这两个是中间态：观察端对它们继续轮询，并按期限降级 stillUnknown。
+  }
+  return true;  // 枚举之外的值（内存被写坏等）按终态结案：停在“永远执行中”更糟。
 }
 
 CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
@@ -631,13 +681,16 @@ CommandCompletion DecideCommandCompletion(const CommandWindowObservation& facts,
     return CommandCompletion::launchFailed;
   }
   if (facts.resultParsed) {
+    // 结果行带回了辅助进程 CreateProcessW 的直接事实：Git 进程没被创建就是没被创建，
+    // 不需要、也不应该再拿某个退出码数值去反推。Git 自己返回什么数值（哪怕是历史上
+    // 曾被当成“程序不存在”的 9009）都只是 Git 的一次回答，按“执行完成 + 该退出码”处理。
+    if (!facts.gitProcessLaunched) {
+      return CommandCompletion::gitNotStarted;
+    }
     if (outExitCode != nullptr) {
       *outExitCode = facts.exitCode;
     }
-    // 保留码 9009 是“要调用的程序不存在”的专用回答：命令跑完了，但 Git 进程从未被创建
-    // （典型场景是执行期间 git.exe 被移除）。其余退出码一律视为 Git 自己的回答。
-    return facts.exitCode == kCommandNotFoundExitCode ? CommandCompletion::gitNotStarted
-                                                      : CommandCompletion::finished;
+    return CommandCompletion::finished;
   }
   if (!facts.processExited) {
     return facts.startMarkerSeen ? CommandCompletion::running : CommandCompletion::launched;

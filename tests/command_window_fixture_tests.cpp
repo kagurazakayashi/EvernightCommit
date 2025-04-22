@@ -2,6 +2,8 @@
 // 覆盖：真实退出码（成功/失败）、命令窗口自身的退出码与 Git 退出码不混同、特殊路径与参数、
 // 受控环境覆盖确实传进命令窗口里的 Git、启动前拒绝、提前关窗不卡死、Shutdown 不阻塞，
 // 兼容性修复的三条主判据（非 ASCII 临时目录、原样送达的文件名、辅助入口的边界），
+// 观察循环的结案口径（判定器给终态即落账并释放槽位：保留窗口仍开着不算没结束；
+// Git 进程无法创建=gitNotStarted 且无退出码；运行中被关窗=terminated），
 // 以及操作目录的生命周期：每次操作的目录名互不相同且用完即回收、
 // 还在进行的操作被下一次清扫误不掉（用只读的 `git hash-object --stdin` 造长任务，不用提交拖时间）、
 // 标记与结果文件在磁盘上的实际形态带着本次口令。
@@ -459,6 +461,130 @@ GC_TEST(command_window_reports_launch_failure_for_missing_git) {
   // “Git 不存在”必须是启动失败，不能被报告成“执行完成 + 非 0 退出码”。
   GC_CHECK(failure.exitCode == 0);
   GC_CHECK(failure.failureReason.find(L"Git 程序不存在") != std::wstring::npos);
+}
+
+GC_TEST(command_window_settles_while_console_window_still_open) {
+  // 验收项 13 的回归主判据：终态的结案只认“判定器给了终态”，绝不依赖保留的命令窗口关闭。
+  // Git 跑完后辅助进程把窗口交给 cmd /k，窗口会一直开着——观察线程必须照样落账、释放槽位，
+  // 并立刻允许下一项操作。旧实现里这条只对 finished 成立；任何被判定器报成其余终态的形态
+  // （历史上就是 9009 被判成 gitNotStarted）都会卡成“永远执行中”。
+  // 本用例全程只读（status），不 commit、不 push。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+
+  gc::platform::CommandWindowRunner runner;
+  std::vector<uint64_t> opened;
+  RunnerGuard guard{&runner, &opened};
+  runner.Startup(nullptr);
+
+  uint64_t id = 0;
+  CommandWindowResult failure;
+  const bool started = runner.Start(MakeOperation(fixture, {L"status"}), &id, &failure);
+  GC_REQUIRE_MESSAGE(started, "命令窗口启动失败：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(id);
+
+  CommandWindowResult result;
+  ExpectResult(runner, id, &result, "保留窗口场景");
+  GC_CHECK_MESSAGE(result.completion == CommandCompletion::finished, Describe(result));
+  GC_CHECK_MESSAGE(result.exitCode == 0, Describe(result));
+  // 落账时命令窗口还被 cmd /k 留着：结案不依赖它，槽位也已经释放。
+  GC_CHECK_MESSAGE(!runner.ConsoleExited(id),
+                   "命令窗口没有按设计保留，本用例的判据（不依赖关窗）失效：" + Describe(result));
+  GC_CHECK(runner.ActiveCount() == 0);
+  // “命令完成但窗口仍开着”时可以继续下一项操作：第二次 Start 不受第一个窗口阻挡。
+  uint64_t secondId = 0;
+  const bool secondStarted = runner.Start(MakeOperation(fixture, {L"status"}), &secondId, &failure);
+  GC_REQUIRE_MESSAGE(secondStarted,
+                     "保留的窗口挡住了下一项操作：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(secondId);
+  CommandWindowResult secondResult;
+  ExpectResult(runner, secondId, &secondResult, "第二项操作");
+  GC_CHECK_MESSAGE(secondResult.completion == CommandCompletion::finished && secondResult.exitCode == 0,
+                   Describe(secondResult));
+  GC_CHECK(runner.ActiveCount() == 0);
+}
+
+GC_TEST(command_window_reports_git_not_started_without_a_git_exit_code) {
+  // “Git 未启动”现在依据的是辅助进程 CreateProcessW 的直接事实，而不是某个退出码数值：
+  // 把一个**存在但不是可执行文件**的路径交给命令窗口——启动前的存在性核查会放行（它是普通文件），
+  // 真正 CreateProcessW 时才被系统拒绝。观察端必须报 gitNotStarted，
+  // 且不得带上任何“Git 退出码”；结案同样不等窗口关闭（这条路径上辅助进程不落 cmd /k，窗口自己会收）。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+
+  gc::platform::CommandWindowRunner runner;
+  std::vector<uint64_t> opened;
+  RunnerGuard guard{&runner, &opened};
+  runner.Startup(nullptr);
+
+  CommandWindowOperation operation = MakeOperation(fixture, {L"--version"});
+  // WriteFile 返回写入仓库内的绝对路径；它是个存在的普通文件，只是不是可执行映像。
+  operation.gitExecutable = fixture.WriteFile(L"not-a-real-git.txt", "这不是可执行文件。\n");
+  uint64_t id = 0;
+  CommandWindowResult failure;
+  const bool started = runner.Start(operation, &id, &failure);
+  GC_REQUIRE_MESSAGE(started, "指向伪可执行文件的操作应当能启动命令窗口：" +
+                                  gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(id);
+
+  CommandWindowResult result;
+  ExpectResult(runner, id, &result, "Git 未能启动场景");
+  GC_CHECK_MESSAGE(result.completion == CommandCompletion::gitNotStarted, Describe(result));
+  GC_CHECK_MESSAGE(result.exitCode == 0, "Git 从未运行，结果里不该有任何退出码：" + Describe(result));
+  GC_CHECK_MESSAGE(!result.Success(), "Git 未启动绝不能被当成成功");
+  GC_CHECK_MESSAGE(!result.failureReason.empty(), Describe(result));
+  GC_CHECK(runner.ActiveCount() == 0);
+  // 结案后可立即发起下一次正常操作：一次 Git 未启动不能锁住界面。
+  uint64_t nextId = 0;
+  GC_REQUIRE_MESSAGE(runner.Start(MakeOperation(fixture, {L"status"}), &nextId, &failure),
+                     "Git 未启动后界面被锁住：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(nextId);
+  CommandWindowResult next;
+  ExpectResult(runner, nextId, &next, "随后的正常操作");
+  GC_CHECK_MESSAGE(next.completion == CommandCompletion::finished && next.exitCode == 0, Describe(next));
+}
+
+GC_TEST(command_window_running_early_close_settles_terminated) {
+  // 观察循环的另一条真实终态：Git 已经在窗口里跑起来（只读的 hash-object --stdin 停在控制台
+  // 输入上），用户关掉窗口 ⇒ 结果永远拿不到，必须落成“提前关闭”而不是任何别的说法。
+  // 与保留窗口那两条合起来，把“终态恰好结案一次、不依赖关窗 / 关窗必给终态”两侧都钉住。
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+
+  gc::platform::CommandWindowRunner runner;
+  std::vector<uint64_t> opened;
+  RunnerGuard guard{&runner, &opened};
+  runner.Startup(nullptr);
+
+  uint64_t id = 0;
+  CommandWindowResult failure;
+  const bool started =
+      runner.Start(MakeOperation(fixture, {L"hash-object", L"--stdin"}), &id, &failure);
+  GC_REQUIRE_MESSAGE(started, "命令窗口启动失败：" + gc::platform::Utf16ToUtf8(failure.failureReason));
+  opened.push_back(id);
+
+  std::wstring status;
+  const auto runningDeadline = std::chrono::steady_clock::now() + kOperationBudget;
+  while (std::chrono::steady_clock::now() < runningDeadline) {
+    runner.DescribeOperation(id, &status, nullptr);
+    if (status == L"执行中") {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  GC_REQUIRE_MESSAGE(status == L"执行中",
+                     "没等到“执行中”，提前关窗的判据失效：" + gc::platform::Utf16ToUtf8(status));
+
+  runner.CloseOperationWindow(id);
+  CommandWindowResult result;
+  ExpectResult(runner, id, &result, "运行中关窗场景");
+  GC_CHECK_MESSAGE(result.completion == CommandCompletion::terminated, Describe(result));
+  GC_CHECK_MESSAGE(result.exitCode == 0, "提前关窗没有 Git 的退出码：" + Describe(result));
+  GC_CHECK_MESSAGE(!result.failureReason.empty(), Describe(result));
+  GC_CHECK(runner.ActiveCount() == 0);
 }
 
 GC_TEST(command_window_applies_environment_overrides) {
@@ -963,10 +1089,15 @@ GC_TEST(command_window_helper_refuses_foreign_requests) {
   GC_CHECK(gc::git::ParseCommandWindowStartMarker(markerBytes, nonceBytes));
   GC_CHECK(!gc::git::ParseCommandWindowStartMarker(markerBytes, "bbbbbbbbbbbbbbbb"));
   long gitExit = -1;
-  GC_CHECK_MESSAGE(gc::git::ParseCommandWindowResult(resultBytes, nonceBytes, &gitExit),
-                   "结果行没能按本次口令解析：" + resultBytes);
+  bool diskGitLaunched = false;
+  GC_CHECK_MESSAGE(
+      gc::git::ParseCommandWindowResult(resultBytes, nonceBytes, &gitExit, &diskGitLaunched),
+      "结果行没能按本次口令解析：" + resultBytes);
+  GC_CHECK_MESSAGE(diskGitLaunched,
+                   "正向路径的结果行没按 CreateProcess 事实写成 started：" + resultBytes);
   GC_CHECK_MESSAGE(gitExit == 0, "git --version 应当以 0 退出，实际 " + std::to_string(gitExit));
-  GC_CHECK(!gc::git::ParseCommandWindowResult(resultBytes, "bbbbbbbbbbbbbbbb", &gitExit));
+  GC_CHECK(!gc::git::ParseCommandWindowResult(resultBytes, "bbbbbbbbbbbbbbbb", &gitExit,
+                                              &diskGitLaunched));
   // 结果由临时名改名发布：正式名一出现内容就是完整的，暂存名不该留下任何痕迹。
   GC_CHECK_MESSAGE(::GetFileAttributesW(tempResultPath.c_str()) == INVALID_FILE_ATTRIBUTES,
                    "结果发布后留下了临时名：" + DumpOperationDirectory(directory));

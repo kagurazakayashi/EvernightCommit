@@ -1098,6 +1098,7 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
 
   CommandWindowResult result = state.result;
   git::CommandCompletion completion = git::CommandCompletion::launched;
+  long exitCode = 0;
   bool settled = false;
   const auto startedAt = std::chrono::steady_clock::now();
 
@@ -1121,53 +1122,61 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
     const bool processExited = ::WaitForSingleObject(state.process.get(), 0) == WAIT_OBJECT_0;
     git::CommandWindowObservation facts = git::ObserveCommandWindow(
         readFile, /*createProcessSucceeded=*/true, processExited, expectedNonce);
-    long exitCode = 0;
+    exitCode = 0;
     completion = git::DecideCommandCompletion(facts, &exitCode);
 
-    if (completion == git::CommandCompletion::finished) {
-      result.exitCode = exitCode;
-      if (exitCode == git::kCommandNotFoundExitCode) {
-        completion = git::CommandCompletion::gitNotStarted;
-        result.failureReason = L"Git 程序没有被创建（退出码 9009）：可能是执行期间 git.exe 被移动或删除。";
-      }
-      settled = true;
-      break;
-    }
-    if (processExited && completion == git::CommandCompletion::terminated) {
-      // 辅助进程已退出但结果文件缺失：给正在写入的结果文件一小段收尾时间，避免把“写完但未读到”
-      // 误判成提前关窗。
+    // 结果行由辅助进程“写完并改名”才发布，改名可见与这里的轮询之间只差一瞬间：
+    // 辅助进程已退出、正要判“提前关窗”时，给它一小段宽限，避免把“恰好读到前一瞬”误判成终态。
+    // 宽限期只等 Git 的回答出现（finished / gitNotStarted 都来自合格的结果行）；
+    // 期间辅助进程已退出，判定器只会再给出 terminated，不借此提前结案。
+    if (completion == git::CommandCompletion::terminated) {
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kProcessExitRetryWindowMs);
       while (std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(kProcessExitRetryIntervalMs));
         long retryExitCode = 0;
         const git::CommandWindowObservation retryFacts =
             git::ObserveCommandWindow(readFile, true, true, expectedNonce);
-        if (git::DecideCommandCompletion(retryFacts, &retryExitCode) == git::CommandCompletion::finished) {
-          completion = git::CommandCompletion::finished;
-          result.exitCode = retryExitCode;
+        const git::CommandCompletion retryCompletion =
+            git::DecideCommandCompletion(retryFacts, &retryExitCode);
+        if (retryCompletion == git::CommandCompletion::finished ||
+            retryCompletion == git::CommandCompletion::gitNotStarted) {
+          completion = retryCompletion;
+          exitCode = retryExitCode;
           break;
         }
       }
-      if (completion == git::CommandCompletion::finished) {
-        settled = true;
-        break;
-      }
     }
-    if (processExited) {
-      unsigned long consoleExitCode = 0;
-      ::GetExitCodeProcess(state.process.get(), &consoleExitCode);
-      result.consoleExitCode = consoleExitCode;
-      if (completion == git::CommandCompletion::terminated) {
+
+    // 结案条件只有一个，而且说死了：**判定器给出什么终态，就在这里落账**——
+    // 不看命令窗口关没关。cmd /k 的保留窗口可以活到用户把它关掉为止，
+    // 旧实现只对 finished 及时结案、其余终态要等进程退出，Git 报告 9009 之类的形态
+    // 会把操作永远停在“执行中”，槽位、清单文件与界面文案全被拖住。这是本循环的回归点。
+    if (git::IsCommandCompletionTerminal(completion)) {
+      if (completion == git::CommandCompletion::finished) {
+        result.exitCode = exitCode;  // 只有这一种状态携带 Git 自己的退出码。
+      } else {
+        result.exitCode = 0;         // 其余终态没有任何“Git 的退出码”可言，绝不留下一个像样的 0。
+      }
+      if (completion == git::CommandCompletion::gitNotStarted) {
+        result.failureReason =
+            L"Git 进程未能创建（辅助进程直接报告：git.exe 在执行期间被移动/删除，或系统拒绝创建进程）。"
+            L"原因看命令窗口里的输出；本次操作 Git 没有给出任何退出码。";
+      } else if (completion == git::CommandCompletion::terminated) {
         result.failureReason = L"命令窗口在拿到 Git 退出码之前关闭，结果未知。";
       } else if (completion == git::CommandCompletion::helperNeverStarted) {
         result.failureReason = L"命令窗口辅助进程没能开始执行操作（可能被安全软件拦截），结果未知。";
+      }
+      if (processExited) {
+        unsigned long consoleExitCode = 0;
+        ::GetExitCodeProcess(state.process.get(), &consoleExitCode);
+        result.consoleExitCode = consoleExitCode;
       }
       settled = true;
       break;
     }
 
-    // 进程仍在：中间态只用于界面文案，不对外发通知。
-    // 顺带缓存命令窗口句柄：脚本执行过 title 行之后才能按标题找到窗口，
+    // 中间态（launched / running）只用于界面文案，不对外发通知。
+    // 顺带缓存命令窗口句柄：辅助进程设置标题之后才能按标题找到窗口，
     // 而应用退出（Shutdown）后不再有轮询线程 —— 若此刻仍未缓存，
     // 之后的 CloseOperationWindow 就只能干等。这里成功一次即停止查找。
     HWND cached = nullptr;
@@ -1188,8 +1197,11 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
     const auto elapsedMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startedAt).count();
     if (completion == git::CommandCompletion::launched && elapsedMs > static_cast<long long>(kNoTraceGraceMs)) {
+      // “已启动”超过宽限期仍没有任何可承认的痕迹：降级为终态“结果未知”，
+      // 让槽位与界面照样结案，绝不停在“永远已启动”。running 不设时限是刻意的——
+      // Git 可能合法地停在凭据提问上等很久，那时窗口里一切可见，用户自己决定关窗（→ terminated）。
       completion = git::CommandCompletion::stillUnknown;
-      result.failureReason = L"超过观察期限仍没有脚本执行痕迹，结果未知（命令窗口可能被外部关闭）。";
+      result.failureReason = L"超过观察期限仍没有执行痕迹，结果未知（命令窗口可能被外部关闭）。";
       settled = true;
       break;
     }
@@ -1198,10 +1210,12 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
   result.completion = completion;
   {
     const std::lock_guard<std::mutex> lock(runner->mutex_);
+    // completionRecorded 只在这里、且每个观察线程恰好一次地登记：
+    // 同一记录不会二次落账，槽位释放与通知投递都以这一次登记为准。
     state.result = result;
     state.completionRecorded = true;
     state.statusText = std::wstring(git::CommandCompletionLabel(completion));
-    if (completion == git::CommandCompletion::finished || completion == git::CommandCompletion::gitNotStarted) {
+    if (completion == git::CommandCompletion::finished) {
       state.statusText += L"，Git 退出码 " + std::to_wstring(result.exitCode);
     }
   }

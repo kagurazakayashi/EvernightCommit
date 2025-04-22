@@ -468,29 +468,60 @@ GC_TEST(command_spec_rejects_unencodable_title) {
 GC_TEST(command_result_parsing_accepts_only_complete_lines) {
   static constexpr std::string_view kNonce = "abcdef0123456789";
   long exitCode = -1;
-  GC_CHECK(!gc::git::ParseCommandWindowResult("", kNonce, &exitCode));
+  bool launched = true;
+  GC_CHECK(!gc::git::ParseCommandWindowResult("", kNonce, &exitCode, &launched));
   // 没有行尾：可能正在写。发布协议里改名是原子的，因此“没有行尾”只可能是外部塞进来的半成品，
   // 观察端必须继续等，绝不能拿半截内容当成一次回答。
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0", kNonce, &exitCode));
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\tabc\n", kNonce, &exitCode));
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t1 2\n", kNonce, &exitCode));
-  GC_CHECK(!gc::git::ParseCommandWindowResult("\n", kNonce, &exitCode));
-  GC_CHECK(!gc::git::ParseCommandWindowResult("0\r\n", kNonce, &exitCode));  // 旧格式：没有口令
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\n", kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\tstarted", kNonce, &exitCode,
+                                              &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\tabc\tstarted\n", kNonce,
+                                              &exitCode, &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t1 2\tstarted\n", kNonce,
+                                              &exitCode, &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("\n", kNonce, &exitCode, &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("0\r\n", kNonce, &exitCode, &launched));  // 旧格式：没有口令
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\n", kNonce, &exitCode,
+                                              &launched));
+  // 旧三字段格式（没有 Git 启动事实）：协议两端都是本程序自己，不合格一律当“没有结果”。
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\r\n", kNonce, &exitCode,
+                                              &launched));
+  // 第四字段只认 started / notstarted 两种写法，别的拼写与缺字段一样不合格。
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\t Started\r\n", kNonce,
+                                              &exitCode, &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\tnot-started\r\n", kNonce,
+                                              &exitCode, &launched));
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\t9009\r\n", kNonce, &exitCode,
+                                              &launched));
   // 首行之后还有内容：一次操作只发布一条结果，多出来的当作不可信。
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\r\nresult\tabcdef0123456789\t9\r\n",
-                                              kNonce, &exitCode));
-  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\r\n", kNonce, &exitCode) &&
-           exitCode == 0);
-  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t128\n", kNonce, &exitCode) &&
-           exitCode == 128);
-  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t-2\r\n", kNonce, &exitCode) &&
-           exitCode == -2);
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t99999999999999999999\n",
-                                              kNonce, &exitCode));
+  GC_CHECK(!gc::git::ParseCommandWindowResult(
+      "result\tabcdef0123456789\t0\tstarted\r\nresult\tabcdef0123456789\t9\tstarted\r\n", kNonce,
+      &exitCode, &launched));
+  launched = false;
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\tstarted\r\n", kNonce,
+                                             &exitCode, &launched) &&
+           exitCode == 0 && launched);
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t128\tstarted\n", kNonce,
+                                             &exitCode, &launched) &&
+           exitCode == 128 && launched);
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t-2\tstarted\r\n", kNonce,
+                                             &exitCode, &launched) &&
+           exitCode == -2 && launched);
+  // Git 自己返回 9009 也照常成立：那只是 Git 的一次回答，特殊含义已经随 cmd 批处理一起退役。
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t9009\tstarted\r\n", kNonce,
+                                             &exitCode, &launched) &&
+           exitCode == 9009 && launched);
+  // notstarted：Git 进程从未被创建，退出码字段没有 Git 语义，读回固定为 0。
+  exitCode = -1;
+  GC_CHECK(gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t0\tnotstarted\r\n", kNonce,
+                                             &exitCode, &launched) &&
+           !launched && exitCode == 0);
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tabcdef0123456789\t99999999999999999999\tstarted\n",
+                                              kNonce, &exitCode, &launched));
   // 标识不符：上一次留下的、或别人塞进来的“成功”，都不算本次操作的结果。
-  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tfedcba9876543210\t0\r\n", kNonce, &exitCode));
-  GC_CHECK(exitCode == -2);  // 拒绝时不写回退出码，避免调用方误用一个没被承认的值
+  exitCode = -1;
+  GC_CHECK(!gc::git::ParseCommandWindowResult("result\tfedcba9876543210\t0\tstarted\r\n", kNonce,
+                                              &exitCode, &launched));
+  GC_CHECK(exitCode == -1);  // 拒绝时不写回退出码，避免调用方误用一个没被承认的值
 }
 
 GC_TEST(command_start_marker_carries_this_operation_nonce) {
@@ -529,13 +560,15 @@ GC_TEST(command_operation_file_names_are_the_reclaim_scope) {
 namespace {
 
 gc::git::CommandWindowObservation MakeFacts(bool launched, bool exited, bool startSeen,
-                                           bool resultParsed, long exitCode = 0) {
+                                           bool resultParsed, long exitCode = 0,
+                                           bool gitProcessLaunched = true) {
   gc::git::CommandWindowObservation facts;
   facts.createProcessSucceeded = launched;
   facts.processExited = exited;
   facts.startMarkerSeen = startSeen;
   facts.resultParsed = resultParsed;
   facts.exitCode = exitCode;
+  facts.gitProcessLaunched = gitProcessLaunched;
   return facts;
 }
 
@@ -556,9 +589,17 @@ GC_TEST(command_completion_distinguishes_all_outcomes) {
   GC_CHECK(gc::git::DecideCommandCompletion(MakeFacts(true, true, true, true, 1), &exitCode) ==
                gc::git::CommandCompletion::finished &&
            exitCode == 1);
-  // 9009 是“要调用的程序不存在”的保留码：不是 Git 的回答。
+  // Git 进程确实被创建过（结果行里的 CreateProcess 事实）：任何退出码数值都只是 Git 的回答，
+  // 包括历史上曾被 cmd 当作“程序不存在”的 9009——它不再有任何特殊判定。
   GC_CHECK(gc::git::DecideCommandCompletion(MakeFacts(true, true, true, true, 9009), &exitCode) ==
+               gc::git::CommandCompletion::finished &&
+           exitCode == 9009);
+  // Git 未启动 = 辅助进程直接上报进程从未被创建：没有退出码可谈，exitCode 不被写出。
+  exitCode = -1;
+  GC_CHECK(gc::git::DecideCommandCompletion(
+               MakeFacts(true, false, true, true, 0, /*gitProcessLaunched=*/false), &exitCode) ==
            gc::git::CommandCompletion::gitNotStarted);
+  GC_CHECK(exitCode == -1);  // 中间态之外也不许偷写一个“像样的”退出码
   // 窗口被提前关闭：Git 已开跑但结果缺失。
   GC_CHECK(gc::git::DecideCommandCompletion(MakeFacts(true, true, true, false), &exitCode) ==
            gc::git::CommandCompletion::terminated);
@@ -567,11 +608,25 @@ GC_TEST(command_completion_distinguishes_all_outcomes) {
            gc::git::CommandCompletion::helperNeverStarted);
 }
 
+GC_TEST(command_completion_terminal_states_are_enumerated) {
+  // 观察循环的结案条件是“判定器给了终态”，这里把八个状态的终/中间归属钉死：
+  // 漏一个终态就会重演“操作永远停在执行中、槽位不释放”的回归；
+  // 把中间态误列成终态则会提前结案、把还在等凭据的操作当成未知。
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::launchFailed));
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::finished));
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::gitNotStarted));
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::terminated));
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::helperNeverStarted));
+  GC_CHECK(gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::stillUnknown));
+  GC_CHECK(!gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::launched));
+  GC_CHECK(!gc::git::IsCommandCompletionTerminal(gc::git::CommandCompletion::running));
+}
+
 GC_TEST(command_observer_reads_injected_files) {
   static constexpr std::string_view kNonce = "abcdef0123456789";
   const std::map<std::string, std::string> files{
       {"start.txt", "start\tabcdef0123456789\r\n"},
-      {"result.txt", "result\tabcdef0123456789\t42\r\n"},
+      {"result.txt", "result\tabcdef0123456789\t42\tstarted\r\n"},
   };
   const auto reader = [&files](std::string_view name) -> std::optional<std::string> {
     const auto found = files.find(std::string(name));
@@ -586,6 +641,7 @@ GC_TEST(command_observer_reads_injected_files) {
 
   GC_CHECK(facts.startMarkerSeen);
   GC_CHECK(facts.resultParsed);
+  GC_CHECK(facts.gitProcessLaunched);
   GC_CHECK(facts.exitCode == 42);
   long exitCode = 0;
   GC_CHECK(gc::git::DecideCommandCompletion(facts, &exitCode) == gc::git::CommandCompletion::finished);
@@ -597,7 +653,7 @@ GC_TEST(command_observer_ignores_foreign_or_partial_files) {
   static constexpr std::string_view kNonce = "abcdef0123456789";
   const std::map<std::string, std::string> files{
       {"start.txt", "start\tfedcba9876543210\r\n"},                // 别的操作的口令
-      {"result.txt", "result\tabcdef0123456789\t0"},               // 同一口令，但还没写完
+      {"result.txt", "result\tabcdef0123456789\t0\tstarted"},      // 同一口令，但还没写完
   };
   const auto reader = [&files](std::string_view name) -> std::optional<std::string> {
     const auto found = files.find(std::string(name));
@@ -617,7 +673,7 @@ GC_TEST(command_observer_ignores_foreign_or_partial_files) {
   // 同一条痕迹换成正确的口令就都成立：证明判定看的是归属，不是“有没有读到字节”。
   const std::map<std::string, std::string> ours{
       {"start.txt", "start\tabcdef0123456789\r\n"},
-      {"result.txt", "result\tabcdef0123456789\t0\r\n"},
+      {"result.txt", "result\tabcdef0123456789\t0\tstarted\r\n"},
   };
   const auto ourReader = [&ours](std::string_view name) -> std::optional<std::string> {
     const auto found = ours.find(std::string(name));
