@@ -27,10 +27,13 @@ add_executable(gc_tests
   layout_tests.cpp
   list_view_memory_tests.cpp
   local_time_tests.cpp
+  machine_output_completeness_tests.cpp
   refresh_repository_tests.cpp
   repo_detect_fixture_tests.cpp
   repository_tests.cpp
   subprocess_command_line_tests.cpp
+  subprocess_capture_fixture_tests.cpp
+  subprocess_capture_tests.cpp
   staging_plan_fixture_tests.cpp
   staging_plan_tests.cpp
   task_coordinator_tests.cpp

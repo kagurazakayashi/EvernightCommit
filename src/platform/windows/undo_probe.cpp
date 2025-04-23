@@ -3,8 +3,8 @@
 #include <vector>
 
 #include "git/workspace_status.h"
+#include "platform/windows/git_query_result.h"
 #include "platform/windows/subprocess.h"
-#include "platform/windows/utf_text.h"
 
 namespace gc::platform {
 namespace {
@@ -66,15 +66,7 @@ UndoProbeDeps MakeUndoProbeDeps(unsigned long timeoutMilliseconds) {
   UndoProbeDeps deps;
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
-    const SubprocessRunResult run = RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds);
-    git::GitQueryResult result;
-    result.started = run.started;
-    result.timedOut = run.timedOut;
-    result.exited = run.exited;
-    result.exitCode = static_cast<int>(run.exitCode);
-    result.utf16Output = Utf8ToUtf16(run.utf8Stdout);
-    result.utf16Error = Utf8ToUtf16(run.utf8Stderr);
-    return result;
+    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
   };
   return deps;
 }

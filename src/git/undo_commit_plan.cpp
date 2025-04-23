@@ -174,7 +174,9 @@ UndoQueryRead ReadUndoQuery(const GitQueryResult& result) {
   UndoQueryRead read;
   if (!result.started) {
     read.error = RepoError::gitLaunchFailed;
-    read.detail = L"Git 查询进程未能启动";
+    read.detail = result.launchDetail.empty()
+                      ? L"Git 查询进程未能启动"
+                      : L"Git 查询进程未能启动：" + result.launchDetail;
     return read;
   }
   if (result.timedOut) {
@@ -185,6 +187,14 @@ UndoQueryRead ReadUndoQuery(const GitQueryResult& result) {
   if (!result.exited) {
     read.error = RepoError::gitFailed;
     read.detail = L"Git 查询未能正常结束";
+    return read;
+  }
+  // 完整度排在退出码之前：半途断掉的输出既不能算「答完了」，也不能据它归出「没有这条配置」——
+  // 退出码 1 加上读不全的标准输出，只能说「这件事不知道」，不能说「Git 说没有」。
+  if (!result.outputComplete) {
+    read.error = RepoError::outputIncomplete;
+    read.detail =
+        result.incompleteReason.empty() ? L"Git 的标准输出没有完整读回" : result.incompleteReason;
     return read;
   }
   if (result.exitCode == 0) {

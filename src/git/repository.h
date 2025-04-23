@@ -16,11 +16,22 @@ namespace gc::git {
 // worktree 与子模块的 .git 可能是文件，裸仓库根本没有 .git 子目录。
 
 // 一次只读 Git 查询的结果。
+//
+// 用输出之前先看完整度：utf16Output 只有在 outputComplete 为 true 时才是 Git 的完整回答。
+// 读管道失败、超过字节上限、没等到管道结尾、字节不是有效 UTF-8 都会让它为 false——
+// 这几种情形都在平台层（MakeGitQueryResult）判定并带上 incompleteReason，
+// 本模块的任何归类与解析都必须据此先拒绝，不能拿残缺内容当作「仓库就是如此」的事实。
 struct GitQueryResult {
   bool started = false;      // 进程是否成功启动
   bool timedOut = false;     // 是否因超时被终止
   bool exited = false;       // 是否在期限内退出
   int exitCode = 0;          // 退出码（约定以 0 表示成功）
+  // 标准输出是否完整可信。手工构造的桩结果默认为 true（那份内容就是测试给定的全部事实），
+  // 真实查询由平台层逐条判定。
+  bool outputComplete = true;
+  bool errorComplete = true;  // 标准错误的完整度：只影响诊断文字，不单独作为拒绝理由
+  std::wstring incompleteReason;  // 哪一路、为什么没读全（已限长，不含输出原文）
+  std::wstring launchDetail;      // 启动失败时平台层给出的说明（已限长）
   std::wstring utf16Output;  // 标准输出解码后的文本：机器可读字段，按行取用
   std::wstring utf16Error;   // 标准错误解码后的文本：致命信息，只用于归类与诊断
 };
@@ -59,6 +70,7 @@ enum class RepoError {
   gitLaunchFailed,
   gitFailed,  // 其他非 0 退出
   badOutput,  // 输出无法按约定解析
+  outputIncomplete,  // 机器输出没被完整读回（读失败、超上限、没等到结尾、UTF-8 不完整）
 };
 
 // 形态查询分两组发问，字段按行序号取用。
@@ -135,9 +147,20 @@ struct RepoDetection {
 // 解析 for-each-ref 的 "%(upstream:remotename)\t%(upstream:refname)" 输出行。
 [[nodiscard]] RepoUpstream ParseUpstreamOutput(std::wstring_view line);
 
-// 按顺序检查启动失败/超时/致命错误输出，命中即返回对应原因；退出码为 0 时返回 none。
-// 判定顺序很重要：先看结构化标志（启动失败、超时），再按 Git 的固定错误文案关键词归类。
+// 按顺序检查启动失败/超时/输出完整度/致命错误输出，命中即返回对应原因；退出码为 0 时返回 none。
+// 判定顺序很重要：先看结构化标志（启动失败、超时），再看输出有没有完整读回，
+// 最后才按 Git 的固定错误文案关键词归类。
 [[nodiscard]] RepoError ClassifyGitFailure(const GitQueryResult& result, std::wstring& detail);
+
+// ---- 机器输出进解析之前的完整性门槛 ----
+//
+// 原则：残缺的输出不是「少几条记录」，而是「这份事实不成立」。
+// 界面与后续方案一律宁可报「读取不完整」，也不能拿半份快照判断仓库状态。
+// 「启动失败 / 超时 / 没读全」这三类判定统一由 ClassifyGitFailure 排在退出码之前给出。
+
+// NUL 分隔（-z / --null）的记录约定：非空输出必须以 NUL 收尾，否则最后一条记录是残缺的
+// （半个文件名、半条配置值、少字段的提交记录）。整份输出为空才是合法的「干净答复」。
+[[nodiscard]] bool NulRecordsAreComplete(std::wstring_view output, std::wstring& reason);
 
 // 折叠路径用于比较：统一斜杠方向、去掉结尾分隔符、ASCII 大小写不敏感。
 [[nodiscard]] std::wstring CanonicalPathKey(std::wstring_view path);

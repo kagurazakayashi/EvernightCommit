@@ -8,12 +8,13 @@ namespace gc::git {
 // `<候选程序> --version` 探测结果的分类。执行层（平台代码）负责填装输入，
 // 这里只做与 Win32 无关的判定，便于纯逻辑测试。
 enum class GitProbeOutcome {
-  verified,      // 程序报告了 Git 版本号
-  fileMissing,   // 输入路径不是存在的普通文件
-  launchFailed,  // 进程无法启动（CreateProcessW 失败）
-  timedOut,      // 超时未退出
-  badExit,       // 退出码非 0
-  notGitOutput,  // 正常退出但输出不是 "git version ..."
+  verified,        // 程序报告了 Git 版本号
+  fileMissing,     // 输入路径不是存在的普通文件
+  launchFailed,    // 进程无法启动（CreateProcessW 失败）
+  timedOut,        // 超时未退出
+  badExit,         // 退出码非 0
+  notGitOutput,    // 正常退出但输出不是 "git version ..."
+  incompleteOutput,  // 程序正常退出，但它的输出没能完整读回（读失败/超上限/没读到结尾）
 };
 
 struct VersionProbeInput {
@@ -21,9 +22,11 @@ struct VersionProbeInput {
   bool launched = false;
   bool timedOut = false;
   bool exited = false;
+  bool outputComplete = true;     // 平台层确认两条流都完整读回
   unsigned long exitCode = 0;
   std::string utf8Output;       // stdout+stderr 原始字节
   std::wstring launchErrorText; // 启动失败说明（已是宽字符，仅透传）
+  std::wstring incompleteReason;  // 没读全的原因说明（已限长）
 };
 
 struct GitProbeResult {
@@ -31,10 +34,11 @@ struct GitProbeResult {
   std::string versionUtf8;    // 仅 verified 时非空，如 "2.45.0.windows.1"
   std::string outputSampleUtf8; // 输出开头片段（截断），用于失败诊断
   std::wstring launchErrorText;
+  std::wstring incompleteReason;  // 仅 incompleteOutput 时非空（已限长）
   unsigned long exitCode = 0;
 };
 
-// 判定顺序：文件不存在 → 启动失败 → 超时 → 退出码非 0 → 输出校验。
+// 判定顺序：文件不存在 → 启动失败 → 超时 → 退出码非 0 → 输出是否完整读回 → 输出校验。
 GitProbeResult VerifyGitVersionProbe(const VersionProbeInput& input);
 
 // 从输出首个非空行解析 "git version <版本号>"；行尾 \r 与空白会被清理。

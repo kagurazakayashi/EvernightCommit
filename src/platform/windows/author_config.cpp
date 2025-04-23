@@ -1,7 +1,7 @@
 #include "platform/windows/author_config.h"
 
+#include "platform/windows/git_query_result.h"
 #include "platform/windows/subprocess.h"
-#include "platform/windows/utf_text.h"
 
 namespace gc::platform {
 
@@ -46,17 +46,9 @@ AuthorConfigDeps MakeAuthorConfigDeps(unsigned long timeoutMilliseconds) {
   AuthorConfigDeps deps;
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
-    // --null 的輸出以 NUL 收尾：平台邊界只做 UTF-8→UTF-16 解碼，不修剪空白，也不增刪任何分隔字節，
-    // 否則「值本身以空白開頭/結尾」會被誤讀成另一個身份。
-    const SubprocessRunResult run = RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds);
-    git::GitQueryResult result;
-    result.started = run.started;
-    result.timedOut = run.timedOut;
-    result.exited = run.exited;
-    result.exitCode = static_cast<int>(run.exitCode);
-    result.utf16Output = Utf8ToUtf16(run.utf8Stdout);
-    result.utf16Error = Utf8ToUtf16(run.utf8Stderr);
-    return result;
+    // --null 的輸出以 NUL 收尾：解碼與完整度判定統一走 MakeGitQueryResult，
+    // 否則「值本身以空白開頭/結尾」或「值被讀斷」都會被誤讀成另一個身份。
+    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
   };
   return deps;
 }

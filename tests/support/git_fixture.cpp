@@ -362,10 +362,18 @@ GitRun GitFixture::RunWithBlock(const std::wstring& program,
   run.started = raw.started;
   run.exited = raw.exited;
   run.timedOut = raw.timedOut;
+  // 夹具同样不许在读不全的输出上继续：设置仓库的步骤若拿到半份输出，就该当场前置失败，
+  // 而不是让用例基于一个不成立的现场得出「通过」。
+  run.outputComplete = raw.AllStreamsComplete();
   run.exitCode = raw.exitCode;
   run.commandLine = raw.commandLine;
-  run.out = platform::Utf8ToUtf16(raw.utf8Stdout);
-  run.err = platform::Utf8ToUtf16(raw.utf8Stderr);
+  run.out = platform::Utf8ToUtf16(raw.stdoutCapture.bytes);
+  run.err = platform::Utf8ToUtf16(raw.stderrCapture.bytes);
+  if (!run.outputComplete) {
+    run.err += L"\r\n输出未能完整读回：标准输出" +
+               std::wstring(raw.stdoutCapture.StateLabel()) + L"、标准错误" +
+               std::wstring(raw.stderrCapture.StateLabel());
+  }
   if (!raw.started && run.err.empty()) {
     run.err = raw.launchErrorText;
   }
