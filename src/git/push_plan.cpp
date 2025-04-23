@@ -261,11 +261,42 @@ std::vector<std::wstring> PushConfigListing::RemoteNames() const {
   return names;
 }
 
+namespace {
+
+// 出现在拒绝说明里的配置记录：只取够定位问题的开头一段，并且先做凭据掩码。
+// 一条配置的原文可能是 `url = https://user:token@host/path` 这种形态，整段摊进界面
+// 就等于把口令抄到屏幕上；换行与制表折成空格，免得一条多行值把文案顶歪。
+[[nodiscard]] std::wstring ConfigRecordSampleForUi(std::wstring_view record) {
+  constexpr size_t kSampleChars = 120;
+  const bool shortened = record.size() > kSampleChars;
+  std::wstring text(record.substr(0, std::min<size_t>(record.size(), kSampleChars)));
+  for (wchar_t& c : text) {
+    if (c == L'\r' || c == L'\n' || c == L'\t') {
+      c = L' ';
+    }
+  }
+  text = MaskPushUrlCredentials(text);
+  if (shortened) {
+    text += L"…（已截短）";
+  }
+  return text;
+}
+
+}  // namespace
+
 PushConfigListing ParsePushConfigListing(const GitQueryResult& listing) {
   PushConfigListing result;
   const UndoQueryRead read = ReadUndoQuery(listing);
   if (read.outcome != UndoQueryOutcome::answered) {
     result.readFailure = RefusalWith(read, L"git config --list 未成功");
+    return result;
+  }
+  std::wstring recordReason;
+  if (!NulRecordsAreComplete(listing.utf16Output, recordReason)) {
+    // 缺结尾 NUL 意味着最后一条的值是半条：半条 URL 看起来也像一条 URL，
+    // 照着它推就是把东西推向一个 Git 并没有说过的地点。
+    result.readFailure = L"生效配置的清单不符合记录约定：" + recordReason +
+                         L"。本程序不在看不清实际发布地点的前提下推送。";
     return result;
   }
   // --null 的记录形态（本机 Git 2.53 实测，od -c 逐字节看过）：`key<换行>value<NUL>`。
@@ -284,8 +315,9 @@ PushConfigListing ParsePushConfigListing(const GitQueryResult& listing) {
     if (separator == std::wstring::npos) {
       result.entries.clear();
       result.readFailure =
-          L"git config --list 的回答里有一条既不含换行也不含 `=`，这份配置清单没法照原样采信（那一条是：" +
-          entry + L"）。本程序不在看不清实际发布地点的前提下推送。";
+          L"git config --list 的回答里有一条既不含换行也不含 `=`，这份配置清单没法照原样采信（那一条的开头是：" +
+          ConfigRecordSampleForUi(entry) +
+          L"）。本程序不在看不清实际发布地点的前提下推送。";
       return result;
     }
     result.entries.emplace_back(entry.substr(0, separator), entry.substr(separator + 1));

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cwchar>
 
+#include "git/repository.h"  // NulRecordsAreComplete：记录边界约定与工作区解析共用同一处判定
+
 namespace gc::git {
 namespace {
 
@@ -133,6 +135,13 @@ std::vector<std::wstring> BuildRecentCommitsArguments(std::wstring_view reposito
 CommitHistoryParseResult ParseRecentCommits(std::wstring_view nulSeparatedOutput, size_t limit,
                                             const CommitTimeFormatter& formatTime) {
   CommitHistoryParseResult result;
+  // 与 porcelain v2 同一条记录边界约定：缺结尾 NUL 的最后一条记录是残缺的（半个标题、
+  // 少一段父提交列表），按「字段数不是 5 的倍数」判整份作废还不够早。
+  std::wstring recordReason;
+  if (!NulRecordsAreComplete(nulSeparatedOutput, recordReason)) {
+    result.error = L"提交历史输出的最后一条记录不完整：" + recordReason;
+    return result;
+  }
   const std::vector<std::wstring_view> tokens = SplitNulTokens(nulSeparatedOutput);
   if (limit > 0 && tokens.size() >= limit * kCommitFieldCount) {
     result.truncated = true;

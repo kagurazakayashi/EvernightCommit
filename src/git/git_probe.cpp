@@ -72,6 +72,7 @@ GitProbeResult VerifyGitVersionProbe(const VersionProbeInput& input) {
       std::string(input.utf8Output.substr(0, std::min(kOutputSampleBytes, input.utf8Output.size())));
   result.launchErrorText = input.launchErrorText;
   result.exitCode = input.exitCode;
+  result.incompleteReason = input.incompleteReason;
 
   if (!input.pathIsFile) {
     result.outcome = GitProbeOutcome::fileMissing;
@@ -87,6 +88,11 @@ GitProbeResult VerifyGitVersionProbe(const VersionProbeInput& input) {
   }
   if (input.exitCode != 0) {
     result.outcome = GitProbeOutcome::badExit;
+    return result;
+  }
+  // 输出没读全时不能说「这不是 git」：版本行可能就在没读到的那一段里。
+  if (!input.outputComplete) {
+    result.outcome = GitProbeOutcome::incompleteOutput;
     return result;
   }
   if (!ParseGitVersionLine(input.utf8Output, result.versionUtf8)) {
@@ -111,6 +117,8 @@ std::wstring_view ProbeOutcomeSummary(GitProbeOutcome outcome) noexcept {
       return L"程序以非 0 退出码结束";
     case GitProbeOutcome::notGitOutput:
       return L"该程序没有报告 Git 版本，可能不是 git.exe";
+    case GitProbeOutcome::incompleteOutput:
+      return L"程序已运行，但它的输出没能完整读回";
   }
   return L"未知验证结果";
 }

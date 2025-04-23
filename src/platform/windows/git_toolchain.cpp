@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "git/git_locator.h"
+#include "platform/windows/git_query_result.h"
 #include "platform/windows/subprocess.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
@@ -43,7 +44,9 @@ GitExeVerification VerifyGitExe(std::wstring_view exePath, unsigned long timeout
     probeInput.timedOut = run.timedOut;
     probeInput.exited = run.exited;
     probeInput.exitCode = run.exitCode;
-    probeInput.utf8Output = run.utf8Output;
+    probeInput.outputComplete = run.AllStreamsComplete();
+    probeInput.incompleteReason = DescribeIncompleteStreams(run);
+    probeInput.utf8Output = run.stdoutCapture.bytes + run.stderrCapture.bytes;
   }
 
   const git::GitProbeResult probed = git::VerifyGitVersionProbe(probeInput);
@@ -75,6 +78,10 @@ GitExeVerification VerifyGitExe(std::wstring_view exePath, unsigned long timeout
       verification.message =
           std::wstring(summary) + L"：" + verification.path + L"（输出开头：" +
           Utf8ToUtf16(probed.outputSampleUtf8) + L"）";
+      break;
+    case git::GitProbeOutcome::incompleteOutput:
+      verification.message = std::wstring(summary) + L"：" + verification.path + L"（" +
+                             probed.incompleteReason + L"）";
       break;
   }
   return verification;

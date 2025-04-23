@@ -192,12 +192,21 @@ RepoUpstream ParseUpstreamOutput(std::wstring_view line) {
 RepoError ClassifyGitFailure(const GitQueryResult& result, std::wstring& detail) {
   detail.clear();
   if (!result.started) {
+    // 启动失败的具体原因（Win32 说明文字，平台层已限长）要一并带出，否则界面只能看到「无法启动」。
     detail = L"Git 程序未能启动";
+    if (!result.launchDetail.empty()) {
+      detail += L"：" + result.launchDetail;
+    }
     return RepoError::gitLaunchFailed;
   }
   if (result.timedOut || !result.exited) {
     detail = L"Git 未在限定时间内返回";
     return RepoError::gitTimeout;
+  }
+  // 完整度排在退出码之前：半份 stdout 既不能当成功答复，也不能拿来归类错误文案。
+  if (!result.outputComplete) {
+    detail = result.incompleteReason.empty() ? L"Git 的标准输出没有完整读回" : result.incompleteReason;
+    return RepoError::outputIncomplete;
   }
   if (result.exitCode == 0) {
     return RepoError::none;
@@ -244,6 +253,20 @@ RepoError ClassifyGitFailure(const GitQueryResult& result, std::wstring& detail)
     detail += L"：" + sample;
   }
   return RepoError::gitFailed;
+}
+
+bool NulRecordsAreComplete(std::wstring_view output, std::wstring& reason) {
+  reason.clear();
+  if (output.empty()) {
+    return true;  // 空输出是 Git 的明确答复「一条也没有」（干净工作区、无匹配条目）。
+  }
+  if (output.back() == L'\0') {
+    return true;
+  }
+  // 不带残缺内容的片段：那可能是半个路径或半条配置值，抄进界面就等于把可疑内容摊开。
+  reason = L"最后一条记录缺少结束用的空字节（这份输出在记录中间就断了，共 " +
+           std::to_wstring(output.size()) + L" 个字符）";
+  return false;
 }
 
 std::wstring CanonicalPathKey(std::wstring_view path) {
@@ -364,6 +387,8 @@ std::wstring_view RepoErrorLabel(RepoError error) noexcept {
       return L"Git 查询失败";
     case RepoError::badOutput:
       return L"Git 输出无法解析";
+    case RepoError::outputIncomplete:
+      return L"Git 输出读取不完整";
   }
   return L"识别失败";
 }
@@ -394,6 +419,10 @@ std::wstring BuildRepoErrorDetail(RepoError error, std::wstring_view detail) {
       break;
     case RepoError::badOutput:
       text += L"。请确认 Git 版本较新（建议 2.30 以上）后重试。";
+      break;
+    case RepoError::outputIncomplete:
+      text += L"。请点“刷新”重新读取；本程序不会按残缺的输出判断仓库、配置或文件清单，"
+              L"也不会把读不全当成「没有文件要处理」。";
       break;
     default:
       text += L"。";

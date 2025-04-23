@@ -663,9 +663,15 @@ PullRelationshipFacts InterpretPullRelationship(const PullRelationshipQueries& q
     if (incoming.outcome != UndoQueryOutcome::answered) {
       facts.incomingDetail = RefusalWith(incoming, L"git diff --name-only 未成功");
     } else {
-      facts.incomingOk = true;
-      // 注意：这里按 NUL 拆原始输出，不用 UndoQueryRead.lines（那是按行的）。
-      facts.incomingPaths = SplitNulList(queries.incoming.utf16Output);
+      std::wstring recordReason;
+      if (!NulRecordsAreComplete(queries.incoming.utf16Output, recordReason)) {
+        // 半个路径不能当路径用：清单不采信，界面按「读取不完整」处理。
+        facts.incomingDetail = L"传入改动的文件清单不符合记录约定：" + recordReason;
+      } else {
+        facts.incomingOk = true;
+        // 注意：这里按 NUL 拆原始输出，不用 UndoQueryRead.lines（那是按行的）。
+        facts.incomingPaths = SplitNulList(queries.incoming.utf16Output);
+      }
     }
   }
 
@@ -687,18 +693,27 @@ PullRelationshipFacts InterpretPullRelationship(const PullRelationshipQueries& q
       // 退出码 1 是 merge-tree --write-tree 的「有冲突」答案，不是失败（实测 Git 2.53）。
       // 输出形态：第一行结果 tree 的对象 ID；紧跟冲突清单（--name-only 下一行一个路径）；
       // 再往后是一个空行分隔的信息段（Auto-merging… / CONFLICT (content): …）。
-      facts.dryRun = PullMergeDryRun::supported_conflict;
-      const std::vector<std::wstring> lines = SplitLines(result.utf16Output);
-      for (size_t index = 1; index < lines.size(); ++index) {
-        const std::wstring entry = TrimWide(lines[index]);
-        if (entry.empty() || entry.find(L':') != std::wstring::npos ||
-            entry.find(L' ') != std::wstring::npos) {
-          break;  // 信息段开始（或出现了不像单个路径的行）：清单到此为止。
+      if (!result.outputComplete) {
+        // 「有冲突」这个结论来自退出码，可以采信；但要列出哪几个文件冲突就必须靠完整输出，
+        // 读不全时宁可只说「预演发现有冲突，但清单没读全」，也不交出一份缺条目的冲突表。
+        facts.dryRun = PullMergeDryRun::failed;
+        facts.dryRunDetail =
+            L"预演发现有冲突，但它的输出没能完整读回，无法列出冲突文件：" +
+            (result.incompleteReason.empty() ? L"标准输出不完整" : result.incompleteReason);
+      } else {
+        facts.dryRun = PullMergeDryRun::supported_conflict;
+        const std::vector<std::wstring> lines = SplitLines(result.utf16Output);
+        for (size_t index = 1; index < lines.size(); ++index) {
+          const std::wstring entry = TrimWide(lines[index]);
+          if (entry.empty() || entry.find(L':') != std::wstring::npos ||
+              entry.find(L' ') != std::wstring::npos) {
+            break;  // 信息段开始（或出现了不像单个路径的行）：清单到此为止。
+          }
+          facts.dryRunConflicts.push_back(entry);
         }
-        facts.dryRunConflicts.push_back(entry);
-      }
-      if (facts.dryRunConflicts.empty()) {
-        facts.dryRunDetail = L"预演报告有冲突，但没能从它的输出里认出冲突文件名。";
+        if (facts.dryRunConflicts.empty()) {
+          facts.dryRunDetail = L"预演报告有冲突，但没能从它的输出里认出冲突文件名。";
+        }
       }
     } else if (result.exitCode == 128 || result.exitCode == 129) {
       // 129 = 用法错误（这个 Git 不认 merge-tree --write-tree）；128 = 致命错误。
@@ -1163,6 +1178,12 @@ PullConflictState InterpretPullConflictState(const GitQueryResult& conflictListi
   if (listing.outcome != UndoQueryOutcome::answered) {
     state.readFailure = L"没能问出索引里有哪些未合并条目：" +
                         RefusalWith(listing, L"git diff --diff-filter=U 未成功");
+    return state;
+  }
+  std::wstring recordReason;
+  if (!NulRecordsAreComplete(conflictListing.utf16Output, recordReason)) {
+    // 清单残缺就不能当成「冲突只有这些」：漏掉的那条正是用户下一步要解决的文件。
+    state.readFailure = L"未合并条目的清单不符合记录约定：" + recordReason;
     return state;
   }
   // 未合并清单按 NUL 拆原始输出（路径里可能有空格、中文、&）。

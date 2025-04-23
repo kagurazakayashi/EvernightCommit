@@ -146,6 +146,13 @@ std::vector<std::wstring> BuildWorkspaceStatusArguments(std::wstring_view reposi
 
 WorkspaceStatusParseResult ParseWorkspacePorcelainV2(std::wstring_view nulSeparatedOutput) {
   WorkspaceStatusParseResult result;
+  // 记录边界约定排在一切解析之前：缺结尾 NUL 的最后一条可能是半个文件名，
+  // 按「少一条」处理会让用户在看不见的那条路径上做提交决定。空输出才是干净工作区。
+  std::wstring reason;
+  if (!NulRecordsAreComplete(nulSeparatedOutput, reason)) {
+    result.error = L"工作区状态输出不符合记录约定：" + reason;
+    return result;
+  }
   const std::vector<std::wstring_view> tokens = SplitNulFields(nulSeparatedOutput);
   std::wstring error;
 

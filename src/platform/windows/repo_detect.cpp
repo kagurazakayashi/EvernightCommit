@@ -1,7 +1,7 @@
 #include "platform/windows/repo_detect.h"
 
+#include "platform/windows/git_query_result.h"
 #include "platform/windows/subprocess.h"
-#include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
 
 namespace gc::platform {
@@ -228,16 +228,8 @@ RepoDetectDeps MakeRepoDetectDeps(unsigned long timeoutMilliseconds) {
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                      const std::vector<std::wstring>& arguments) {
     // 子进程工作目录显式绑定为该仓库；本进程的全局当前目录始终不变。
-    const SubprocessRunResult run =
-        RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds);
-    git::GitQueryResult result;
-    result.started = run.started;
-    result.timedOut = run.timedOut;
-    result.exited = run.exited;
-    result.exitCode = static_cast<int>(run.exitCode);
-    result.utf16Output = Utf8ToUtf16(run.utf8Stdout);
-    result.utf16Error = Utf8ToUtf16(run.utf8Stderr);
-    return result;
+    return MakeGitQueryResult(
+        RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
   };
   deps.absolutize = [](const std::wstring& directory, std::wstring_view relative) {
     return ToAbsolutePathInDirectory(directory, relative);

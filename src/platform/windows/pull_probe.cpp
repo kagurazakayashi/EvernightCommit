@@ -3,8 +3,8 @@
 #include <vector>
 
 #include "git/workspace_status.h"
+#include "platform/windows/git_query_result.h"
 #include "platform/windows/subprocess.h"
-#include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
 
 namespace gc::platform {
@@ -164,16 +164,8 @@ PullProbeDeps MakePullProbeDeps(unsigned long timeoutMilliseconds) {
   PullProbeDeps deps;
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
-    const SubprocessRunResult run = RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds);
-    git::GitQueryResult result;
-    result.started = run.started;
-    result.timedOut = run.timedOut;
-    result.exited = run.exited;
-    result.exitCode = static_cast<int>(run.exitCode);
-    // 这里的解码按字节数走（含 --name-only -z 输出里的 NUL），路径因此能原样取用。
-    result.utf16Output = Utf8ToUtf16(run.utf8Stdout);
-    result.utf16Error = Utf8ToUtf16(run.utf8Stderr);
-    return result;
+    // 输出按字节数取（含 --name-only -z 里的 NUL），路径因此能原样用；完整度判定见 MakeGitQueryResult。
+    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
   };
   return deps;
 }

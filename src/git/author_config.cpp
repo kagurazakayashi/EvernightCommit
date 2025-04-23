@@ -58,13 +58,24 @@ ConfigValueRead ParseIdentityConfigQuery(const GitQueryResult& result, std::wstr
   if (!result.started) {
     read.state = ConfigValueState::failed;
     read.error = RepoError::gitLaunchFailed;
-    read.detail = L"Git 程序未能启动";
+    read.detail = result.launchDetail.empty()
+                      ? L"Git 程序未能启动"
+                      : L"Git 程序未能启动：" + result.launchDetail;
     return read;
   }
   if (result.timedOut || !result.exited) {
     read.state = ConfigValueState::failed;
     read.error = RepoError::gitTimeout;
     read.detail = L"Git 未在限定时间内返回";
+    return read;
+  }
+  // 读不全就不能当作答复：半条值看起来也像一条完整的身份。
+  if (!result.outputComplete) {
+    read.state = ConfigValueState::failed;
+    read.error = RepoError::outputIncomplete;
+    read.detail = result.incompleteReason.empty() ? L"Git 的标准输出没有完整读回"
+                                                  : result.incompleteReason;
+    read.detail += L"（" + std::wstring(key) + L"）";
     return read;
   }
   if (result.exitCode == 1) {

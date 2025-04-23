@@ -87,6 +87,7 @@ add_library(gc_platform STATIC
   src/platform/windows/commit_message_file.cpp
   src/platform/windows/environment_block.cpp
   src/platform/windows/fetch_probe.cpp
+  src/platform/windows/git_query_result.cpp
   src/platform/windows/git_toolchain.cpp
   src/platform/windows/identity_prompt.cpp
   src/platform/windows/local_time.cpp

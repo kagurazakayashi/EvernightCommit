@@ -41,11 +41,14 @@ struct GitRun {
   bool started = false;
   bool exited = false;
   bool timedOut = false;
+  bool outputComplete = true;  // 两条流都完整读回；读不全时 Success() 不成立
   unsigned long exitCode = 0;
   std::wstring commandLine;  // 实际命令行，供失败诊断展示
   std::wstring out;          // stdout
   std::wstring err;          // stderr
-  [[nodiscard]] bool Success() const noexcept { return exited && !timedOut && exitCode == 0; }
+  [[nodiscard]] bool Success() const noexcept {
+    return exited && !timedOut && exitCode == 0 && outputComplete;
+  }
 };
 
 // 单个用例独占的临时 Git 仓库夹具：
