@@ -37,8 +37,10 @@ GitExeVerification VerifyGitExe(std::wstring_view exePath, unsigned long timeout
   git::VersionProbeInput probeInput;
   probeInput.pathIsFile = !exePath.empty() && IsExistingRegularFile(exePath);
   if (probeInput.pathIsFile) {
+    // 连 --version 也走集中环境策略：候选程序拿到的环境与后续每一次查询同源。
     const SubprocessRunResult run =
-        RunHiddenCaptured(exePath, {L"--version"}, /*workingDirectory=*/{}, timeoutMilliseconds);
+        RunGitCaptured(exePath, {L"--version"}, /*workingDirectory=*/{}, timeoutMilliseconds,
+                       /*environmentNotice=*/nullptr);
     probeInput.launched = run.started;
     probeInput.launchErrorText = run.launchErrorText;
     probeInput.timedOut = run.timedOut;

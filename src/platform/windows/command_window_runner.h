@@ -64,6 +64,8 @@ struct CommandWindowResult {
   std::wstring repositoryDirectory;     // 命令窗口中 Git 的工作目录
   std::wstring failureReason;           // 失败/未知时的具体原因（含 Windows 错误文本）
   std::wstring directory;               // 本次操作的临时目录（诊断与清理）
+  // 集中环境策略从继承环境移除过的重定向变量告知（只含变量名，绝不含值）；没有移除则为空。
+  std::wstring environmentNotice;
   [[nodiscard]] bool Success() const noexcept {
     return completion == git::CommandCompletion::finished && exitCode == 0;
   }

@@ -4,7 +4,6 @@
 
 #include "git/workspace_status.h"
 #include "platform/windows/git_query_result.h"
-#include "platform/windows/subprocess.h"
 
 namespace gc::platform {
 namespace {
@@ -66,7 +65,7 @@ UndoProbeDeps MakeUndoProbeDeps(unsigned long timeoutMilliseconds) {
   UndoProbeDeps deps;
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
-    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
   };
   return deps;
 }

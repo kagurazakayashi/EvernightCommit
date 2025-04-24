@@ -3,7 +3,6 @@
 #include "git/commit_history.h"
 #include "platform/windows/git_query_result.h"
 #include "platform/windows/local_time.h"
-#include "platform/windows/subprocess.h"
 
 namespace gc::platform {
 namespace {
@@ -114,7 +113,7 @@ WorkspaceStatusDeps MakeWorkspaceStatusDeps(unsigned long timeoutMilliseconds) {
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
     // 機器輸出以 NUL 分隔，平台邊界只做 UTF-8→UTF-16 解碼，不改寫任何分隔符與路徑字節。
-    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
   };
   return deps;
 }

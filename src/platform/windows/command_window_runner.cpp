@@ -29,22 +29,10 @@ constexpr unsigned long kProcessExitRetryIntervalMs = 100;
 // 连撞几次就说明环境不对劲，宁可不启动这次操作，也不接受任何一个已经存在的目录。
 constexpr int kOperationDirectoryClaimAttempts = 4;
 
-// 命令窗口操作的默认环境保障（仍可被请求里的同名覆盖取代）：
-//   GIT_TERMINAL_PROMPT=1                —— 凭据/口令必须在终端里问，不许被静默跳过；
-//   删除 GIT_ASKPASS / SSH_ASKPASS       —— 二者会把提问搬成 GUI 弹窗，与“原生交互留在窗口里”冲突；
-//   GIT_PAGER=cat                        —— 关键：新建控制台是交互式 TTY，Git 默认把
-//     status/log/diff 之类输出交给分页器 less，辅助进程会停在等用户按键的那一页上，
-//     于是退出码迟迟拿不到、临时仓库也被窗口占用。命令窗口本来就保留全部输出供滚动查看，
-//     分页没有价值，因此这里直接关闭分页器（不影响凭据交互）。
-const std::vector<git::EnvironmentOverride>& CommandWindowDefaultOverrides() {
-  static const std::vector<git::EnvironmentOverride> kOverrides = {
-      {L"GIT_TERMINAL_PROMPT", std::wstring(L"1")},
-      {L"GIT_PAGER", std::wstring(L"cat")},
-      {L"GIT_ASKPASS", std::nullopt},
-      {L"SSH_ASKPASS", std::nullopt},
-  };
-  return kOverrides;
-}
+// 命令窗口操作的环境保障现在集中在 git::MakeGitEnvironmentPlan（git/git_environment.h）：
+// 继承的仓库/索引/配置/身份重定向项一律移除，再落交互契约（GIT_TERMINAL_PROMPT=1、
+// GIT_PAGER=cat、删 GIT_ASKPASS/SSH_ASKPASS）与本请求自己的受控覆盖；
+// PATH、HOME/USERPROFILE、SSH 与凭据助手等照常保留，用户的真实 Git 配置照常生效。
 
 std::wstring FormatWindowsError(unsigned long errorCode) {
   LPWSTR buffer = nullptr;
@@ -521,6 +509,7 @@ struct CommandWindowWatchState {
   std::wstring windowTitle;         // 辅助进程用 SetConsoleTitleW 设置的控制台标题（展示用）
   std::wstring windowTitleToken;    // 标题里的唯一标记（操作目录名），用于可靠定位窗口
   std::wstring statusText;          // 界面可见的即时状态
+  std::wstring environmentNotice;   // 集中环境策略移除过的重定向变量告知（只含名字，可为空）
   platform::UniqueHandle process;
   platform::UniqueHandle thread;
   HWND consoleWindow = nullptr;
@@ -630,6 +619,9 @@ void CommandWindowRunner::Shutdown() {
         state->result.completion = git::CommandCompletion::stillUnknown;
         state->result.failureReason = L"应用退出时操作仍在进行，结果未知（命令窗口与 Git 未被终止）。";
         state->statusText = std::wstring(git::CommandCompletionLabel(git::CommandCompletion::stillUnknown));
+        if (!state->environmentNotice.empty()) {
+          state->statusText += L"｜" + state->environmentNotice;
+        }
       }
     }
   }
@@ -875,25 +867,15 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
                              specPath + L"）");
   }
 
-  // 5) 环境块：继承当前进程环境 + 请求的受控覆盖 + 终端交互保障。
-  std::vector<git::EnvironmentOverride> overrides = operation.environmentOverrides;
-  for (const git::EnvironmentOverride& terminal : CommandWindowDefaultOverrides()) {
-    bool present = false;
-    for (const git::EnvironmentOverride& existing : overrides) {
-      if (_wcsicmp(existing.name.c_str(), terminal.name.c_str()) == 0) {
-        present = true;
-        break;
-      }
-    }
-    if (!present) {
-      overrides.push_back(terminal);
-    }
+  // 5) 环境块：集中策略装配（与后台预检同一份策略文件），继承环境 + 重定向移除 +
+  //    交互保障 + 本请求的受控覆盖（表单身份/时间排在最后，只影响本次操作）。
+  GitChildEnvironment environment = BuildGitChildEnvironment(
+      git::GitRunPurpose::commandWindow, operation.environmentOverrides);
+  if (environment.block.empty()) {
+    return reportFailure(git::CommandCompletion::launchFailed, environment.failureReason);
   }
-  std::wstring environmentReason;
-  std::wstring environmentBlock = BuildChildEnvironmentBlock(overrides, &environmentReason);
-  if (environmentBlock.empty()) {
-    return reportFailure(git::CommandCompletion::launchFailed, environmentReason);
-  }
+  // 之后的启动失败同样要带上这份告知：环境装配成功不等于操作成功，用户两边都需要知道全貌。
+  localFailure.environmentNotice = environment.notice;
 
   // 6) 启动命令窗口辅助进程（本程序自己的隐藏入口）：显式 lpApplicationName、可写命令行
   //    缓冲、仓库为工作目录、Unicode 环境块。新的控制台由辅助进程自己 AllocConsole，
@@ -919,7 +901,7 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
   const BOOL created =
       ::CreateProcessW(applicationName.data(), mutableCommandLine.data(), nullptr, nullptr,
                        /*bInheritHandles=*/FALSE, CREATE_UNICODE_ENVIRONMENT,
-                       environmentBlock.data(), workingDirectory.c_str(), &startup, &information);
+                       environment.block.data(), workingDirectory.c_str(), &startup, &information);
   if (created == 0) {
     const unsigned long errorCode = ::GetLastError();
     return reportFailure(git::CommandCompletion::launchFailed,
@@ -940,6 +922,10 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
   state->windowTitle = windowTitle;
   state->windowTitleToken = directoryToken;
   state->statusText = L"已启动命令窗口，等待辅助进程就绪";
+  state->environmentNotice = environment.notice;
+  if (!state->environmentNotice.empty()) {
+    state->statusText += L"｜" + state->environmentNotice;
+  }
   state->process.Reset(information.hProcess);
   state->thread.Reset(information.hThread);
   state->result.operationId = id;
@@ -948,6 +934,7 @@ bool CommandWindowRunner::Start(const git::CommandWindowOperation& operation, ui
   state->result.commandLine = gitLine;
   state->result.repositoryDirectory = operation.repositoryDirectory;
   state->result.directory = directory;
+  state->result.environmentNotice = state->environmentNotice;
   ownedDirectory.dismissed = true;
 
   // 记录先进表、线程后启动：观察线程任何时候都能在表里找到自己的记录。
@@ -1186,6 +1173,9 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
       needLookup = state.consoleWindow == nullptr;
       state.statusText = (completion == git::CommandCompletion::running) ? L"执行中"
                                                                         : L"已启动命令窗口，等待辅助进程就绪";
+      if (!state.environmentNotice.empty()) {
+        state.statusText += L"｜" + state.environmentNotice;
+      }
     }
     if (needLookup) {
       cached = FindWindowOwningToken(state.windowTitleToken);
@@ -1217,6 +1207,9 @@ void CommandWindowRunner::Watch(CommandWindowWatchState& state) {
     state.statusText = std::wstring(git::CommandCompletionLabel(completion));
     if (completion == git::CommandCompletion::finished) {
       state.statusText += L"，Git 退出码 " + std::to_wstring(result.exitCode);
+    }
+    if (!state.environmentNotice.empty()) {
+      state.statusText += L"｜" + state.environmentNotice;
     }
   }
   // 善后：先放手租约（自己的句柄还握着时目录本来就删不掉），再按“可能还有人用”的保守规则回收。

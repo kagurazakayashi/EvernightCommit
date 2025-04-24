@@ -1,7 +1,6 @@
 #include "platform/windows/repo_detect.h"
 
 #include "platform/windows/git_query_result.h"
-#include "platform/windows/subprocess.h"
 #include "platform/windows/win_path.h"
 
 namespace gc::platform {
@@ -109,9 +108,25 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
     return detection;
   }
 
+  // 集中环境策略的告知（移除过的重定向变量名，只含名字）：环境里真有这样的变量时，
+  // 用户必须看见“它们被移除了、识别与操作仍绑定这个目录”，而不是被静默改了语义。
+  std::wstring envNotice;
+  const auto captureNotice = [&envNotice](const git::GitQueryResult& query) {
+    if (envNotice.empty()) {
+      envNotice = query.environmentNotice;
+    }
+  };
+  const auto withNotice = [&envNotice](git::RepoDetection filled) {
+    if (!envNotice.empty()) {
+      filled.message += L"｜" + envNotice;
+    }
+    return filled;
+  };
+
   // 1. 形态标志：一次查询拿回三个布尔值，任何仓库形态都会逐行作答。
   const git::GitQueryResult flags =
       RunQuery(deps.runner, request.exePath, request.directory, kShapeFlagArguments);
+  captureNotice(flags);
   std::wstring detail;
   const git::RepoError flagFailure = git::ClassifyGitFailure(flags, detail);
   if (flagFailure != git::RepoError::none) {
@@ -119,20 +134,21 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
       detection.kind = git::RepoKind::notRepository;
       detection.error = git::RepoError::notRepository;
       detection.message = git::BuildRepoErrorDetail(detection.error, request.directory);
-      return detection;
+      return withNotice(std::move(detection));
     }
-    return FailWith(request.directory, flagFailure, detail);
+    return withNotice(FailWith(request.directory, flagFailure, detail));
   }
   git::RepoShape shape;
   if (!git::ParseShapeFlags(git::SplitLines(flags.utf16Output), &shape)) {
     detection.error = git::RepoError::badOutput;
     detection.message = git::BuildRepoErrorDetail(detection.error, L"rev-parse 布尔标志没有按行作答");
-    return detection;
+    return withNotice(std::move(detection));
   }
 
   // 2. 形态路径：裸仓库与 .git 内部会在给出两项目录后中止，因此非 0 退出是预期结果。
   const git::GitQueryResult paths =
       RunQuery(deps.runner, request.exePath, request.directory, kShapePathArguments);
+  captureNotice(paths);
   git::ParseShapePaths(git::SplitLines(paths.utf16Output), &shape);
   detection.absoluteGitDir = LocalizePath(deps, request.directory, shape.absoluteGitDir);
   detection.kind = git::RepoKind::plainWorktree;
@@ -143,19 +159,19 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
     detection.kind = git::RepoKind::bare;
     detection.root.clear();
     detection.message = git::BuildRepoSummary(detection, request.directory);
-    return detection;
+    return withNotice(std::move(detection));
   }
   if (!shape.insideWorkTree || shape.insideGitDir) {
     // .git 目录内部没有可操作的工作区，root 留空：后续 Git 调用没有安全落点。
     detection.kind = git::RepoKind::insideGitDir;
     detection.root.clear();
     detection.message = git::BuildRepoSummary(detection, request.directory);
-    return detection;
+    return withNotice(std::move(detection));
   }
   if (shape.topLevel.empty()) {
     detection.error = git::RepoError::badOutput;
     detection.message = git::BuildRepoErrorDetail(detection.error, L"工作区根目录未能取得");
-    return detection;
+    return withNotice(std::move(detection));
   }
 
   detection.root = LocalizePath(deps, request.directory, shape.topLevel);
@@ -200,7 +216,7 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
     if (unbornBranch || error == git::RepoError::none || error == git::RepoError::gitFailed) {
       detection.kind = git::RepoKind::noCommits;
     } else {
-      return FailWith(detection.root, error, headFailure);
+      return withNotice(FailWith(detection.root, error, headFailure));
     }
   } else if (!head.onBranch) {
     detection.kind = git::RepoKind::detached;
@@ -220,7 +236,7 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
 
   detection.message = git::BuildRepoSummary(detection, request.directory);
   detection.error = git::RepoError::none;
-  return detection;
+  return withNotice(std::move(detection));
 }
 
 RepoDetectDeps MakeRepoDetectDeps(unsigned long timeoutMilliseconds) {
@@ -228,8 +244,9 @@ RepoDetectDeps MakeRepoDetectDeps(unsigned long timeoutMilliseconds) {
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                      const std::vector<std::wstring>& arguments) {
     // 子进程工作目录显式绑定为该仓库；本进程的全局当前目录始终不变。
-    return MakeGitQueryResult(
-        RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
+    // 环境走集中策略：继承的 GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE 之类重定向
+    // 不会再让“识别出来的仓库”和“用户选中的目录”是两回事。
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
   };
   deps.absolutize = [](const std::wstring& directory, std::wstring_view relative) {
     return ToAbsolutePathInDirectory(directory, relative);

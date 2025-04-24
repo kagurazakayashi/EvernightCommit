@@ -71,7 +71,9 @@ inline constexpr unsigned long kDefaultDrainAfterExitMilliseconds = 5000;
 // workingDirectory 为空时沿用父进程当前目录。
 // environmentBlock 为 NULL 结尾的 Unicode 环境块（GetEnvironmentStringsW 同格式），
 // 传 nullptr 时子进程继承本进程环境。仅测试夹具需要传入隔离环境块；
-// 生产代码一律使用下面的四参重载，不指定环境块。
+// 生产代码启动 Git 一律走 platform::RunGitCaptured / RunGitBackgroundQuery
+// （git/git_environment.h 的集中环境策略装配环境块）或命令窗口执行器的同一装配函数，
+// 不再直接调用本函数裸继承环境。
 // stdout 与 stderr 分别捕获：Git 的机器输出走 stdout，致命信息走 stderr，
 // 合并读取会因两条流的写入时机不同而打乱按行取字段的顺序。
 // maxCaptureBytesPerStream 是每一路各自保留的字节上限，测试用它把「恰好上限」「超过上限」

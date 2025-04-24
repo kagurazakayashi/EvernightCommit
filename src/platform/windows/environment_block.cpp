@@ -81,7 +81,6 @@ bool MergeEnvironmentEntries(const std::vector<std::wstring>& baseEntries,
       return fail(L"环境变量值不合法：" + override.name);
     }
     const std::wstring wanted = ToUpperAscii(override.name);
-    bool replaced = false;
     if (!override.value.has_value()) {
       // 删除：移除所有同名项。
       std::erase_if(merged, [&wanted](const std::wstring& entry) {
@@ -91,15 +90,24 @@ bool MergeEnvironmentEntries(const std::vector<std::wstring>& baseEntries,
       continue;
     }
     const std::wstring replacement = override.name + L"=" + *override.value;
+    bool replaced = false;
     for (std::wstring& entry : merged) {
       const std::optional<std::wstring> name = EntryName(entry);
       if (name.has_value() && ToUpperAscii(*name) == wanted) {
-        entry = replacement;
-        replaced = true;
+        if (!replaced) {
+          entry = replacement;
+          replaced = true;
+        } else {
+          // 大小写同名项（如 Path 与 PATH 同时在块里）合并：留改后的第一条就够了，
+          // 否则同一个名字在环境块里出现两次，子进程取哪一条就成了实现细节。
+          entry.clear();
+        }
       }
     }
     if (!replaced) {
       merged.push_back(replacement);
+    } else {
+      std::erase_if(merged, [](const std::wstring& entry) { return entry.empty(); });
     }
   }
   *mergedEntries = std::move(merged);
@@ -121,10 +129,16 @@ std::wstring MakeUnicodeEnvironmentBlock(const std::vector<std::wstring>& entrie
   return block;
 }
 
-std::vector<std::wstring> GetCurrentEnvironmentEntries() {
+std::vector<std::wstring> GetCurrentEnvironmentEntries(bool* readFailed) {
   std::vector<std::wstring> entries;
+  if (readFailed != nullptr) {
+    *readFailed = false;
+  }
   LPWCH raw = ::GetEnvironmentStringsW();
   if (raw == nullptr) {
+    if (readFailed != nullptr) {
+      *readFailed = true;  // 调用失败：环境是未知数，不是“没有任何项”。
+    }
     return entries;
   }
   // 块格式：“NAME=VALUE\0”若干项，后跟一个空项（连续两个 \0）结束。
@@ -149,6 +163,54 @@ std::wstring BuildChildEnvironmentBlock(const std::vector<git::EnvironmentOverri
     return {};
   }
   return MakeUnicodeEnvironmentBlock(merged);
+}
+
+GitChildEnvironment BuildGitChildEnvironment(git::GitRunPurpose purpose,
+                                             const std::vector<git::EnvironmentOverride>& operationOverrides) {
+  GitChildEnvironment result;
+  const auto fail = [&result](std::wstring reason) {
+    // 失败原因会进界面与错误提示：限长，而且这里能出现在 reason 里的只有变量名，
+    // 任何路径、任何值都不得经由本函数外泄。
+    if (reason.size() > 200) {
+      reason.resize(200);
+    }
+    result.failureReason = std::move(reason);
+    return result;
+  };
+
+  bool readFailed = false;
+  const std::vector<std::wstring> inherited = GetCurrentEnvironmentEntries(&readFailed);
+  if (readFailed) {
+    return fail(L"无法读取当前进程环境（GetEnvironmentStringsW 失败），不能装配 Git 子进程环境。");
+  }
+  if (inherited.empty()) {
+    // 真实空环境的进程跑不了任何依赖 PATH/HOME 的 Git；与其让子进程神秘失踪，
+    // 不如在这里明确拒绝装配。
+    return fail(L"当前进程环境为空，无法为 Git 子进程装配可用环境。");
+  }
+
+  // 数字后缀配置注入项无法按名字枚举（条数随注入变化），先逐项从基块剔除；
+  // 剩下的删除与注入都走同一个合并函数，操作覆盖排在最后。
+  std::vector<std::wstring> base = inherited;
+  std::erase_if(base, [](const std::wstring& entry) {
+    if (!entry.empty() && entry.front() == L'=') {
+      return false;  // 盘符联动项不参与任何名字匹配。
+    }
+    const size_t equals = entry.find(L'=');
+    return equals != std::wstring::npos &&
+           git::IsNumberedConfigInjectionName(std::wstring_view(entry).substr(0, equals));
+  });
+
+  const git::GitEnvironmentPlan plan = git::MakeGitEnvironmentPlan(purpose, operationOverrides);
+  std::vector<std::wstring> merged;
+  std::wstring mergeFailure;
+  if (!MergeEnvironmentEntries(base, plan.overrides, &merged, &mergeFailure)) {
+    return fail(mergeFailure);
+  }
+  // 告知用名字来自对“继承原块”的核对：数字项即便存在也不单列（COUNT 已被移除，它们不构成事实）。
+  result.notice = git::BuildRedirectNoticeText(git::FindInheritedRedirects(inherited, plan.redirectNames));
+  result.block = MakeUnicodeEnvironmentBlock(merged);
+  return result;
 }
 
 }  // namespace gc::platform

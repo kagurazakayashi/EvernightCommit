@@ -34,6 +34,9 @@ struct GitQueryResult {
   std::wstring launchDetail;      // 启动失败时平台层给出的说明（已限长）
   std::wstring utf16Output;  // 标准输出解码后的文本：机器可读字段，按行取用
   std::wstring utf16Error;   // 标准错误解码后的文本：致命信息，只用于归类与诊断
+  // 集中环境策略从继承环境里移除了哪些重定向变量（只含变量名，不含值），供界面告知用户
+  // “环境里有这些变量、本次查询仍绑定所选仓库”。没有移除过任何东西时为空。
+  std::wstring environmentNotice;
 };
 
 // 以参数数组执行一次 Git 查询。exePath 为已验证的 git.exe，workingDirectory 为
