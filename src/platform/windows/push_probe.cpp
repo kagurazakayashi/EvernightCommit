@@ -5,7 +5,6 @@
 #include "git/commit_history.h"  // LooksLikeFullObjectId：发问之前先验形态，不把半截 ID 交给 Git
 #include "git/pull_plan.h"
 #include "platform/windows/git_query_result.h"
-#include "platform/windows/subprocess.h"
 #include "platform/windows/win_path.h"
 
 namespace gc::platform {
@@ -118,7 +117,7 @@ PushProbeDeps MakePushProbeDeps(unsigned long timeoutMilliseconds) {
   PushProbeDeps deps;
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
-    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
   };
   return deps;
 }

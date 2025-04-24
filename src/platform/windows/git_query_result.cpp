@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "platform/windows/environment_block.h"
 #include "platform/windows/utf_text.h"
 
 namespace gc::platform {
@@ -71,6 +72,37 @@ git::GitQueryResult MakeGitQueryResult(const SubprocessRunResult& run) {
   if (result.incompleteReason.empty() && !result.outputComplete) {
     result.incompleteReason = L"标准输出没有完整读回";
   }
+  return result;
+}
+
+SubprocessRunResult RunGitCaptured(std::wstring_view program,
+                                   const std::vector<std::wstring>& arguments,
+                                   std::wstring_view workingDirectory,
+                                   unsigned long timeoutMilliseconds,
+                                   std::wstring* environmentNotice) {
+  const GitChildEnvironment environment =
+      BuildGitChildEnvironment(git::GitRunPurpose::backgroundProbe, {});
+  if (environment.block.empty()) {
+    // 装配失败就不启动：与其让 Git 拿着一个未知的环境去猜仓库，不如这一次查询明确没有答案。
+    SubprocessRunResult failed;
+    failed.launchErrorText = environment.failureReason;
+    return failed;
+  }
+  if (environmentNotice != nullptr) {
+    *environmentNotice = environment.notice;
+  }
+  return RunHiddenCaptured(program, arguments, workingDirectory, timeoutMilliseconds,
+                           environment.block.c_str());
+}
+
+git::GitQueryResult RunGitBackgroundQuery(const std::wstring& exePath,
+                                          const std::vector<std::wstring>& arguments,
+                                          const std::wstring& workingDirectory,
+                                          unsigned long timeoutMilliseconds) {
+  std::wstring notice;
+  git::GitQueryResult result =
+      MakeGitQueryResult(RunGitCaptured(exePath, arguments, workingDirectory, timeoutMilliseconds, &notice));
+  result.environmentNotice = std::move(notice);
   return result;
 }
 

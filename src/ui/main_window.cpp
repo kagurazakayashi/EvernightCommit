@@ -1083,7 +1083,11 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
         tasks_.FinishOperation(serial, failure.completion, failure.exitCode, failure.failureReason);
     platform::RemoveNulPathspecFile(options.pathspecFile);  // Git 从未运行，文件同样没人要读了。
     platform::RemoveCommitMessageFile(options.messageFile);
-    state_.SetStatusNote(outcome.note);
+    std::wstring note = outcome.note;
+    if (!failure.environmentNotice.empty()) {
+      note += L"｜" + failure.environmentNotice;
+    }
+    state_.SetStatusNote(note);
     UpdateCommandAvailability();
     RefreshTexts(window);
     return false;
@@ -1861,6 +1865,11 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
                       : std::wstring(L"｜推送没有成功：本程序不自动重试，也不会改用 --force 之类"
                                      L"更激烈的参数。原因看命令窗口里 Git 的真实输出。");
     conclusion += L"正在向确认框上列出的发布目标核实那条引用的实际位置…";
+  }
+  // 集中环境策略移除过继承的重定向变量时，结论必须把这句话说完：
+  // 用户从终端启动本程序时要知道“那些变量被移除了、操作绑定的是界面上选中的仓库”。
+  if (!result.environmentNotice.empty()) {
+    conclusion += L"｜" + result.environmentNotice;
   }
   tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。

@@ -22,6 +22,8 @@ add_executable(gc_tests
   fetch_fixture_tests.cpp
   fetch_plan_tests.cpp
   git_fixture_tests.cpp
+  git_environment_fixture_tests.cpp
+  git_environment_tests.cpp
   git_locator_tests.cpp
   git_probe_tests.cpp
   layout_tests.cpp

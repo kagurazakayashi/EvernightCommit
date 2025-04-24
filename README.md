@@ -363,16 +363,31 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
    如实说明边界：这套绑定防的是“用别的目录来驱动这个入口”，
    能以当前用户身份在临时目录里造文件、造进程的第三方本来就拥有同样的执行能力，
    它不是同身份攻击者之间的隔离手段。
-6. **两处环境覆盖**。执行器继承本进程环境（用户的真实 Git 配置、凭据助手照常生效），
-   只额外做两件事：设 `GIT_TERMINAL_PROMPT=1` 并删除 `GIT_ASKPASS` / `SSH_ASKPASS`，
+6. **集中环境策略**。后台预检与命令窗口执行共用同一份策略（`git/git_environment.h`）：
+   继承环境里能改写命令语义的「重定向」变量一律不带走——仓库定位（`GIT_DIR`、`GIT_WORK_TREE`、
+   `GIT_NAMESPACE`）、索引与对象库（`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、
+   `GIT_ALTERNATE_OBJECT_DIRECTORIES`）、配置注入与重定向（`GIT_CONFIG_PARAMETERS`、
+   `GIT_CONFIG_COUNT` 与逐条 `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`、`GIT_CONFIG_GLOBAL`、
+   `GIT_CONFIG_SYSTEM`、废弃别名 `GIT_CONFIG`）、身份与时间（`GIT_AUTHOR_NAME/EMAIL/DATE`、
+   `GIT_COMMITTER_NAME/EMAIL/DATE`）都被移除，实际仓库、索引与身份因此始终由「界面选中的目录」
+   和表单决定，从终端或其他 Git 工具里启动本程序不会把操作搬到别的仓库上。移除确实在继承环境里
+   存在的重定向变量时，操作结论会按变量名告知用户（只列名字，绝不显示值）。
+   其余变量照常保留：用户的真实 Git 配置、凭据助手、`PATH`、`HOME`/`USERPROFILE`、
+   SSH 相关（`GIT_SSH`、`GIT_SSH_COMMAND`、`SSH_AUTH_SOCK`）一概不动，正常认证与工具链不受影响。
+   命令窗口在此之上再落交互契约：设 `GIT_TERMINAL_PROMPT=1` 并删除 `GIT_ASKPASS` / `SSH_ASKPASS`，
    以免提问被搬成 GUI 弹窗而偏离“在命令窗口里原生交互”；
    并设 `GIT_PAGER=cat`——新建控制台是交互式 TTY，Git 默认把 `status`/`log` 之类输出交给 `less`，
    辅助进程会停在等用户按键的那一屏上，退出码迟迟拿不到、临时目录也被窗口占用，
    而命令窗口本来就保留全部输出供滚动查看，分页没有价值。
+   「创建提交」表单的作者身份与两个时间作为操作覆盖排在策略之后，只进那一次子进程的环境块，
+   不回写任何配置，也不改动本进程环境。
 
 界面侧的“刷新”“路径选择”“仓库识别”等只读动作仍走隐藏窗口子进程（`subprocess`，
 `CREATE_NO_WINDOW`、分别捕获 stdout/stderr），**不弹命令窗口**；两种模式刻意分开：
-命令窗口模式不截获任何管道，以免破坏 Git 的终端输入；后台捕获模式不弹窗、不交互。
+命令窗口模式不截获任何管道，以免破坏 Git 的终端输入；后台捕获模式不弹窗、不交互，
+环境按同一份集中策略装配并额外设 `GIT_TERMINAL_PROMPT=0`——只读探测绝不停留在看不见的问题上
+（凭据助手照常保留，那是看得见的交互）。环境块装配不起来时（进程环境读不出或为空、
+覆盖名不合法）查询明确失败并给出原因，绝不退回“裸继承环境”去猜。
 
 ### 3.4 工作区状态解析（未暂存 / 已暂存两个列表）
 
@@ -1064,6 +1079,9 @@ src/
                            提交表单会话（commit_form_session：区分“默认值填的”与“用户写的”、
                            换仓库时要不要问保留/放弃、提交成功后只清正文三个栏位，纯逻辑可测）
   git/                     Git 纯逻辑：PATH 候选发现（git_locator）、--version 结果判定（git_probe）、
+                           集中 Git 子进程环境策略（git_environment：保留/删除/受控覆盖的分类名单、
+                           数字后缀配置注入项识别、从继承环境核对被移除的重定向变量并生成只含名字的
+                           告知文本；后台探测与命令窗口共用同一份名单，纯逻辑可测）、
                            仓库形态解析与分类（repository：只接 UTF-16 文本，判定与错误归类可桩测）、
                            工作区数据模型（workspace_model：条目分类、状态与路径显示、读取周期与空状态文案）、
                            工作区状态解析（workspace_status：porcelain v2 参数构造与 NUL 记录解析，
@@ -1134,9 +1152,13 @@ src/
                            交给子进程的继承句柄只有属于它的那一对管道写端）、
                            查询结果换算（git_query_result：唯一一处把子进程捕获变成 GitQueryResult 的地方，
                            标准输出必须完整且是有效 UTF-8 才标记 outputComplete，否则带上「哪一路、为什么」
-                           的限长说明；各条只读查询都经过它，因此不存在「某个适配器忘了传完整度」）、
+                           的限长说明；各条只读查询都经过它，因此不存在「某个适配器忘了传完整度」；
+                           生产后台 Git 查询统一走这里的 RunGitBackgroundQuery/RunGitCaptured——
+                           环境按集中策略装配，被移除的重定向变量以名字记在结果的 environmentNotice 上）、
                            Unicode 环境块合并
-                           （environment_block：覆盖/删除变量，盘符联动项原样保留）、
+                           （environment_block：覆盖/删除变量、大小写同名项合并、盘符联动项原样保留；
+                           环境读取失败与“真的空环境”分两种答复；集中策略装配入口
+                           BuildGitChildEnvironment 产出环境块与只含变量名的告知）、
                            Git 发现与验证服务（git_toolchain）、仓库识别编排（repo_detect，执行依赖全部回调注入）、
                            工作区状态读取编排（workspace_status：一次读取里先 git status、
                            HEAD 可解析时紧接着只读 git log，历史成败单独记录在快照的 historyError 上、
@@ -1202,6 +1224,10 @@ tests/
                            残缺 UTF-8 不解码成另一个值）、
                            命令窗口计划与状态判定
                            （command_window_plan_tests）、环境块合并（environment_block_tests）、
+                           集中环境策略（git_environment_tests：分类名单、数字注入项识别、
+                           继承重定向变量的核对与只含名字的告知文本；配套
+                           git_environment_fixture_tests 在双仓库+外置索引的劫持环境里驱动
+                           生产查询与命令窗口，证明读取与允许的写操作仍绑定所选目标）、
                            刷新与任务协调（task_coordinator_tests：用可控的乱序完成测试旧结果丢弃、
                            请求合并、并发防重、失败也要重读、通知丢失后释放槽位）、
                            列表视图记忆（list_view_memory_tests：条目移动/消失后的选择映射；

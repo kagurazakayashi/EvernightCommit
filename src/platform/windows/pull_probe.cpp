@@ -4,7 +4,6 @@
 
 #include "git/workspace_status.h"
 #include "platform/windows/git_query_result.h"
-#include "platform/windows/subprocess.h"
 #include "platform/windows/win_path.h"
 
 namespace gc::platform {
@@ -165,7 +164,7 @@ PullProbeDeps MakePullProbeDeps(unsigned long timeoutMilliseconds) {
   deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
     // 输出按字节数取（含 --name-only -z 里的 NUL），路径因此能原样用；完整度判定见 MakeGitQueryResult。
-    return MakeGitQueryResult(RunHiddenCaptured(exePath, arguments, directory, timeoutMilliseconds));
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
   };
   return deps;
 }
