@@ -27,9 +27,11 @@ struct UndoProbeDeps {
   git::GitQueryRunner runner;
 };
 
-// 只读地发起一组撤回预检查询（分支 / HEAD 完整 ID / 父提交 / 标题 / 远端跟踪引用 / 工作区状态），
+// 只读地发起一组撤回预检查询（分支 / HEAD 完整 ID / 父提交 / 提交对象自己的 parent 行 /
+// 是否浅仓库 / 目标父对象可读性 / 标题 / 远端跟踪引用 / 工作区状态），
 // 并把回答交给 git/undo_commit_plan 判读。全程隐藏窗口子进程，不弹命令窗口、不写对象库、
-// 不访问远端；HEAD 不可解析时根本不发依赖它的三条查询（那种仓库本来也没有可撤回的提交）。
+// 不访问远端；HEAD 不可解析时根本不发依赖它的那几条查询（那种仓库本来也没有可撤回的提交），
+// 历史视图里没有父提交时也不发「父对象可读性」那条查询（没有目标可问）。
 [[nodiscard]] git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
                                                            const UndoProbeDeps& deps);
 
