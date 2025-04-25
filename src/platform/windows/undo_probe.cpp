@@ -44,18 +44,35 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
   queries.headCommit =
       RunQuery(deps.runner, request.exePath, dir, git::BuildUndoHeadCommitArguments(dir));
 
-  // HEAD 可解析才追问父提交、标题与远端包含：那种查询在空仓库里必然非 0 退出，
+  // HEAD 可解析才追问父提交、父对象、浅仓库状态、标题与远端包含：那种查询在空仓库里必然非 0 退出，
   // 不是错误却要解释；而且没有 HEAD ID 也没有可查询的目标。
   const git::UndoQueryRead headRead = git::ReadUndoQuery(queries.headCommit);
   if (headRead.outcome == git::UndoQueryOutcome::answered &&
       !git::BuildUndoRemoteContainsArguments(dir, headRead.firstLine).empty()) {
     queries.commitDependentRan = true;
-    queries.parents = RunQuery(deps.runner, request.exePath, dir, git::BuildUndoParentsArguments(dir));
+    const std::wstring& headSha = headRead.firstLine;  // 已经过完整对象 ID 形态校验
+    queries.parents =
+        RunQuery(deps.runner, request.exePath, dir, git::BuildUndoParentsArguments(dir, headSha));
+    queries.commitObject =
+        RunQuery(deps.runner, request.exePath, dir, git::BuildUndoCommitObjectArguments(dir, headSha));
+    queries.shallowState = RunQuery(deps.runner, request.exePath, dir,
+                                    git::BuildUndoShallowStateArguments(dir));
+    // 只问「历史视图给出的那个第一父」读不读得到；两份证据一致时它就是撤回的目标，
+    // 不一致时判读层本来就会拒绝，不需要再多问一条。
+    const std::wstring firstParent = git::UndoFirstReportedParent(queries.parents);
+    const std::vector<std::wstring> parentObjectArguments =
+        git::BuildUndoParentObjectArguments(dir, firstParent);
+    if (!parentObjectArguments.empty()) {
+      queries.parentObjectRan = true;
+      queries.parentObjectQueryOid = firstParent;
+      queries.parentObject =
+          RunQuery(deps.runner, request.exePath, dir, parentObjectArguments);
+    }
     queries.headSummary =
-        RunQuery(deps.runner, request.exePath, dir, git::BuildUndoHeadSummaryArguments(dir));
+        RunQuery(deps.runner, request.exePath, dir, git::BuildUndoHeadSummaryArguments(dir, headSha));
     queries.remoteRefs = RunQuery(deps.runner, request.exePath, dir, git::BuildUndoRemoteRefsArguments(dir));
-    queries.remoteContains = RunQuery(deps.runner, request.exePath, dir,
-                                      git::BuildUndoRemoteContainsArguments(dir, headRead.firstLine));
+    queries.remoteContains =
+        RunQuery(deps.runner, request.exePath, dir, git::BuildUndoRemoteContainsArguments(dir, headSha));
   }
   queries.status = RunQuery(deps.runner, request.exePath, dir, git::BuildWorkspaceStatusArguments(dir));
   return git::InterpretUndoPreflight(queries);
