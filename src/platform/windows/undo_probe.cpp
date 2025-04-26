@@ -44,21 +44,21 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
   queries.headCommit =
       RunQuery(deps.runner, request.exePath, dir, git::BuildUndoHeadCommitArguments(dir));
 
-  // HEAD 可解析才追问父提交、父对象、浅仓库状态、标题与远端包含：那种查询在空仓库里必然非 0 退出，
-  // 不是错误却要解释；而且没有 HEAD ID 也没有可查询的目标。
+  // HEAD 可解析才追問父提交、父對象、淺倉庫狀態、標題與遠端包含：那種查詢在空倉庫裡必然非 0 退出，
+  // 不是錯誤卻要解釋；而且沒有 HEAD ID 也沒有可查詢的目標。
   const git::UndoQueryRead headRead = git::ReadUndoQuery(queries.headCommit);
   if (headRead.outcome == git::UndoQueryOutcome::answered &&
       !git::BuildUndoRemoteContainsArguments(dir, headRead.firstLine).empty()) {
     queries.commitDependentRan = true;
-    const std::wstring& headSha = headRead.firstLine;  // 已经过完整对象 ID 形态校验
+    const std::wstring& headSha = headRead.firstLine;  // 已經過完整對象 ID 形態校驗
     queries.parents =
         RunQuery(deps.runner, request.exePath, dir, git::BuildUndoParentsArguments(dir, headSha));
     queries.commitObject =
         RunQuery(deps.runner, request.exePath, dir, git::BuildUndoCommitObjectArguments(dir, headSha));
     queries.shallowState = RunQuery(deps.runner, request.exePath, dir,
                                     git::BuildUndoShallowStateArguments(dir));
-    // 只问「历史视图给出的那个第一父」读不读得到；两份证据一致时它就是撤回的目标，
-    // 不一致时判读层本来就会拒绝，不需要再多问一条。
+    // 只問「歷史視圖給出的那個第一父」讀不讀得到；兩份證據一致時它就是撤回的目標，
+    // 不一致時判讀層本來就會拒絕，不需要再多問一條。
     const std::wstring firstParent = git::UndoFirstReportedParent(queries.parents);
     const std::vector<std::wstring> parentObjectArguments =
         git::BuildUndoParentObjectArguments(dir, firstParent);
@@ -101,7 +101,7 @@ git::UndoHeadFacts CaptureUndoHeadSnapshot(const std::wstring& exePath,
 
 UndoProbeOutcome RunUndoProbeLoad(const UndoProbeRequest& request) {
   UndoProbeOutcome outcome;
-  outcome.repositoryDirectory = request.repositoryDirectory;  // 原样回显：判别在界面线程。
+  outcome.repositoryDirectory = request.repositoryDirectory;  // 原樣回顯：判別在界面線程。
   outcome.facts = CollectUndoPreflight(request, MakeUndoProbeDeps(request.timeoutMilliseconds));
   return outcome;
 }

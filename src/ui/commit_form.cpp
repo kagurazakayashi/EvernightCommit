@@ -213,11 +213,16 @@ void CommitForm::ClearFields() {
   SetCoauthors({});
 }
 
-void CommitForm::ClearMessageFields() {
-  // 提交成功之后清掉「这次写了什么」，作者那一栏是可复用的身份，留着下次接着用。
-  SetControlText(summary_, L"");
-  SetControlText(description_, L"");
-  SetCoauthors({});
+void CommitForm::ClearCommittedFields(bool subject, bool description, bool coauthors) {
+  if (subject) {
+    SetControlText(summary_, L"");
+  }
+  if (description) {
+    SetControlText(description_, L"");
+  }
+  if (coauthors) {
+    SetCoauthors({});
+  }
 }
 
 void CommitForm::SetCoauthors(std::vector<std::wstring> entries) {

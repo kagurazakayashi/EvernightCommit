@@ -13,7 +13,7 @@ namespace gc::git {
 
 // 「撤回最近提交」的可移植決策邏輯（本模組不碰任何 Win32 API、不起子進程、不讀檔案系統）：
 //   1) 構造點擊瞬間要重新發起的幾條只讀預檢查詢的參數（HEAD／分支／父提交／遠端跟蹤引用／工作區狀態）；
-//   2) 把平台層帶回的 GitQueryResult 判讀成一份乾淨的事實（UndoPreflightFacts）；
+//   2) 把平臺層帶回的 GitQueryResult 判讀成一份乾淨的事實（UndoPreflightFacts）；
 //   3) 把事實核對成「可以撤回／必須拒絕」，並湊出送進命令窗口的參數與確認文字。
 //
 // 撤回的語義就是「把當前分支引用挪回它最新一次提交的第一父提交」：只移動那一個引用，
@@ -30,7 +30,7 @@ namespace gc::git {
 //   兩條路徑都不再使用 `git reset --soft`（它沒有「預期舊值」這個前提：確認到執行之間分支被
 //   別的流程推進的話，軟撤回會從那個新位置再退一步，撤掉根本不屬於用戶確認的那條提交），
 //   也不再拿可變的 `HEAD` 當作目標名稱——兩個分支可以指向同一個提交，`HEAD` 換指另一個分支後，
-//   「分支引用名 + 完整舊值」才是唯一可靠的綁定對象。
+//   「分支引用名 + 完整舊值」纔是唯一可靠的綁定對象。
 //   符號引用（HEAD 究竟還指著哪個分支）無法由單條 update-ref 一起核對：本程序用「確認後、
 //   啟動命令窗口前的同步復核」加上引用名綁定來處理，並在確認文字裡如實說明這個殘餘窗口，
 //   不自稱鎖住了任意外部寫入者（完整事務需要 git update-ref --stdin，命令窗口沒有 stdin 通道）。
@@ -39,7 +39,7 @@ namespace gc::git {
 //   * `rev-list --parents -n 1 <原完整ID>`：Git 的**歷史視圖**。淺倉庫的歷史邊界會讓它把有父的
 //     提交報成沒有父（父對象沒被抓下來，關係被切斷），所以它單獨不可信。
 //   * `cat-file commit <原完整ID>`：提交**對象自己**記錄的 parent 行。淺克隆仍保留完整對象，
-//     因此這裡能看到被歷史視圖隱藏的父；兩者不一致就说明父關係不可信。
+//     因此這裡能看到被歷史視圖隱藏的父；兩者不一致就說明父關係不可信。
 //   * `rev-parse --is-shallow-repository`：倉庫是不是淺倉庫。真正根提交只有在「兩處都說沒有父」
 //     **且**倉庫不是淺倉庫時才成立，才會進入刪除引用的路徑。
 //   * `cat-file -t --quiet <第一父完整ID>`：要挪去的那一個提交對象在本地讀不讀得到。
@@ -60,7 +60,7 @@ namespace gc::git {
 //   * 各查詢全部帶 `--no-optional-locks`；`for-each-ref --format=%(refname)` 一行一個引用名，
 //     refs/refname 不會含換行，按行取用安全。
 //   * symbolic-ref／rev-parse／cat-file -t 都帶 `--quiet`：「不在分支上」「HEAD 不可解析」
-//     「對象不存在」是以退出碼 1 + 空輸出作答的正常結論，不是錯誤；其餘非 0 退出才是 Git 报了問題。
+//     「對象不存在」是以退出碼 1 + 空輸出作答的正常結論，不是錯誤；其餘非 0 退出纔是 Git 報了問題。
 
 // ---- 只讀預檢的查詢參數（全部顯式 -C 綁定倉庫根，不依賴進程全局目錄） ----
 
@@ -114,13 +114,13 @@ struct UndoQueryRead {
 [[nodiscard]] UndoQueryRead ReadUndoQuery(const GitQueryResult& result);
 
 // 從 rev-list --parents 的回答裡取出「歷史視圖給出的第一個父提交 ID」。
-// 平台層用它決定要不要追問那個父對象讀不讀得到；解析只此一份，判讀函數不另猜一輪。
+// 平臺層用它決定要不要追問那個父對象讀不讀得到；解析只此一份，判讀函數不另猜一輪。
 // 沒有父、自身 ID 不合格或查詢沒答上來時返回空串（調用方據此跳過那條查詢）。
 [[nodiscard]] std::wstring UndoFirstReportedParent(const GitQueryResult& parentsQuery);
 
 // ---- 撤回目標（父關係）的分類 ----
 
-// 一份「rev-list 的歷史視圖 + 提交對象自己記錄的父 + 淺倉庫狀態 + 目標父對象可讀性」合成出来的
+// 一份「rev-list 的歷史視圖 + 提交對象自己記錄的父 + 淺倉庫狀態 + 目標父對象可讀性」合成出來的
 // 分類。只有 verifiedRoot／singleParent／mergeParents 三種是可撤回的，其餘一律明確拒絕。
 enum class UndoTargetKind {
   undetermined = 0,    // 查詢失敗、輸出不合約定：沒問出可採信的答案
@@ -135,7 +135,7 @@ enum class UndoTargetKind {
 [[nodiscard]] std::wstring_view UndoTargetKindLabel(UndoTargetKind kind) noexcept;
 
 struct UndoTargetEvidence {
-  bool queried = false;  // 三條對象/淺倉庫查詢有没有發過（HEAD 不可解析時根本不發）
+  bool queried = false;  // 三條對象/淺倉庫查詢有沒有發過（HEAD 不可解析時根本不發）
   UndoTargetKind kind = UndoTargetKind::undetermined;
   std::wstring failure;  // 非可撤回分類時面向界面的完整說明
 
@@ -166,7 +166,7 @@ struct UndoHeadFacts {
   std::vector<std::wstring> parentObjectIds;  // rev-list 的歷史視圖，每個都通過完整 ID 校驗
   bool selfMatchesHead = false;               // rev-list 的自身 ID 與 headObjectId 一致
 
-  UndoTargetEvidence target;  // 與 parentObjectIds 一起讀：分類决定能不能撤回、撤回去哪兒
+  UndoTargetEvidence target;  // 與 parentObjectIds 一起讀：分類決定能不能撤回、撤回去哪兒
 
   std::wstring headSummary;  // 僅供確認文字展示；查不到留空，不影響可撤回性判定
 };
@@ -199,7 +199,7 @@ struct UndoPreflightFacts {
   WorkspaceModel model;  // statusOk 時有效：衝突檢查與「現有改動將一起保留」的條目數都取自它
 };
 
-// 預檢查詢的原始結果打包：平台層按順序執行只讀查詢後原樣交給判讀函數，
+// 預檢查詢的原始結果打包：平臺層按順序執行只讀查詢後原樣交給判讀函數，
 // 「哪些查詢發了、哪些因 HEAD 不可解析／沒有合格父 ID 而跳過」用布爾標記如實帶入，判讀函數自己不猜。
 struct UndoPreflightQueries {
   GitQueryResult symbolicRef;
@@ -217,7 +217,7 @@ struct UndoPreflightQueries {
   GitQueryResult status;  // porcelain v2 NUL 分隔輸出
 };
 
-// 把一組原始查詢判讀成事實。純函數：所有輸入都是平台層帶回的结果，可用樁輸出完整測試。
+// 把一組原始查詢判讀成事實。純函數：所有輸入都是平臺層帶回的結果，可用樁輸出完整測試。
 [[nodiscard]] UndoPreflightFacts InterpretUndoPreflight(const UndoPreflightQueries& queries);
 
 // ---- 確認後的同步復核（只複查 HEAD 與分支這兩件事） ----
@@ -225,7 +225,7 @@ struct UndoPreflightQueries {
 // 把「symbolic-ref + rev-parse」兩條查詢的結果判成 UndoHeadFacts 的簡化形態
 // （不含父提交與摘要）。界面在用戶點頭之後、啟動命令窗口之前復核用：
 // 兩處 branchRef 與 headObjectId 任一不同，說明點擊之後 HEAD／分支又變了，必須放棄本次執行。
-// 注意：父關係綁定在不可變的對象 ID 上，不會随外部進程改變，所以復核不必重問父提交；
+// 注意：父關係綁定在不可變的對象 ID 上，不會隨外部進程改變，所以復核不必重問父提交；
 // 而「分支引用還得確實指著那個舊值」由執行命令裡的預期舊值由 Git 原子核對。
 [[nodiscard]] UndoHeadFacts InterpretUndoHeadSnapshot(const GitQueryResult& symbolicRef,
                                                       const GitQueryResult& headCommit);
@@ -234,7 +234,7 @@ struct UndoPreflightQueries {
 
 struct UndoCommitPlanInput {
   UndoPreflightFacts facts;
-  RepositoryWorkflowState workflow;      // Git 目錄里的流程痕跡（平台層探測，與提交同一來源）
+  RepositoryWorkflowState workflow;      // Git 目錄裡的流程痕跡（平臺層探測，與提交同一來源）
   std::wstring repositoryRoot;           // 剛剛讀回的工作區根
   CapturedSnapshot captured;             // 點擊瞬間界面顯示的摘要（用於「現狀已變」說明）
 };
@@ -259,14 +259,14 @@ struct UndoCommitPlan {
   std::wstring stateChangeNote;         // 非空 → 點擊之後倉庫現狀確實變了
   std::wstring targetDisplay;           // 撤回目標的展示文本（父提交短 ID 或「尚無提交」）
 
-  // 方案綁定的三件事，測試與界面診斷都直接讀它們，不從 arguments 里反推：
+  // 方案綁定的三件事，測試與界面診斷都直接讀它們，不從 arguments 裡反推：
   std::wstring targetRef;               // 完整分支引用（refs/heads/…），絕不是 HEAD
   std::wstring expectedOldObjectId;     // 用戶確認時那個分支引用的完整舊值
   std::wstring newObjectId;             // 撤回後分支應指向的完整 ID；根提交路徑為空（刪除引用）
   UndoTargetKind targetKind = UndoTargetKind::undetermined;
 };
 
-// 撤回目標的分支引用名校驗：必須是 refs/ 開頭的完整引用名，且不含會破壞命令行/说明书形態的字符。
+// 撤回目標的分支引用名校驗：必須是 refs/ 開頭的完整引用名，且不含會破壞命令行/說明書形態的字符。
 // Git 自己還會再按 refname 規則核對一次；這裡只是不讓一個來歷不明的名字進入命令。
 [[nodiscard]] bool IsSafeUndoTargetRef(std::wstring_view branchRef);
 

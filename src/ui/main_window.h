@@ -19,6 +19,7 @@
 #include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
+#include "platform/windows/commit_probe.h"
 #include "platform/windows/fetch_probe.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
@@ -56,6 +57,9 @@ struct CommandLaunchOptions {
   std::wstring messageFile;
   // 这次是「创建提交」：只有确认它创建成功，界面才清空已提交的标题/描述/合作者。
   bool commitOperation = false;
+  // 这次「创建提交」真正提交的那一份表单内容（标题/描述/合作者）。命令窗口跑的那几分钟里
+  // 用户完全可能又打了新东西，收尾时只有「屏幕上还是这一份」的栏目才允许清空。
+  git::CommitFormData committedForm;
   // 这次是「撤回最近提交」：成功时把恢复线索（原提交完整 ID）拼进结果说明。
   bool undoOperation = false;
   std::wstring restoreHint;
@@ -217,14 +221,35 @@ private:
   void SetAuthorField(HWND window, const std::wstring& text);
 
   // ---- 创建提交（本步骤）----
-  // 点击「创建提交」：先按界面现有的事实做一轮快速拒绝（表单、时间、暂存内容），
-  // 通过了才发起一次只读重读，等仓库现状回来之后再把确认框摆到用户面前。
-  // 提交前重新核对是必要的：列表可能是几分钟前读的，期间外部终端完全可能改了同一个仓库。
+  // 一次「创建提交」要走三段只读动作，全程不碰命令窗口，直到最后一步才发命令：
+  //   点击 → 后台重读工作区状态（列表）→ 后台问一组身份事实（预检）→ 确认框
+  //   → 点头 → 同一组查询原样重发一遍（执行前复核）→ 对得上才启动命令窗口。
+  // 确认范围与实际索引的一致就靠这两趟同构查询：确认框摆的是预检那一份，
+  // 发命令前逐条复核的也是那一份，启动时的工作目录与 git.exe 一律取自方案本身。
   void CreateCommit(HWND window);
-  // 用刚刚读回的仓库现状合成方案、写提交信息文件、给出确认框；确认后才启动命令窗口。
-  void ConfirmAndLaunchCommit(HWND window);
-  // 放弃这次提交（核对失败、用户取消、启动失败）：删掉刚写的信息文件并把原因写进状态栏。
-  void AbandonCommitAttempt(HWND window, std::wstring_view reason, std::wstring_view messageFile);
+  // 列表读回来后发起身份预检（确认框之前的那一趟）。
+  void RequestCommitPreflightProbe(HWND window);
+  // 预检/复核回来：按 pendingCommit_.stage 分派，迟到的或换了仓库的结果一律作废。
+  void OnCommitProbeCompleted(HWND window, uint64_t completionSerial);
+  // 预检回来：合成方案（确认框摆的就是这份方案），点头后把方案与预检事实一起留下，
+  // 再做执行前复核。
+  void HandleCommitPreflightProbe(HWND window, const platform::CommitProbeOutcome& outcome);
+  // 点头之后、发命令之前：把预检那组查询原样重发一遍。
+  void RequestCommitExecutionRecheck(HWND window);
+  // 复核回来：逐条比对「确认框上那一份」与「刚刚读回的这一份」，任何一条不符就不发命令。
+  void HandleCommitRecheckProbe(HWND window, const platform::CommitProbeOutcome& outcome);
+  // 在命令窗口里启动一条已复核通过的提交方案（工作目录与 git.exe 都取自方案绑定的身份）。
+  void LaunchCommit(HWND window, const git::CommitPlan& plan, const git::CommitFormData& committedForm);
+  // 放弃这次提交（核对失败、用户取消、复核不过）：删掉刚写的信息文件（还没交给 Git 的那份），
+  // 把原因写进状态栏，表单一个字都不动。
+  void AbandonCommitAttempt(HWND window, std::wstring_view reason);
+  // 这次尝试到此为止：清掉阶段标记、点击瞬间的摘要、预检事实与方案。
+  // 信息文件归本方案保管时（还没进命令窗口）一并回收；命令已经启动的那一路必须传 false，
+  // 因为那份文件此刻是 ActiveOperation 的财产，Git 可能还在读。
+  void ReleaseCommitAttempt(bool reclaimMessageFile);
+  // 还有没有一次「创建提交」在走它自己的只读流程（重读/预检/复核）：其它写操作入口据此拒绝，
+  // 免得两条流程同时改同一份索引。
+  [[nodiscard]] bool CommitAttemptActive() const noexcept { return pendingCommit_.stage != CommitStage::none; }
   // 把一段墙上时间换算成「交给 Git 的值 + 给人看的说明」；失败时写原因并返回 false。
   [[nodiscard]] bool BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
                                            std::wstring* refusal) const;
@@ -233,10 +258,8 @@ private:
   void RefreshTimeControlsState(HWND window);
   // 恢复当前时间：控件回到此刻、清掉「用户改过时间」的记号（这是那条明确的退路）。
   void ResetCommitTimesToNow(HWND window);
-  // 提交创建成功后的表单收尾：清正文、留作者、时间回到此刻。
-  void AfterCommitSucceeded(HWND window);
-  // 不再等这次重读了（仓库被换掉、核对失败）：丢弃点击瞬间记下的那份摘要。
-  void ClearPendingCommitRead() noexcept { pendingCommit_.waitingForRead = false; }
+  // 提交创建成功后的表单收尾：只清「屏幕上还是当时提交的那一份」的栏目，作者与用户改过的时间留着。
+  void AfterCommitSucceeded(HWND window, const git::CommitFormData& committedForm);
 
   // ---- 撤回最近提交（本步骤）----
   // 点击「撤回最近提交」：核对写操作共同前提后，发起一轮只读预检（分支 / HEAD 完整 ID /
@@ -330,6 +353,8 @@ private:
     std::wstring messageFile;
     // 这次是「创建提交」：终态是成功才做表单收尾（见 OnCommandWindowCompleted）。
     bool commitOperation = false;
+    // 这次「创建提交」提交的那一份表单内容：收尾按它逐栏比对，屏幕上已经换成别的内容时不清。
+    git::CommitFormData committedForm;
     // 这次是「撤回最近提交」：成功时把恢复线索拼进结果说明（不自动恢复、不删 reflog）。
     bool undoOperation = false;
     std::wstring restoreHint;
@@ -350,11 +375,33 @@ private:
     git::CapturedSnapshot captured;
   };
 
-  // 一次「等待重读后再确认」的创建提交：点击瞬间把界面摘要留在这儿，
-  // 重读回来后与它对比；两者不一致时，确认框必须说明以刚读回的为准（不假装旧状态还成立）。
-  struct PendingCommitRead {
-    bool waitingForRead = false;
+  // 一次「创建提交」走到哪一步。重读、预检、复核共用同一个后台预检器与同一个阶段标记，
+  // 靠它分辨「回来的那份事实给谁用」，也让其它写操作的入口知道这里正占着这份索引：
+  //   preConfirmRead  —— 点击之后，后台重读工作区状态（确认框要摆刚刚读回的列表）；
+  //   preConfirmProbe —— 列表回来了，后台问那一组身份事实（确认框之前）；
+  //   executionRecheck—— 用户点头之后、发命令之前，同一组查询原样重发一遍。
+  // 确认框是模态的，弹出时界面仍停在 preConfirmProbe 上，不需要额外的阶段。
+  enum class CommitStage {
+    none = 0,
+    preConfirmRead,
+    preConfirmProbe,
+    executionRecheck,
+  };
+
+  // 一次进行中的「创建提交」。captured 是点击瞬间界面显示的摘要（确认框要交代它以刚读回的为准）；
+  // preflight/plan 只在走到确认框之后才有内容——复核比对的是「预检那一份」与「点头后重读的那一份」，
+  // 两者缺一就不发命令。plan.identity 里带着这次的信息文件路径：谁持有它，谁负责回收。
+  struct PendingCommit {
+    CommitStage stage = CommitStage::none;
     git::CapturedSnapshot captured;
+    platform::CommitProbeOutcome preflight;
+    git::CommitPlan plan;
+    // 确认框点头时那一份表单内容（标题/描述/合作者）：命令成功后的收尾按它逐栏比对，
+    // 期间用户另写的草稿不在清理范围内。
+    git::CommitFormData confirmedForm;
+    // 这次尝试写好的提交信息文件。还没交给命令窗口时由这里保管，作废时回收；
+    // 交给命令窗口之后所有权转给 ActiveOperation，那条路上绝不能再删（Git 可能还在读）。
+    std::wstring messageFile;
   };
 
   // pull 进行到哪一步。三个阶段共用同一个后台预检器，靠这个标记分辨「回来的那份事实给谁用」：
@@ -422,7 +469,10 @@ private:
   ActiveOperation activeOperation_;
   app::AppState state_;
   app::CommitFormSession formSession_;
-  PendingCommitRead pendingCommit_;
+  PendingCommit pendingCommit_;
+  // 「创建提交」的预检与执行前复核共用这一个后台预检器（同一组查询、同一个问法），
+  // 回来的那份事实给谁用，由 pendingCommit_.stage 分辨。
+  platform::CommitProbeWorker commitWorker_;
   PendingUndoProbe pendingUndo_;
   UiMetrics metrics_;
   std::wstring programInfo_;

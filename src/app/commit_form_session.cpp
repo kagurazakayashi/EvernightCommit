@@ -105,10 +105,18 @@ void CommitFormSession::Reset() {
   appliedAuthorDefault_.clear();
 }
 
-void CommitFormSession::NoteCommitted() {
-  edited_[Index(Field::subject)] = false;
-  edited_[Index(Field::description)] = false;
-  edited_[Index(Field::coauthors)] = false;
+void CommitFormSession::NoteCommitted(bool subject, bool description, bool coauthors) {
+  // 只撤「这一栏确实被清空了」的记号：没清的栏位里此刻坐着的是用户新写的草稿，
+  // 记号留下来才不会被后来的默认值悄悄盖掉。
+  if (subject) {
+    edited_[Index(Field::subject)] = false;
+  }
+  if (description) {
+    edited_[Index(Field::description)] = false;
+  }
+  if (coauthors) {
+    edited_[Index(Field::coauthors)] = false;
+  }
 }
 
 }  // namespace gc::app

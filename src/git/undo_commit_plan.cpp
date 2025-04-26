@@ -9,14 +9,14 @@
 namespace gc::git {
 namespace {
 
-// 远端引用列表在确认框里最多列几条；其余折成「等 N 个」。
+// 遠端引用列表在確認框裡最多列幾條；其餘折成「等 N 個」。
 constexpr size_t kMaxPublishRefList = 5;
 
-// 进 reflog 的说明：纯 ASCII、不含空格与引号，既是一条命令行参数就一个 token，
-// 也让确认框里逐字拼出来的命令行没有歧义。
+// 進 reflog 的說明：純 ASCII、不含空格與引號，既是一條命令行參數就一個 token，
+// 也讓確認框裡逐字拼出來的命令行沒有歧義。
 constexpr std::wstring_view kReflogReason = L"EvernightCommit:undo-last-commit";
 
-// 提交对象头部里「parent <完整ID>」这一行的前缀。
+// 提交對象頭部裡「parent <完整ID>」這一行的前綴。
 constexpr std::wstring_view kParentHeader = L"parent ";
 
 std::wstring LowerAscii(std::wstring_view text) {
@@ -33,9 +33,9 @@ bool HasPrefix(std::wstring_view text, std::wstring_view prefix) {
   return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
-// 短 ID 与完整 ID 的对照：Git 的 --short 长度随仓库增长，界面摘要里的短 ID 未必正好
-// 是 kShortObjectIdLength 个字符，因此「相等或一方是另一方的前缀」都算同一个提交；
-// 任何一边为空则视为不可比（不参与「现状已变」的判定）。
+// 短 ID 與完整 ID 的對照：Git 的 --short 長度隨倉庫增長，界面摘要裡的短 ID 未必正好
+// 是 kShortObjectIdLength 個字符，因此「相等或一方是另一方的前綴」都算同一個提交；
+// 任何一邊為空則視為不可比（不參與「現狀已變」的判定）。
 bool ShaDisplaysMatch(std::wstring_view left, std::wstring_view right) {
   if (left.empty() || right.empty()) {
     return true;
@@ -55,7 +55,7 @@ std::wstring RefusalWith(const UndoQueryRead& read, std::wstring_view fallback) 
   return std::wstring(fallback);
 }
 
-// 列表里每个 ID 都以短 ID 展示，供拒绝说明点名（最多 4 个，多的折成「等」）。
+// 列表裡每個 ID 都以短 ID 展示，供拒絕說明點名（最多 4 個，多的折成「等」）。
 std::wstring ListIds(const std::vector<std::wstring>& ids) {
   constexpr size_t kMaxListed = 4;
   std::wstring listed;
@@ -71,7 +71,7 @@ std::wstring ListIds(const std::vector<std::wstring>& ids) {
   return listed;
 }
 
-// rev-list --parents 的一行：「自身ID 父1 父2 …」。按空白拆 token，逐个校验完整对象 ID。
+// rev-list --parents 的一行：「自身ID 父1 父2 …」。按空白拆 token，逐個校驗完整對象 ID。
 bool ParseParentsLine(std::wstring_view line, std::wstring* selfId, std::vector<std::wstring>* parents,
                       std::wstring* failure) {
   std::vector<std::wstring> tokens;
@@ -118,10 +118,10 @@ bool ParseParentsLine(std::wstring_view line, std::wstring* selfId, std::vector<
   return true;
 }
 
-// 提交对象的原始文本：头部一行一个字段，第一个空行之后是正文。
-// 只取头部里的 parent 行——正文里完全可能出现「parent 」开头的句子，因此空行必须划清界限；
-// 字段续行以空格开头（gpgsig 就是这种形态），所以前缀一律按原始行判断，不先修剪空白。
-// 顺手核对有没有 tree 行：没有就说明这份输出根本不是一个提交对象的头部，不能用。
+// 提交對象的原始文本：頭部一行一個字段，第一個空行之後是正文。
+// 只取頭部裡的 parent 行——正文裡完全可能出現「parent 」開頭的句子，因此空行必須劃清界限；
+// 字段續行以空格開頭（gpgsig 就是這種形態），所以前綴一律按原始行判斷，不先修剪空白。
+// 順手核對有沒有 tree 行：沒有就說明這份輸出根本不是一個提交對象的頭部，不能用。
 bool ParseRecordedParents(std::wstring_view objectText, std::vector<std::wstring>* parents,
                           std::wstring* failure) {
   parents->clear();
@@ -192,13 +192,13 @@ std::wstring PublishEvidenceSentence(const UndoPreflightFacts& facts) {
   }
 }
 
-// 撤回目标的分支引用必须是一个完整、可用的引用名：Git 的 update-ref 按名字操作，
-// 名字含糊（相对名、HEAD、带空白或控制字符）就等于把目标交给一次二次解析，
-// 而「用户确认的那个分支」必须是一个不再变化的名字。
-// Git 自己还会按 refname 规则再核一次（非法名以非 0 拒绝），这里只把明显不能用的挡在边界上。
+// 撤回目標的分支引用必須是一個完整、可用的引用名：Git 的 update-ref 按名字操作，
+// 名字含糊（相對名、HEAD、帶空白或控制字符）就等於把目標交給一次二次解析，
+// 而「用戶確認的那個分支」必須是一個不再變化的名字。
+// Git 自己還會按 refname 規則再核一次（非法名以非 0 拒絕），這裡只把明顯不能用的擋在邊界上。
 bool RefnameShaped(std::wstring_view branchRef) {
   if (!HasPrefix(branchRef, L"refs/") || branchRef.size() <= std::wstring_view(L"refs/").size()) {
-    return false;  // 必须是 refs/ 下面的完整引用名，且「refs/」本身不算
+    return false;  // 必須是 refs/ 下面的完整引用名，且「refs/」本身不算
   }
   if (branchRef.back() == L'/') {
     return false;
@@ -209,7 +209,7 @@ bool RefnameShaped(std::wstring_view branchRef) {
   }
   for (const wchar_t c : branchRef) {
     if (c <= 0x20 || c == 0x7F || c == L'"' || c == L'\'' || c == L'`' || c == L'\\') {
-      return false;  // 空白、控制字符与引号类字符都不进命令行
+      return false;  // 空白、控制字符與引號類字符都不進命令行
     }
   }
   return true;
@@ -233,7 +233,7 @@ std::vector<std::wstring> BuildUndoHeadCommitArguments(std::wstring_view reposit
 std::vector<std::wstring> BuildUndoParentsArguments(std::wstring_view repositoryDirectory,
                                                     std::wstring_view headSha) {
   if (!LooksLikeFullObjectId(headSha)) {
-    return {};  // 不合格的 ID 根本不配送进 Git；调用方据此跳过这条查询。
+    return {};  // 不合格的 ID 根本不配送進 Git；調用方據此跳過這條查詢。
   }
   return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
                                    L"--no-replace-objects", L"rev-list", L"--parents", L"-n", L"1",
@@ -245,8 +245,8 @@ std::vector<std::wstring> BuildUndoHeadSummaryArguments(std::wstring_view reposi
   if (!LooksLikeFullObjectId(headSha)) {
     return {};
   }
-  // 与 git/commit_history 同样的防护：--no-decorate 关掉装饰、log.showSignature=false
-  // 覆盖用户配置，否则 %s 前后的杂项会污染这一行展示文本。
+  // 與 git/commit_history 同樣的防護：--no-decorate 關掉裝飾、log.showSignature=false
+  // 覆蓋用戶配置，否則 %s 前後的雜項會污染這一行展示文本。
   return std::vector<std::wstring>{L"-C",    std::wstring(repositoryDirectory), L"--no-optional-locks",
                                    L"--no-replace-objects", L"-c", L"log.showSignature=false", L"log",
                                    L"-1",    L"--no-decorate", L"--format=%s",
@@ -273,8 +273,8 @@ std::vector<std::wstring> BuildUndoParentObjectArguments(std::wstring_view repos
   if (!LooksLikeFullObjectId(parentSha)) {
     return {};
   }
-  // --quiet：对象不在本地时以退出码 1 + 空输出作答，这是一个明确答案（历史不完整），
-  // 而不是「查询失败」；类型不是提交则是另一回事，判读层按不一致处理。
+  // --quiet：對象不在本地時以退出碼 1 + 空輸出作答，這是一個明確答案（歷史不完整），
+  // 而不是「查詢失敗」；類型不是提交則是另一回事，判讀層按不一致處理。
   return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
                                    L"--no-replace-objects", L"cat-file", L"-t", L"--quiet",
                                    std::wstring(parentSha)};
@@ -288,7 +288,7 @@ std::vector<std::wstring> BuildUndoRemoteRefsArguments(std::wstring_view reposit
 std::vector<std::wstring> BuildUndoRemoteContainsArguments(std::wstring_view repositoryDirectory,
                                                            std::wstring_view headSha) {
   if (!LooksLikeFullObjectId(headSha)) {
-    return {};  // 不合格的 ID 根本不配送进 Git；调用方据此跳过这条查询。
+    return {};  // 不合格的 ID 根本不配送進 Git；調用方據此跳過這條查詢。
   }
   return std::vector<std::wstring>{L"-C",       std::wstring(repositoryDirectory),
                                    L"--no-optional-locks", L"--no-replace-objects", L"for-each-ref",
@@ -315,8 +315,8 @@ UndoQueryRead ReadUndoQuery(const GitQueryResult& result) {
     read.detail = L"Git 查询未能正常结束";
     return read;
   }
-  // 完整度排在退出码之前：半途断掉的输出既不能算「答完了」，也不能据它归出「没有这条配置」——
-  // 退出码 1 加上读不全的标准输出，只能说「这件事不知道」，不能说「Git 说没有」。
+  // 完整度排在退出碼之前：半途斷掉的輸出既不能算「答完了」，也不能據它歸出「沒有這條配置」——
+  // 退出碼 1 加上讀不全的標準輸出，只能說「這件事不知道」，不能說「Git 說沒有」。
   if (!result.outputComplete) {
     read.error = RepoError::outputIncomplete;
     read.detail =
@@ -335,9 +335,9 @@ UndoQueryRead ReadUndoQuery(const GitQueryResult& result) {
     return read;
   }
   if (result.exitCode == 1 && TrimWide(result.utf16Output).empty()) {
-    // --quiet 系查询的「正常没有」：symbolic-ref（不在分支上）、rev-parse --verify --quiet
-    // （HEAD 不可解析）与 cat-file -t --quiet（对象不在本地）都以退出码 1、无输出作答。
-    // 其余命令不该走到这里，判读方会按语义处理。
+    // --quiet 系查詢的「正常沒有」：symbolic-ref（不在分支上）、rev-parse --verify --quiet
+    // （HEAD 不可解析）與 cat-file -t --quiet（對象不在本地）都以退出碼 1、無輸出作答。
+    // 其餘命令不該走到這裡，判讀方會按語義處理。
     read.outcome = UndoQueryOutcome::noResult;
     return read;
   }
@@ -437,8 +437,8 @@ UndoHeadFacts InterpretUndoHeadSnapshot(const GitQueryResult& symbolicRef,
 
 namespace {
 
-// 浅仓库状态那条查询的判读：只认 Git 明确回答的 true/false。
-// 老版本 Git 不认这个选项时是「查询失败」，判成「问不出来」——判读层不猜。
+// 淺倉庫狀態那條查詢的判讀：只認 Git 明確回答的 true/false。
+// 老版本 Git 不認這個選項時是「查詢失敗」，判成「問不出來」——判讀層不猜。
 void InterpretShallowState(const UndoPreflightQueries& queries, UndoTargetEvidence* target) {
   const UndoQueryRead read = ReadUndoQuery(queries.shallowState);
   if (read.outcome != UndoQueryOutcome::answered) {
@@ -460,8 +460,8 @@ void InterpretShallowState(const UndoPreflightQueries& queries, UndoTargetEviden
                           L"）。";
 }
 
-// 父关系判定：rev-list 的历史视图 × 提交对象自己记录的 parent 行 × 浅仓库状态 × 目标父对象可读性。
-// 只有三种结论能进入方案：verifiedRoot、singleParent、mergeParents；其余都是明确拒绝的理由。
+// 父關係判定：rev-list 的歷史視圖 × 提交對象自己記錄的 parent 行 × 淺倉庫狀態 × 目標父對象可讀性。
+// 只有三種結論能進入方案：verifiedRoot、singleParent、mergeParents；其餘都是明確拒絕的理由。
 void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* facts) {
   UndoTargetEvidence& target = facts->target;
   target.queried = true;
@@ -483,8 +483,8 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
   target.recordedParentIds = recorded;
 
   if (!facts->parentsResolved) {
-    // rev-list 那一侧本来就没给出可采信的答案；父关系只能算问不出来，
-    // 绝不能因为「历史视图里没有父」就把它当成根提交——那正是浅边界的表现。
+    // rev-list 那一側本來就沒給出可採信的答案；父關係只能算問不出來，
+    // 絕不能因為「歷史視圖裡沒有父」就把它當成根提交——那正是淺邊界的表現。
     target.kind = UndoTargetKind::undetermined;
     target.failure = L"没能从历史视图里问出这条提交的父提交：" +
                      (facts->parentsFailure.empty() ? std::wstring(L"原因未知") : facts->parentsFailure);
@@ -502,7 +502,7 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
   }
 
   if (recorded.empty()) {
-    // 两处都说没有父：只有仓库明确不是浅仓库时，这才是真正的根提交。
+    // 兩處都說沒有父：只有倉庫明確不是淺倉庫時，這纔是真正的根提交。
     if (!target.shallowQueried) {
       target.kind = UndoTargetKind::undetermined;
       target.failure = L"这条提交没有记录任何父关系，可 Git 没能回答这个仓库是不是浅仓库（" +
@@ -519,7 +519,7 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
     return;
   }
 
-  // 目标父提交必须真的在本地：读不到就说明历史不完整，撤回去的是一个不存在的提交。
+  // 目標父提交必須真的在本地：讀不到就說明歷史不完整，撤回去的是一個不存在的提交。
   const std::wstring& wanted = reported.front();
   if (!queries.parentObjectRan || queries.parentObjectQueryOid != wanted) {
     target.kind = UndoTargetKind::undetermined;
@@ -576,7 +576,7 @@ UndoPreflightFacts InterpretUndoPreflight(const UndoPreflightQueries& queries) {
       }
       InterpretUndoTarget(queries, &facts.head);
 
-      // 标题只用于确认文字，查不到不算致命。
+      // 標題只用於確認文字，查不到不算致命。
       const UndoQueryRead summary = ReadUndoQuery(queries.headSummary);
       if (summary.outcome == UndoQueryOutcome::answered) {
         facts.head.headSummary = summary.firstLine;
@@ -592,7 +592,7 @@ UndoPreflightFacts InterpretUndoPreflight(const UndoPreflightQueries& queries) {
         facts.publishFailureDetail = RefusalWith(contains, L"远端包含查询未成功");
       } else if (contains.outcome != UndoQueryOutcome::answered ||
                  refs.outcome != UndoQueryOutcome::answered) {
-        // for-each-ref 就算一无所获也是退出码 0；走到这里说明回答不合约定，按查不到处理。
+        // for-each-ref 就算一無所獲也是退出碼 0；走到這裡說明回答不合約定，按查不到處理。
         facts.publish = UndoPublishEvidence::queryFailed;
         facts.publishFailureDetail = L"for-each-ref 的回答不符合约定（意外的退出码或输出）。";
       } else if (!contains.lines.empty()) {
@@ -696,14 +696,14 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
                  L"无法确定撤回的目标。请点“刷新”后重试。");
   }
 
-  // ---- 撤回目标分類：只有三種結論可以進入命令構造 ----
+  // ---- 撤回目標分類：只有三種結論可以進入命令構造 ----
   const UndoTargetEvidence& target = head.target;
   const bool rootUndo = target.kind == UndoTargetKind::verifiedRoot;
   const bool mergeCommit = target.kind == UndoTargetKind::mergeParents;
   std::wstring newOid;
   switch (target.kind) {
     case UndoTargetKind::verifiedRoot:
-      break;  // 真正根提交：唯一允许删除引用的情形。
+      break;  // 真正根提交：唯一允許刪除引用的情形。
     case UndoTargetKind::singleParent:
     case UndoTargetKind::mergeParents:
       newOid = head.parentObjectIds.front();

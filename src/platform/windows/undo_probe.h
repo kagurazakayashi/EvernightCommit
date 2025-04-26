@@ -8,48 +8,48 @@
 
 namespace gc::platform {
 
-// 一次「撤回前预检」的请求。工作区根取识别结果，不取输入框原文；
-// repositoryDirectory 原样回显进结果，界面据此判别「这份预检还是不是这个仓库的」。
+// 一次「撤回前預檢」的請求。工作區根取識別結果，不取輸入框原文；
+// repositoryDirectory 原樣回顯進結果，界面據此判別「這份預檢還是不是這個倉庫的」。
 struct UndoProbeRequest {
   std::wstring exePath;
   std::wstring repositoryDirectory;
   unsigned long timeoutMilliseconds = 0;
 };
 
-// 一次后台预检的成品：判读结果加请求携带的目录回显。
+// 一次後臺預檢的成品：判讀結果加請求攜帶的目錄回顯。
 struct UndoProbeOutcome {
   git::UndoPreflightFacts facts;
   std::wstring repositoryDirectory;
 };
 
-// 执行依赖以回调注入，使「问哪几条、怎么判读」的编排可脱离 Win32 用真实临时仓库测试。
+// 執行依賴以回調注入，使「問哪幾條、怎麼判讀」的編排可脫離 Win32 用真實臨時倉庫測試。
 struct UndoProbeDeps {
   git::GitQueryRunner runner;
 };
 
-// 只读地发起一组撤回预检查询（分支 / HEAD 完整 ID / 父提交 / 提交对象自己的 parent 行 /
-// 是否浅仓库 / 目标父对象可读性 / 标题 / 远端跟踪引用 / 工作区状态），
-// 并把回答交给 git/undo_commit_plan 判读。全程隐藏窗口子进程，不弹命令窗口、不写对象库、
-// 不访问远端；HEAD 不可解析时根本不发依赖它的那几条查询（那种仓库本来也没有可撤回的提交），
-// 历史视图里没有父提交时也不发「父对象可读性」那条查询（没有目标可问）。
+// 只讀地發起一組撤回預檢查詢（分支 / HEAD 完整 ID / 父提交 / 提交對象自己的 parent 行 /
+// 是否淺倉庫 / 目標父對象可讀性 / 標題 / 遠端跟蹤引用 / 工作區狀態），
+// 並把回答交給 git/undo_commit_plan 判讀。全程隱藏窗口子進程，不彈命令窗口、不寫對象庫、
+// 不訪問遠端；HEAD 不可解析時根本不發依賴它的那幾條查詢（那種倉庫本來也沒有可撤回的提交），
+// 歷史視圖裡沒有父提交時也不發「父對象可讀性」那條查詢（沒有目標可問）。
 [[nodiscard]] git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
                                                            const UndoProbeDeps& deps);
 
-// 用本工程的隐藏窗口子进程执行器装配 UndoProbeDeps。
+// 用本工程的隱藏窗口子進程執行器裝配 UndoProbeDeps。
 [[nodiscard]] UndoProbeDeps MakeUndoProbeDeps(unsigned long timeoutMilliseconds);
 
-// 用户在确认框点头之后、启动命令窗口之前，界面要同步复核 HEAD 与分支——只发这两条
-// 极轻的只读查询，直接在调用线程执行（本地毫秒级；超时/启动失败如实记进 queryOk=false，
-// 由调用方按「复核不过就放弃执行」处理）。返回的 facts 只填 symbolic-ref/rev-parse 相关字段。
+// 用戶在確認框點頭之後、啓動命令窗口之前，界面要同步複核 HEAD 與分支——只發這兩條
+// 極輕的只讀查詢，直接在調用線程執行（本地毫秒級；超時/啓動失敗如實記進 queryOk=false，
+// 由調用方按「複核不過就放棄執行」處理）。返回的 facts 只填 symbolic-ref/rev-parse 相關字段。
 [[nodiscard]] git::UndoHeadFacts CaptureUndoHeadSnapshot(const std::wstring& exePath,
                                                          const std::wstring& repositoryDirectory,
                                                          unsigned long timeoutMilliseconds);
 
-// 工作线程任务体：装配依赖并执行预检，请求携带的目录原样带进结果。
+// 工作線程任務體：裝配依賴並執行預檢，請求攜帶的目錄原樣帶進結果。
 [[nodiscard]] UndoProbeOutcome RunUndoProbeLoad(const UndoProbeRequest& request);
 
-// 预检的后台控制器：查询在工作线程执行，GUI 线程不冻结；
-// 连续点击时旧结果按序号作废，不会把上一个仓库的事实混进确认框。
+// 預檢的後臺控制器：查詢在工作線程執行，GUI 線程不凍結；
+// 連續點擊時舊結果按序號作廢，不會把上一個倉庫的事實混進確認框。
 using UndoProbeWorker = GitTaskWorker<UndoProbeRequest, UndoProbeOutcome>;
 
 }  // namespace gc::platform
