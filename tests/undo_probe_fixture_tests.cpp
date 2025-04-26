@@ -1,19 +1,19 @@
-// 「撤回最近提交」预检与执行效果的集成测试：在夹具自建的临时仓库里，用真实 Git 驱动
-// 生产编排（platform::CollectUndoPreflight）与生产方案层（git::BuildUndoCommitPlan），
-// 再把方案合成的命令原样交给真实 Git 执行，逐项核对：
-//   * 分支 / HEAD 完整 ID / 父提交 / 提交对象自己的 parent 行 / 是否浅仓库 / 标题（含中文）/
-//     远端跟踪包含 / 工作区状态的判读；
-//   * 撤回只移动分支引用：索引逐条不差、工作区文件字节不变，原提交改动与既有
-//     暂存改动一起留在索引（本步骤要求的「不承诺自动分成两堆」）；
-//   * 两条路径都带预期旧值：普通提交走 git update-ref --create-reflog <分支引用> <父ID> <原ID>，
-//     真正根提交走 git update-ref -d <分支引用> <原ID>；旧值对不上时 Git 自己拒绝、分支一步不动，
-//     分支被别人推进或换成别的分支之后，旧方案一律落空（含确认后的同步复核）；
-//   * 删除根提交那条分支引用之后，找回只靠原提交完整 ID（本程序不承诺一条可能被删掉的 reflog）；
-//   * 浅克隆 depth=1（历史边界）明确拒绝且不删引用；depth=2（目标父在本地）可以撤回但要强制确认；
-//   * 合并提交以第一父为目标并要求「强制撤回」；真实冲突现场与游离 HEAD 明确拒绝；
-//   * 「已知已发布」用本地 bare 远端 + push 制造（该 bare fixture 供后续 fetch/push 步骤复用），
-//     未推送的新提交则回落为普通确认。
-// 只在夹具自己创建并认领所有权的临时目录里跑 Git，远端只能是同根下的本地 bare 仓库，绝不接触网络。
+// 「撤回最近提交」預檢與執行效果的集成測試：在夾具自建的臨時倉庫裡，用真實 Git 驅動
+// 生產編排（platform::CollectUndoPreflight）與生產方案層（git::BuildUndoCommitPlan），
+// 再把方案合成的命令原樣交給真實 Git 執行，逐項核對：
+//   * 分支 / HEAD 完整 ID / 父提交 / 提交對象自己的 parent 行 / 是否淺倉庫 / 標題（含中文）/
+//     遠端跟蹤包含 / 工作區狀態的判讀；
+//   * 撤回只移動分支引用：索引逐條不差、工作區文件字節不變，原提交改動與既有
+//     暫存改動一起留在索引（本步驟要求的「不承諾自動分成兩堆」）；
+//   * 兩條路徑都帶預期舊值：普通提交走 git update-ref --create-reflog <分支引用> <父ID> <原ID>，
+//     真正根提交走 git update-ref -d <分支引用> <原ID>；舊值對不上時 Git 自己拒絕、分支一步不動，
+//     分支被別人推進或換成別的分支之後，舊方案一律落空（含確認後的同步複核）；
+//   * 刪除根提交那條分支引用之後，找回只靠原提交完整 ID（本程序不承諾一條可能被刪掉的 reflog）；
+//   * 淺克隆 depth=1（歷史邊界）明確拒絕且不刪引用；depth=2（目標父在本地）可以撤回但要強制確認；
+//   * 合併提交以第一父為目標並要求「強制撤回」；真實衝突現場與遊離 HEAD 明確拒絕；
+//   * 「已知已發佈」用本地 bare 遠端 + push 製造（該 bare fixture 供後續 fetch/push 步驟複用），
+//     未推送的新提交則回落為普通確認。
+// 只在夾具自己創建並認領所有權的臨時目錄裡跑 Git，遠端只能是同根下的本地 bare 倉庫，絕不接觸網絡。
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -61,12 +61,12 @@ bool LinesContain(const std::vector<std::wstring>& lines, std::wstring_view need
   return false;
 }
 
-// 用夹具的隔离执行器装配生产预检依赖：查询走与界面完全相同的代码路径。
+// 用夾具的隔離執行器裝配生產預檢依賴：查詢走與界面完全相同的代碼路徑。
 gc::platform::UndoProbeDeps MakeProbeDeps(GitFixture& fixture) {
   gc::platform::UndoProbeDeps deps;
   deps.runner = [&fixture](const std::wstring& exePath, const std::wstring& directory,
                            const std::vector<std::wstring>& arguments) -> GitQueryResult {
-    static_cast<void>(exePath);  // 夹具固定使用自己验证过的 git.exe，工作目录仍由参数显式绑定。
+    static_cast<void>(exePath);  // 夾具固定使用自己驗證過的 git.exe，工作目錄仍由參數顯式綁定。
     const GitRun run = fixture.Run(arguments, directory);
     GitQueryResult result;
     result.started = run.started;
@@ -88,7 +88,7 @@ UndoPreflightFacts Probe(GitFixture& fixture) {
   return gc::platform::CollectUndoPreflight(request, MakeProbeDeps(fixture));
 }
 
-// 从真实预检事实直接生产方案（工作区状态已在预检里重读，这里不再另读）。
+// 從真實預檢事實直接生產方案（工作區狀態已在預檢裡重讀，這裡不再另讀）。
 UndoCommitPlan PlanFromProbe(GitFixture& fixture, const UndoPreflightFacts& facts) {
   UndoCommitPlanInput input;
   input.facts = facts;
@@ -96,12 +96,12 @@ UndoCommitPlan PlanFromProbe(GitFixture& fixture, const UndoPreflightFacts& fact
   return gc::git::BuildUndoCommitPlan(input);
 }
 
-// 索引的逐条清单（模式 + 对象 ID + 阶段 + 路径）：软撤回前后必须一字不差。
+// 索引的逐條清單（模式 + 對象 ID + 階段 + 路徑）：軟撤回前後必須一字不差。
 std::wstring IndexListing(GitFixture& fixture) {
   return fixture.RunCheckedInRepo({L"ls-files", L"-s"}).out;
 }
 
-// 按原始字节读工作区里的文件（路径相对临时根）。
+// 按原始字節讀工作區裡的文件（路徑相對臨時根）。
 std::string ReadFileBytes(GitFixture& fixture, std::wstring_view rootRelativePath) {
   const std::filesystem::path path(fixture.PathInRoot(rootRelativePath));
   std::ifstream file(path, std::ios::binary);
@@ -111,8 +111,8 @@ std::string ReadFileBytes(GitFixture& fixture, std::wstring_view rootRelativePat
   return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
-// 建「本地 bare 远端 + 两条已推送的提交」的仓库，返回 bare 仓库的绝对路径。
-// 浅克隆用例从它按 --depth 抓取，所以来源必须先过夹具的远端守卫（只允许临时根内的本地路径）。
+// 建「本地 bare 遠端 + 兩條已推送的提交」的倉庫，返回 bare 倉庫的絕對路徑。
+// 淺克隆用例從它按 --depth 抓取，所以來源必須先過夾具的遠端守衛（只允許臨時根內的本地路徑）。
 std::wstring MakePushedOrigin(GitFixture& fixture) {
   fixture.InitBareRepository(L"origin.git");
   const std::wstring bareDir = fixture.PathInRoot(L"origin.git");
@@ -132,8 +132,8 @@ std::wstring MakePushedOrigin(GitFixture& fixture) {
   return bareDir;
 }
 
-// 从本地来源按 depth 浅克隆出新工作区并设为活动工作区（夹具的 CloneRepository 不带 --depth，
-// 这里走同一条隔离执行路径，来源路径已由上面的守卫核过）。
+// 從本地來源按 depth 淺克隆出新工作區並設為活動工作區（夾具的 CloneRepository 不帶 --depth，
+// 這裡走同一條隔離執行路徑，來源路徑已由上面的守衛核過）。
 void ShallowCloneTo(GitFixture& fixture, const std::wstring& source, int depth,
                     std::wstring_view directoryName) {
   const GitRun clone =
@@ -146,7 +146,7 @@ void ShallowCloneTo(GitFixture& fixture, const std::wstring& source, int depth,
   fixture.SetActiveRepository(directoryName);
 }
 
-// 分支自己的 reflog 是否还在（git reflog show <分支> 能不能答上来）。
+// 分支自己的 reflog 是否還在（git reflog show <分支> 能不能答上來）。
 bool BranchReflogReadable(GitFixture& fixture, std::wstring_view branch) {
   return fixture.Run({L"reflog", L"show", L"--format=%gD", std::wstring(branch)}, fixture.RepoDir())
       .Success();
@@ -154,7 +154,7 @@ bool BranchReflogReadable(GitFixture& fixture, std::wstring_view branch) {
 
 }  // namespace
 
-// ---- 普通分支：两个提交、干净工作区 ----
+// ---- 普通分支：兩個提交、乾淨工作區 ----
 
 GC_TEST(undo_probe_reports_real_branch_head_parents_and_summary) {
   GitFixture fixture;
@@ -177,7 +177,7 @@ GC_TEST(undo_probe_reports_real_branch_head_parents_and_summary) {
                        facts.head.parentObjectIds[0] == fixture.ParentShaOfHead(),
                    "单父提交的父 ID 应与仓库一致");
   GC_CHECK_MESSAGE(facts.head.selfMatchesHead, "rev-list 的自身 ID 必须与 rev-parse 的 HEAD 对上");
-  // 两份父关系证据在真实仓库里必须互相吻合，浅仓库状态也要问得出来。
+  // 兩份父關係證據在真實倉庫裡必須互相吻合，淺倉庫狀態也要問得出來。
   GC_CHECK(facts.head.target.queried);
   GC_CHECK_MESSAGE(facts.head.target.kind == UndoTargetKind::singleParent,
                    "真实仓库里的普通提交应判成单父：" + ToUtf8(facts.head.target.failure));
@@ -192,23 +192,23 @@ GC_TEST(undo_probe_reports_real_branch_head_parents_and_summary) {
   GC_CHECK(facts.statusOk);
   GC_CHECK_MESSAGE(facts.model.staged.empty() && facts.model.unstaged.empty(),
                    "刚提交完应是干净工作区");
-  // 没配任何远端：无从判断，绝不能谎称「本地未发现」。
+  // 沒配任何遠端：無從判斷，絕不能謊稱「本地未發現」。
   GC_CHECK(facts.publish == UndoPublishEvidence::noRemoteRefs);
 
   const UndoCommitPlan plan = PlanFromProbe(fixture, facts);
   GC_CHECK_MESSAGE(!plan.blocked, ToUtf8(plan.blockedReason));
-  GC_CHECK(plan.requiresForce);  // 无法判断发布状态也要走强制确认
+  GC_CHECK(plan.requiresForce);  // 無法判斷髮布狀態也要走強制確認
   GC_CHECK_MESSAGE(
       plan.arguments.size() == 7 && plan.arguments[0] == L"update-ref" &&
           plan.arguments[1] == L"--create-reflog" && plan.arguments[2] == L"-m" &&
           plan.arguments[4] == L"refs/heads/main" &&
           plan.arguments[5] == facts.head.parentObjectIds[0] && plan.arguments[6] == facts.head.headObjectId,
       "普通撤回必须是带预期旧值的 git update-ref --create-reflog <分支引用> <父ID> <原ID>");
-  GC_CHECK(!LinesContain(plan.arguments, L"HEAD"));  // 绝不用可变的 HEAD 当目标名
+  GC_CHECK(!LinesContain(plan.arguments, L"HEAD"));  // 絕不用可變的 HEAD 當目標名
   GC_CHECK(plan.targetRef == L"refs/heads/main");
   GC_CHECK(plan.expectedOldObjectId == facts.head.headObjectId);
   GC_CHECK(plan.newObjectId == facts.head.parentObjectIds[0]);
-  // Git 自己也是这么答的：那条引用当前确实指着确认过的旧值。
+  // Git 自己也是這麼答的：那條引用當前確實指着確認過的舊值。
   GC_CHECK_MESSAGE(fixture.RevParseVerified(L"refs/heads/main") == plan.expectedOldObjectId,
                    "方案绑定的旧值必须就是分支引用的实际值");
 }
@@ -224,9 +224,9 @@ GC_TEST(undo_probe_on_repository_without_commits_blocks_everything) {
                    "「尚无提交」是明确答案，不是查询失败：" + ToUtf8(facts.head.queryFailure));
   GC_CHECK(facts.head.onBranch);
   GC_CHECK(!facts.head.headResolved);
-  GC_CHECK(!facts.publishQueried);  // 没有 HEAD 就没有可查询的对象：没问过必须如实记着
+  GC_CHECK(!facts.publishQueried);  // 沒有 HEAD 就沒有可查詢的對象：沒問過必須如實記着
   GC_CHECK(facts.publish == UndoPublishEvidence::notRun);
-  GC_CHECK(!facts.head.target.queried);  // 父关系那三条查询同样一条都没发
+  GC_CHECK(!facts.head.target.queried);  // 父關係那三條查詢同樣一條都沒發
   GC_CHECK(facts.statusOk);
 
   const UndoCommitPlan plan = PlanFromProbe(fixture, facts);
@@ -235,7 +235,7 @@ GC_TEST(undo_probe_on_repository_without_commits_blocks_everything) {
   GC_CHECK_MESSAGE(Contains(plan.blockedReason, L"还没有任何提交"), ToUtf8(plan.blockedReason));
 }
 
-// ---- 执行效果：索引与工作区分毫不动 ----
+// ---- 執行效果：索引與工作區分毫不動 ----
 
 GC_TEST(executing_normal_undo_keeps_index_bytes_and_staged_changes_together) {
   GitFixture fixture;
@@ -244,13 +244,13 @@ GC_TEST(executing_normal_undo_keeps_index_bytes_and_staged_changes_together) {
   fixture.WriteFile(L"a.txt", "A-1\n");
   fixture.StageAll();
   fixture.Commit(L"root");
-  // c2 的内容：一个新文件 + 中文路径文件 + 对 a.txt 的修改。
+  // c2 的內容：一個新文件 + 中文路徑文件 + 對 a.txt 的修改。
   fixture.WriteFile(L"b.txt", "B-来自c2\n");
   fixture.WriteFile(L"中文目录/丙文件.txt", "丙-内容\n");
   fixture.WriteFile(L"a.txt", "A-2\n");
   fixture.StageAll();
   fixture.Commit(L"c2");
-  // 提交之后用户又暂存了一个文件、还改了 a.txt 没暂存：撤回后这些必须与原提交改动一起留着。
+  // 提交之後用戶又暫存了一個文件、還改了 a.txt 沒暫存：撤回後這些必須與原提交改動一起留着。
   fixture.WriteFile(L"d.txt", "D-我早就暂存了\n");
   fixture.Stage({L"d.txt"});
   fixture.WriteFile(L"a.txt", "A-3-没暂存\n");
@@ -274,15 +274,15 @@ GC_TEST(executing_normal_undo_keeps_index_bytes_and_staged_changes_together) {
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "索引必须一字不差：只动了分支引用");
   GC_CHECK(ReadFileBytes(fixture, L"repo\\a.txt") == aBytesBefore);
   GC_CHECK(ReadFileBytes(fixture, L"repo\\中文目录\\丙文件.txt") == bingBytesBefore);
-  // 原 c2 的改动 + 用户已有的暂存，一起表现为「已暂存的更改」；未暂存那一份仍在未暂存侧。
-  // 同一文件两侧都有改动时 porcelain 合成一条 MM 记录，这与两侧列表各显示一条不矛盾。
+  // 原 c2 的改動 + 用戶已有的暫存，一起表現為「已暫存的更改」；未暫存那一份仍在未暫存側。
+  // 同一文件兩側都有改動時 porcelain 合成一條 MM 記錄，這與兩側列表各顯示一條不矛盾。
   const std::vector<std::wstring> porcelain = fixture.StatusPorcelain();
   GC_CHECK(LinesContain(porcelain, L"A  b.txt"));
   GC_CHECK(LinesContain(porcelain, L"A  中文目录/丙文件.txt"));
   GC_CHECK(LinesContain(porcelain, L"A  d.txt"));
   GC_CHECK(LinesContain(porcelain, L"MM a.txt"));
-  // 恢复线索必须带着原提交完整 ID，而且按它写着的那条命令真的能原样找回（用例手工执行它，
-  // 本程序自己绝不动手）。
+  // 恢復線索必須帶着原提交完整 ID，而且按它寫着的那條命令真的能原樣找回（用例手工執行它，
+  // 本程序自己絕不動手）。
   GC_CHECK(Contains(plan.restoreHint, headBefore));
   GC_CHECK(Contains(plan.restoreHint, L"git update-ref"));
   GC_CHECK(Contains(plan.restoreHint, L"refs/heads/main"));
@@ -291,8 +291,8 @@ GC_TEST(executing_normal_undo_keeps_index_bytes_and_staged_changes_together) {
 }
 
 GC_TEST(executing_normal_undo_creates_branch_reflog_even_when_logging_is_off) {
-  // --create-reflog 的实际效果只能在真实仓库里看：把 reflog 记录关掉之后，
-  // 普通提交不会留下分支 reflog，而撤回那条命令必须照样留下可以核对的找回线索。
+  // --create-reflog 的實際效果只能在真實倉庫裡看：把 reflog 記錄關掉之後，
+  // 普通提交不會留下分支 reflog，而撤回那條命令必須照樣留下可以核對的找回線索。
   GitFixture fixture;
   PrepareFixture(fixture);
   fixture.WriteUserConfig("[core]\n\tlogAllRefUpdates = false\n");
@@ -346,7 +346,7 @@ GC_TEST(executing_root_commit_undo_leaves_unborn_branch_with_contents_staged) {
           plan.arguments[2] == L"-m" && plan.arguments[3] == L"EvernightCommit:undo-last-commit" &&
           plan.arguments[4] == L"refs/heads/main" && plan.arguments[5] == facts.head.headObjectId,
       "根提交必须走带预期旧值的 git update-ref -d <分支引用> <完整ID>，不造空提交冒充");
-  GC_CHECK(!LinesContain(plan.arguments, L"HEAD"));  // 删的是确认过的分支引用，不是 HEAD
+  GC_CHECK(!LinesContain(plan.arguments, L"HEAD"));  // 刪的是確認過的分支引用，不是 HEAD
   GC_CHECK(plan.newObjectId.empty());
   GC_CHECK(Contains(plan.previewText, L"真正的第一个提交"));
   GC_CHECK(Contains(plan.previewText, L"预期旧值"));
@@ -356,7 +356,7 @@ GC_TEST(executing_root_commit_undo_leaves_unborn_branch_with_contents_staged) {
   const std::wstring indexBefore = IndexListing(fixture);
   const std::string bytesBefore = ReadFileBytes(fixture, L"repo\\only.txt");
 
-  // 先验证 Git 自己的旧值核对：值不匹配时拒绝执行，分支原样不动。
+  // 先驗證 Git 自己的舊值核對：值不匹配時拒絕執行，分支原樣不動。
   const GitRun wrongValue =
       fixture.Run({L"update-ref", L"-d", L"refs/heads/main",
                    L"9999999999999999999999999999999999999999"},
@@ -370,19 +370,19 @@ GC_TEST(executing_root_commit_undo_leaves_unborn_branch_with_contents_staged) {
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "索引必须一字不差");
   GC_CHECK(ReadFileBytes(fixture, L"repo\\only.txt") == bytesBefore);
   GC_CHECK(LinesContain(fixture.StatusPorcelain(), L"A  only.txt"));
-  // 分支引用已经不在了：本程序不把「reflog 还在」当成找回依据，只在文字里说明可靠的是完整 ID。
+  // 分支引用已經不在了：本程序不把「reflog 還在」當成找回依據，只在文字裡說明可靠的是完整 ID。
   static_cast<void>(BranchReflogReadable(fixture, L"main"));
   GC_CHECK(Contains(plan.restoreHint, originalSha));
   GC_CHECK(Contains(plan.restoreHint, L"不作为找回依据"));
   GC_CHECK(Contains(plan.previewText, L"不把它当作找回依据"));
 
-  // 按线索给的那条命令原样找回（用例手工执行；本程序不会自动恢复）。
+  // 按線索給的那條命令原樣找回（用例手工執行；本程序不會自動恢復）。
   fixture.RunCheckedInRepo({L"update-ref", L"refs/heads/main", originalSha});
   GC_CHECK(fixture.HeadSha() == originalSha);
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "找回后索引仍一字不差");
 }
 
-// ---- 风险分级：合并提交 / 已发布 / 真实冲突 / 游离 HEAD ----
+// ---- 風險分級：合併提交 / 已發佈 / 真實衝突 / 遊離 HEAD ----
 
 GC_TEST(merge_commit_undo_targets_first_parent_and_forces_confirmation) {
   GitFixture fixture;
@@ -425,7 +425,7 @@ GC_TEST(merge_commit_undo_targets_first_parent_and_forces_confirmation) {
 GC_TEST(remote_bare_origin_marks_commit_as_known_published) {
   GitFixture fixture;
   PrepareFixture(fixture);
-  // 本地 bare fixture：本步骤用它制造「已知已发布」，后续 fetch/pull/push 步骤复用同一形态。
+  // 本地 bare fixture：本步驟用它製造「已知已發佈」，後續 fetch/pull/push 步驟複用同一形態。
   fixture.InitBareRepository(L"origin.git");
   const std::wstring bareDir = fixture.PathInRoot(L"origin.git");
   fixture.InitRepository(L"repo");
@@ -452,14 +452,14 @@ GC_TEST(remote_bare_origin_marks_commit_as_known_published) {
     GC_CHECK(Contains(plan.previewText, L"已知已发布"));
     GC_CHECK(Contains(plan.previewText, L"refs/remotes/origin/main"));
     GC_CHECK(Contains(plan.previewText, L"历史分叉"));
-    // 「强制」不换命令：仍然是那条带预期旧值的温和引用移动，绝不带 push 相关任何东西。
+    // 「強制」不換命令：仍然是那條帶預期舊值的溫和引用移動，絕不帶 push 相關任何東西。
     GC_CHECK(plan.arguments[0] == L"update-ref" && LinesContain(plan.arguments, L"--create-reflog"));
     GC_CHECK(!LinesContain(plan.arguments, L"push"));
     GC_CHECK(plan.arguments[5] == parentSha);
     GC_CHECK(plan.arguments[6] == pushedSha);
   }
 
-  // 之后再提交一条没 push 的：本地引用查不到它，回落为普通确认（但话要说不能保证从未 push）。
+  // 之後再提交一條沒 push 的：本地引用查不到它，回落為普通確認（但話要說不能保證從未 push）。
   fixture.WriteFile(L"c.txt", "3\n");
   fixture.StageAll();
   fixture.Commit(L"还没推的提交");
@@ -498,7 +498,7 @@ GC_TEST(real_conflict_and_detached_head_are_refused) {
   GC_CHECK_MESSAGE(Contains(plan.blockedReason, L"冲突"), ToUtf8(plan.blockedReason));
   GC_CHECK(plan.arguments.empty());
 
-  // 游离 HEAD：没有分支引用可挪，同样明确拒绝（即便工作区恢复干净）。
+  // 遊離 HEAD：沒有分支引用可挪，同樣明確拒絕（即便工作區恢復乾淨）。
   static_cast<void>(fixture.Run({L"merge", L"--abort"}, fixture.RepoDir()));
   fixture.RunCheckedInRepo({L"checkout", L"-q", L"--detach", L"HEAD"});
   facts = Probe(fixture);
@@ -509,7 +509,7 @@ GC_TEST(real_conflict_and_detached_head_are_refused) {
   GC_CHECK_MESSAGE(Contains(plan.blockedReason, L"游离 HEAD"), ToUtf8(plan.blockedReason));
 }
 
-// ---- 原子旧值前提：确认之后仓库被别人改动时，旧方案一律落空 ----
+// ---- 原子舊值前提：確認之後倉庫被別人改動時，舊方案一律落空 ----
 
 GC_TEST(executed_plan_is_rejected_when_the_branch_moved_after_confirmation) {
   GitFixture fixture;
@@ -528,7 +528,7 @@ GC_TEST(executed_plan_is_rejected_when_the_branch_moved_after_confirmation) {
   const std::wstring confirmedSha = facts.head.headObjectId;
   GC_CHECK(plan.expectedOldObjectId == confirmedSha);
 
-  // 确认框还开着的时候，另一个终端在这条分支上又提交了一次：旧值已经不再成立。
+  // 確認框還開着的時候，另一個終端在這條分支上又提交了一次：舊值已經不再成立。
   fixture.WriteFile(L"c.txt", "3\n");
   fixture.StageAll();
   fixture.Commit(L"确认之后别人推进的提交");
@@ -541,7 +541,7 @@ GC_TEST(executed_plan_is_rejected_when_the_branch_moved_after_confirmation) {
   GC_CHECK_MESSAGE(fixture.HeadSha() == movedSha, "分支一步都不能动：绝不能从新位置再退一步");
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "被拒绝的执行不留任何索引痕迹");
 
-  // 重新预检读到的是推进后的 HEAD：新方案绑的是新的旧值，与旧方案不是同一条命令。
+  // 重新預檢讀到的是推進後的 HEAD：新方案綁的是新的舊值，與舊方案不是同一條命令。
   const UndoCommitPlan fresh = PlanFromProbe(fixture, Probe(fixture));
   GC_REQUIRE_MESSAGE(!fresh.blocked, ToUtf8(fresh.blockedReason));
   GC_CHECK_MESSAGE(fresh.expectedOldObjectId == movedSha, "重新预检必须读回推进后的 HEAD");
@@ -561,7 +561,7 @@ GC_TEST(undo_binds_the_confirmed_branch_ref_not_the_mutable_head) {
   fixture.Commit(L"第二条");
   const std::wstring sharedSha = fixture.HeadSha();
   const std::wstring parentSha = fixture.ParentShaOfHead();
-  fixture.RunCheckedInRepo({L"branch", L"other", L"main"});  // 另一个分支指着同一个提交
+  fixture.RunCheckedInRepo({L"branch", L"other", L"main"});  // 另一個分支指着同一個提交
 
   const UndoPreflightFacts facts = Probe(fixture);
   const UndoCommitPlan plan = PlanFromProbe(fixture, facts);
@@ -569,8 +569,8 @@ GC_TEST(undo_binds_the_confirmed_branch_ref_not_the_mutable_head) {
   GC_CHECK(plan.targetRef == L"refs/heads/main");
   GC_CHECK(!LinesContain(plan.arguments, L"HEAD"));
 
-  // 确认之后、执行之前，用户把 HEAD 换到了同一条提交上的另一个分支：
-  // 提交没变，但「用户确认的那个分支」已经变了——界面那一步同步复核必须看出这件事。
+  // 確認之後、執行之前，用戶把 HEAD 換到了同一條提交上的另一個分支：
+  // 提交沒變，但「用戶確認的那個分支」已經變了——界面那一步同步複核必須看出這件事。
   fixture.RunCheckedInRepo({L"checkout", L"-q", L"other"});
   const UndoHeadFacts recheck =
       gc::platform::CaptureUndoHeadSnapshot(fixture.GitExe(), fixture.RepoDir(), 20000);
@@ -578,8 +578,8 @@ GC_TEST(undo_binds_the_confirmed_branch_ref_not_the_mutable_head) {
   GC_CHECK_MESSAGE(recheck.branchRef != facts.head.branchRef, "同步复核应看出分支被换掉");
   GC_CHECK_MESSAGE(recheck.headObjectId == sharedSha, "两个分支指向的是同一个提交");
 
-  // 万一那条命令还是被执行了，它按引用名绑定的目标也只可能是 refs/heads/main：
-  // other 与当前 HEAD 都不受影响，索引一字不动。
+  // 萬一那條命令還是被執行了，它按引用名綁定的目標也只可能是 refs/heads/main：
+  // other 與當前 HEAD 都不受影響，索引一字不動。
   const std::wstring indexBefore = IndexListing(fixture);
   fixture.RunCheckedInRepo(plan.arguments);
   GC_CHECK_MESSAGE(fixture.RevParseVerified(L"refs/heads/main") == parentSha,
@@ -590,7 +590,7 @@ GC_TEST(undo_binds_the_confirmed_branch_ref_not_the_mutable_head) {
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "索引必须一字不差");
 }
 
-// ---- 浅仓库：历史边界必须被认出来，绝不能当成根提交删掉分支 ----
+// ---- 淺倉庫：歷史邊界必須被認出來，絕不能當成根提交刪掉分支 ----
 
 GC_TEST(shallow_clone_depth_one_is_refused_and_keeps_the_branch) {
   GitFixture fixture;
@@ -600,13 +600,13 @@ GC_TEST(shallow_clone_depth_one_is_refused_and_keeps_the_branch) {
   const std::wstring parentSha = fixture.ParentShaOfHead();
   ShallowCloneTo(fixture, bareDir, 1, L"shallow");
 
-  // 先固定住真实仓库的形态：只有一条提交，父对象确实不在本地（这正是历史视图少报的原因）。
+  // 先固定住真實倉庫的形態：只有一條提交，父對象確實不在本地（這正是歷史視圖少報的原因）。
   GC_CHECK_MESSAGE(fixture.HeadSha() == tipSha, "浅克隆的 HEAD 应是远端那条 tip");
   GC_CHECK(fixture.CommitCount() == 1);
   const GitRun parentObject =
       fixture.Run({L"cat-file", L"-t", parentSha}, fixture.RepoDir());
   GC_CHECK_MESSAGE(!parentObject.Success(), "depth=1 的克隆里父对象应当读不到");
-  GC_CHECK(Contains(fixture.HeadCommitObject(), L"parent "));  // 对象自己仍记录着父
+  GC_CHECK(Contains(fixture.HeadCommitObject(), L"parent "));  // 對象自己仍記錄着父
 
   const UndoPreflightFacts facts = Probe(fixture);
   GC_REQUIRE_MESSAGE(facts.head.queryOk, ToUtf8(facts.head.queryFailure));
@@ -621,12 +621,12 @@ GC_TEST(shallow_clone_depth_one_is_refused_and_keeps_the_branch) {
   const UndoCommitPlan plan = PlanFromProbe(fixture, facts);
   GC_CHECK_MESSAGE(plan.blocked, "浅边界绝不能进入撤回：" + ToUtf8(plan.blockedReason));
   GC_CHECK(plan.arguments.empty());
-  GC_CHECK(!plan.requiresForce);  // 拒绝就是拒绝，不给「强制」留通道
+  GC_CHECK(!plan.requiresForce);  // 拒絕就是拒絕，不給「強制」留通道
   GC_CHECK_MESSAGE(Contains(plan.blockedReason, L"浅"), ToUtf8(plan.blockedReason));
   GC_CHECK_MESSAGE(Contains(plan.blockedReason, L"git fetch --unshallow"),
                    "要说明补全历史是用户自己的事：" + ToUtf8(plan.blockedReason));
 
-  // 什么都没被执行：分支、索引、工作区都还是浅克隆刚完成的样子。
+  // 什麼都沒被執行：分支、索引、工作區都還是淺克隆剛完成的樣子。
   GC_CHECK_MESSAGE(fixture.RevParseVerified(L"refs/heads/main") == tipSha, "分支引用绝不能被动过");
   GC_CHECK(fixture.HeadSha() == tipSha);
   GC_CHECK(ReadFileBytes(fixture, L"shallow\\b.txt") == "2\n");
@@ -657,6 +657,6 @@ GC_TEST(shallow_clone_depth_two_undoes_with_force_and_keeps_the_index) {
   fixture.RunCheckedInRepo(plan.arguments);
   GC_CHECK_MESSAGE(fixture.HeadSha() == parentSha, "分支应挪回那条本地可读的父提交");
   GC_CHECK_MESSAGE(IndexListing(fixture) == indexBefore, "浅仓库里同样只动引用：索引一字不差");
-  GC_CHECK(LinesContain(fixture.StatusPorcelain(), L"A  b.txt"));  // 原 tip 的改动留在暂存区
+  GC_CHECK(LinesContain(fixture.StatusPorcelain(), L"A  b.txt"));  // 原 tip 的改動留在暫存區
   GC_CHECK(ReadFileBytes(fixture, L"shallow2\\b.txt") == "2\n");
 }

@@ -839,9 +839,10 @@ void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalize
     app::RepoState repo;
     repo.status = app::RepoLoadStatus::detecting;
     state_.SetRepo(std::move(repo));
-    // 换仓库（或换 Git 程序）等于取消那次「等重读后再确认」的创建提交：
-    // 确认框要核对的是这个仓库的现状，仓库都换了，点下的那一次提交自然作废。
-    ClearPendingCommitRead();
+    // 换仓库（或换 Git 程序）等于取消那次「还在核对」的创建提交：
+    // 确认框要核对的是这个仓库的现状，仓库都换了，点下的那一次提交自然作废，
+    // 那时候写下的提交信息文件也没有 Git 会去读，一并回收。
+    ReleaseCommitAttempt(true);
     // 上一个仓库读来的身份默认值同样要作废：新仓库的配置可能完全不同，
     // 留着旧值会让界面把「旧仓库的默认作者」显示成新仓库的。
     state_.SetAuthor(app::AuthorState{});
@@ -884,7 +885,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   state_.SetRepo(std::move(repo));
   // 没有可用的工作区身份，就没有任何安全的查询落点：在途结果一律作废，列表清空。
   tasks_.UnbindRepository();
-  ClearPendingCommitRead();  // 同样也没有地方可提交了：那次等确认的创建提交作废。
+  ReleaseCommitAttempt(true);  // 同样也没有地方可提交了：那次还在核对的创建提交作废。
   refreshCycleActive_ = false;
   ClearWorkspace();
   state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
@@ -914,6 +915,9 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
     state_.SetStatusNote(state_.Repo().detection.message);
     tasks_.UnbindRepository();
     refreshCycleActive_ = false;
+    // 这一趟刷新本来就是「创建提交」点出来的：仓库现在没有可用工作区，那次尝试既等不到
+    // 工作区读取的结果，也没有地方再发查询，就地作废（不然阶段标记会一直挡着别的写操作）。
+    ReleaseCommitAttempt(true);
     ClearWorkspace();
     state_.SetAuthor(app::AuthorState{});
     UpdateCommandAvailability();
@@ -961,9 +965,9 @@ void MainWindow::ScheduleRefresh(HWND window) {
 void MainWindow::RunRefreshCycle(HWND window) {
   if (!state_.GitUsable() || state_.Info().repoPath.empty()) {
     refreshCycleActive_ = false;
-    // 这一轮根本不会发起读取：等着「读回来再确认」的那次创建提交必须一并取消，
-    // 否则那个标记会一直挂着，将来某次无关的读取完成时凭空弹出确认框。
-    ClearPendingCommitRead();
+    // 这一轮根本不会发起读取：还在核对仓库现状的那次创建提交必须一并取消，
+    // 否则那个阶段标记会一直挂着，将来某次无关的读取完成时凭空弹出确认框。
+    ReleaseCommitAttempt(true);
     return;
   }
   // 一次刷新同时覆盖顶部摘要与两个列表：在外部终端里切分支、提交、拉取之后，
@@ -1024,18 +1028,16 @@ void MainWindow::OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial
   ApplyWorkspaceLists();
   UpdateCommandAvailability();
   RefreshTexts(window);
-  if (pendingCommit_.waitingForRead) {
-    // 这一次读取是「创建提交」点下去之后发起的核对：现状读回来了，才轮到确认框出场。
-    pendingCommit_.waitingForRead = false;
+  if (pendingCommit_.stage == CommitStage::preConfirmRead) {
+    // 这一次读取是「创建提交」点下去之后的第一步核对：列表读回来了，才轮到身份预检出场。
     if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
       AbandonCommitAttempt(
           window,
           L"提交前核对仓库现状时没能读到 git status：" + state_.Workspace().message +
-              L" 因此没有打开命令窗口，也没有对仓库做任何改动。请改正后再点一次“创建提交”。",
-          {});
+              L" 因此没有打开命令窗口，也没有对仓库做任何改动。请改正后再点一次“创建提交”。");
       return;
     }
-    ConfirmAndLaunchCommit(window);
+    RequestCommitPreflightProbe(window);
     if (tasks_.RefreshStillQueued()) {
       // 核对期间又有人点过刷新：这一次不能因为弹了确认框就被吞掉。
       ScheduleRefresh(window);
@@ -1106,6 +1108,7 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.pathspecFile,
                                      options.messageFile,
                                      options.commitOperation,
+                                     options.committedForm,
                                      options.undoOperation,
                                      options.restoreHint,
                                      options.fetchOperation,
@@ -1786,6 +1789,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const std::wstring pathspecFile = activeOperation_.pathspecFile;
   const std::wstring messageFile = activeOperation_.messageFile;
   const bool commitOperation = activeOperation_.commitOperation;
+  const git::CommitFormData committedForm = activeOperation_.committedForm;
   const bool undoOperation = activeOperation_.undoOperation;
   const bool fetchOperation = activeOperation_.fetchOperation;
   const bool pullFetchOperation = activeOperation_.pullFetchOperation;
@@ -1814,7 +1818,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   // 用户可以直接改好再点一次（那种场合最不该丢的就是他刚写下来的东西）。
   if (commitOperation) {
     if (outcome.succeeded) {
-      AfterCommitSucceeded(window);
+      AfterCommitSucceeded(window, committedForm);
     } else {
       state_.SetFormNote(L"提交没有成功：标题、描述、作者与合作者一个字都没动，"
                          L"改好之后再点一次“创建提交”。命令窗口里留着 Git 的完整输出。");
@@ -2040,8 +2044,9 @@ void MainWindow::CreateCommit(HWND window) {
     state_.SetStatusNote(std::wstring(message));
     RefreshTexts(window);
   };
-  if (pendingCommit_.waitingForRead) {
-    refuse(L"已经有一次“创建提交”正在核对仓库现状，请等确认框出现，或先取消那一次。");
+  if (CommitAttemptActive()) {
+    refuse(L"已经有一次“创建提交”正在核对仓库现状（或正在做执行前复核），请等它的确认框出现，"
+           L"或先取消那一次。");
     return;
   }
   if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
@@ -2089,31 +2094,78 @@ void MainWindow::CreateCommit(HWND window) {
   pendingCommit_.captured.shortSha = state_.Repo().detection.shortSha;
   pendingCommit_.captured.hasHead = state_.Repo().detection.headResolved;
   pendingCommit_.captured.stagedItems = state_.WorkspaceModel().staged.size();
-  pendingCommit_.waitingForRead = true;
+  pendingCommit_.stage = CommitStage::preConfirmRead;
   ScheduleRefresh(window);
   state_.SetStatusNote(L"创建提交前先在后台重读仓库现状（只读查询，不弹命令窗口、不改动仓库），"
-                       L"读回来后给出确认框…");
+                       L"读回来后还要问齐这次提交要绑定的事实，然后给出确认框…");
   RefreshTexts(window);
 }
 
-void MainWindow::AbandonCommitAttempt(HWND window, std::wstring_view reason,
-                                      std::wstring_view messageFile) {
-  ClearPendingCommitRead();
-  platform::RemoveCommitMessageFile(messageFile);
+void MainWindow::ReleaseCommitAttempt(bool reclaimMessageFile) {
+  if (reclaimMessageFile && !pendingCommit_.messageFile.empty()) {
+    // 这份信息文件从没进过命令窗口，Git 不会来读它：随这次尝试一起回收。
+    platform::RemoveCommitMessageFile(pendingCommit_.messageFile);
+  }
+  pendingCommit_ = PendingCommit{};
+}
+
+void MainWindow::AbandonCommitAttempt(HWND window, std::wstring_view reason) {
+  ReleaseCommitAttempt(true);
   state_.SetStatusNote(std::wstring(reason));
   RefreshTexts(window);
 }
 
-void MainWindow::ConfirmAndLaunchCommit(HWND window) {
-  const auto abandon = [&](std::wstring_view reason) {
-    AbandonCommitAttempt(window, reason, {});
-  };
+void MainWindow::RequestCommitPreflightProbe(HWND window) {
+  pendingCommit_.stage = CommitStage::preConfirmProbe;
+  platform::CommitProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
+  commitWorker_.Request(window, kCommitProbeCompleted, std::move(request),
+                        [](const platform::CommitProbeRequest& pending) {
+                          return platform::RunCommitProbeLoad(pending);
+                        });
+  state_.SetStatusNote(L"创建提交前先在后台问齐这次提交要绑定的事实：工作区根与 Git 目录、完整分支引用、"
+                       L"HEAD 完整对象 ID、索引内容标识、Git 目录里的流程痕迹、有效配置里的提交者身份。"
+                       L"其中算索引内容用的 git write-tree 会把那棵树写进对象库、顺带刷新索引里过期的"
+                       L"文件状态（不产生提交、不移动分支、不碰工作区文件）；问回来后给出确认框…");
+  RefreshTexts(window);
+}
+
+void MainWindow::OnCommitProbeCompleted(HWND window, uint64_t completionSerial) {
+  platform::CommitProbeOutcome outcome;
+  if (!commitWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 后台控制器层：期间已发起更晚的一趟查询，这份结果不再有意义。
+  }
+  const CommitStage stage = pendingCommit_.stage;
+  if (stage != CommitStage::preConfirmProbe && stage != CommitStage::executionRecheck) {
+    return;  // 这一次尝试已经按「取消 / 换仓库 / 作废」结束，迟到的结果原样丢掉。
+  }
+  if (!state_.RepoUsable() ||
+      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
+    // 查询是在旧仓库上跑的：那份 HEAD/索引内容对当前界面显示的仓库毫无意义，
+    // 表单原样留着，用户对新仓库重新点一次即可。
+    AbandonCommitAttempt(window, L"预检完成时仓库已经换掉，这次提交没有发出任何命令，"
+                                 L"刚写的提交信息文件已删除。表单里的内容一个字都没动，"
+                                 L"请对现在的仓库重新点一次“创建提交”。");
+    return;
+  }
+  if (stage == CommitStage::preConfirmProbe) {
+    HandleCommitPreflightProbe(window, outcome);
+  } else {
+    HandleCommitRecheckProbe(window, outcome);
+  }
+}
+
+void MainWindow::HandleCommitPreflightProbe(HWND window, const platform::CommitProbeOutcome& outcome) {
+  const auto abandon = [&](std::wstring_view reason) { AbandonCommitAttempt(window, reason); };
 
   const git::CommitFormData data = commitForm_.Capture();
   const git::CommitFormValidity validity =
-      git::ValidateCommitForm(data, state_.Author().config.CommitterState());
+      git::ValidateCommitForm(data, outcome.facts.committer);
   if (!validity.Ok()) {
-    abandon(L"重读之后表单校验没通过，因此没有提交任何内容：" + validity.StatusText());
+    RunFormValidation(window);
+    abandon(L"预检回来之后表单校验没通过，因此没有提交任何内容：" + validity.StatusText());
     return;
   }
   git::GitIdentity author;
@@ -2153,14 +2205,18 @@ void MainWindow::ConfirmAndLaunchCommit(HWND window) {
             written.failureReason);
     return;
   }
+  // 文件已经存在了，先登记保管人：下面任何一条拒绝路径都要顺手回收它。
+  pendingCommit_.messageFile = written.path;
 
   git::CommitPlanInput input;
   input.model = state_.WorkspaceModel();
   input.detection = state_.Repo().detection;
-  input.workflow = platform::ProbeRepositoryWorkflowState(state_.Repo().detection.absoluteGitDir);
+  // 提交者可得性、那串身份文字与流程痕迹一律取自这一趟预检，不再取界面早前存下的那一份：
+  // 确认框上写的、复核时比对的必须是同一次查询问回来的同一个东西。
+  input.identity = outcome.facts;
+  input.gitExecutable = state_.Git().path;
   input.captured = pendingCommit_.captured;
-  input.committer = state_.Author().config.CommitterState();
-  input.committerIdentityText = state_.Author().config.Identity();
+  pendingCommit_.captured = git::CapturedSnapshot{};
   input.author = author;
   input.message = composed.message;
   input.messageUtf8Bytes = written.payloadBytes;
@@ -2170,39 +2226,87 @@ void MainWindow::ConfirmAndLaunchCommit(HWND window) {
   input.timesSynced = commitForm_.TimeSyncChecked();
 
   const git::CommitPlan plan = git::BuildCommitPlan(input);
-  ClearPendingCommitRead();
   if (plan.blocked) {
-    platform::RemoveCommitMessageFile(written.path);  // 没跑 Git，文件也就没人要读了。
-    state_.SetStatusNote(L"没有打开命令窗口，也没有对仓库做任何改动。" + plan.blockedReason);
-    RefreshTexts(window);
+    // 方案层拒绝时这条命令根本不存在，信息文件也就没人会去读：随这次尝试一起回收。
+    AbandonCommitAttempt(window, L"没有打开命令窗口，也没有对仓库做任何改动。" + plan.blockedReason);
     return;
   }
+
+  pendingCommit_.preflight = outcome;
+  pendingCommit_.plan = plan;
+  pendingCommit_.confirmedForm = data;
 
   const int answer = ::MessageBoxW(window, plan.previewText.c_str(), L"创建提交前请确认",
                                    MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
   if (answer != IDOK) {
     AbandonCommitAttempt(window,
                          L"已取消：没有打开命令窗口，也没有对仓库做任何改动。刚写的提交信息文件已删除，"
-                         L"表单里的内容一个字都没动。",
-                         written.path);
+                         L"表单里的内容一个字都没动。");
     return;
   }
+  RequestCommitExecutionRecheck(window);
+}
 
+void MainWindow::RequestCommitExecutionRecheck(HWND window) {
+  pendingCommit_.stage = CommitStage::executionRecheck;
+  platform::CommitProbeRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = state_.Repo().detection.root;
+  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
+  commitWorker_.Request(window, kCommitProbeCompleted, std::move(request),
+                        [](const platform::CommitProbeRequest& pending) {
+                          return platform::RunCommitProbeLoad(pending);
+                        });
+  state_.SetStatusNote(L"点头之后、发出命令之前，把预检那组只读查询原样重发一遍：工作区根与 Git 目录 / "
+                       L"完整分支引用 / HEAD 完整对象 ID / 索引内容标识 / 流程痕迹 / 提交者身份都对得上，"
+                       L"才启动那条 git commit…");
+  RefreshTexts(window);
+}
+
+void MainWindow::HandleCommitRecheckProbe(HWND window, const platform::CommitProbeOutcome& outcome) {
+  const std::wstring change =
+      git::DescribeCommitIdentityChange(pendingCommit_.plan.identity, outcome.facts);
+  if (!change.empty()) {
+    // 复核不过：作废的是「这一份现状」，不是用户写下的内容。表单原样留着，信息文件回收，
+    // 重读回来后由用户自己决定要不要对新现状再确认一次。
+    ::MessageBoxW(window, change.c_str(), L"执行前复核：仓库又变了", MB_OK | MB_ICONWARNING);
+    AbandonCommitAttempt(window,
+                         L"执行前复核发现现状与确认框上写的不一致，因此没有发出那条提交命令。"
+                         L"表单里的内容一个字都没动，仓库状态正在重读，"
+                         L"看清现状后如仍要提交请再点一次“创建提交”。");
+    ScheduleRefresh(window);
+    return;
+  }
+  // 方案取一份副本：启动流程要把它的内容搬进命令与选项，而这次尝试的记录在启动前就被清掉。
+  const git::CommitPlan plan = pendingCommit_.plan;
+  const git::CommitFormData committedForm = pendingCommit_.confirmedForm;
+  LaunchCommit(window, plan, committedForm);
+}
+
+void MainWindow::LaunchCommit(HWND window, const git::CommitPlan& plan,
+                              const git::CommitFormData& committedForm) {
   git::CommandWindowOperation operation;
   operation.operationId = plan.operationId;
   operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
+  // 启动参数一律取自这份「确认框上写的、并且刚刚复核过的」身份，不再回读界面此刻的状态：
+  // 命令属于那个仓库，就不能因为界面后来换了显示而跑到别的目录去。
+  operation.gitExecutable = plan.identity.gitExecutable;
+  operation.repositoryDirectory = plan.identity.repositoryDirectory;
   operation.arguments = plan.arguments;
   operation.environmentOverrides = plan.environmentOverrides;
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
-                        state_.Repo().detection.root + L"），本次提交 " +
-                        std::to_wstring(plan.stagedItems) + L" 项已暂存内容，等待 Git 退出码…";
+                        plan.identity.repositoryDirectory + L"），本次提交 " +
+                        std::to_wstring(plan.stagedItems) + L" 项已暂存内容（索引内容标识 " +
+                        git::ShortObjectId(plan.identity.indexTreeOid) + L"），等待 Git 退出码…";
   options.scopeNotice = plan.notice;
-  options.messageFile = written.path;
+  options.messageFile = plan.identity.messageFilePath;
   options.commitOperation = true;
+  options.committedForm = committedForm;
+  // 信息文件的所有权在这里转交给 ActiveOperation：只有拿到终态（或启动失败由执行路径回收）才删，
+  // 命令窗口里的 Git 可能还在读它。
+  ReleaseCommitAttempt(false);
   if (!LaunchCommandWindowOperation(window, operation, options)) {
     // 启动失败时信息文件已由执行路径回收，这里只补一句表单没动的说明。
     state_.SetStatusNote(L"这次提交没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。"
@@ -2267,8 +2371,8 @@ void MainWindow::UndoLastCommit(HWND window) {
     refuse(L"已经有一次撤回预检在跑，请等确认框出现，或先取消那一次。");
     return;
   }
-  if (pendingCommit_.waitingForRead) {
-    refuse(L"“创建提交”正在核对仓库现状，请先等它的确认框出现或取消那一次，再来撤回。");
+  if (CommitAttemptActive()) {
+    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来撤回。");
     return;
   }
 
@@ -2415,8 +2519,8 @@ void MainWindow::RequestFetch(HWND window) {
     refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 fetch。");
     return;
   }
-  if (pendingCommit_.waitingForRead) {
-    refuse(L"「创建提交」正在核对仓库现状，请先等它的确认框出现或取消那一次，再来 fetch。");
+  if (CommitAttemptActive()) {
+    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来 fetch。");
     return;
   }
 
@@ -2585,8 +2689,8 @@ void MainWindow::RequestPull(HWND window) {
     refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 pull。");
     return;
   }
-  if (pendingCommit_.waitingForRead) {
-    refuse(L"「创建提交」正在核对仓库现状，请先等它的确认框出现或取消那一次，再来 pull。");
+  if (CommitAttemptActive()) {
+    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来 pull。");
     return;
   }
 
@@ -2976,8 +3080,8 @@ void MainWindow::RequestPush(HWND window) {
     refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来推送。");
     return;
   }
-  if (pendingCommit_.waitingForRead) {
-    refuse(L"「创建提交」正在核对仓库现状，请先等它的确认框出现或取消那一次，再来推送。");
+  if (CommitAttemptActive()) {
+    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来推送。");
     return;
   }
 
@@ -3152,18 +3256,50 @@ void MainWindow::OnPushVerifyCompleted(HWND window, uint64_t completionSerial) {
   }
 }
 
-void MainWindow::AfterCommitSucceeded(HWND window) {
+void MainWindow::AfterCommitSucceeded(HWND window, const git::CommitFormData& committedForm) {
+  // 清空只清「屏幕上还是当时提交的那一份」的栏目：命令窗口跑的那段时间里，用户完全可能
+  // 已经开始写下一段的草稿，把那份新内容一起抹掉比不清更糟。逐栏比对，一致才清。
+  const git::CommitFormData current = commitForm_.Capture();
+  const bool clearSubject = current.subject == committedForm.subject;
+  const bool clearDescription = current.description == committedForm.description;
+  const bool clearCoauthors = current.coauthors == committedForm.coauthors;
   {
     // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
     const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
-    commitForm_.ClearMessageFields();
+    commitForm_.ClearCommittedFields(clearSubject, clearDescription, clearCoauthors);
   }
-  formSession_.NoteCommitted();
-  const SYSTEMTIME now = platform::CurrentLocalTime();
-  commitForm_.SetTimes(now, now);
-  RefreshTimeControlsState(window);
-  state_.SetFormNote(L"提交已创建：标题、描述与合作者已清空，作者那一栏留着下次接着用；"
-                     L"两个时间也回到此刻。仓库状态正在重读。");
+  formSession_.NoteCommitted(clearSubject, clearDescription, clearCoauthors);
+
+  // 时间同样按「这期间有没有被人动过」决定：没人动过就回到此刻，作为下一次提交的默认；
+  // 用户在那期间另选了时间的话那是新的意图，程序不能拿「提交成功」当理由把它抹掉。
+  const bool resetTimes = !commitForm_.TimesUserEdited();
+  if (resetTimes) {
+    const SYSTEMTIME now = platform::CurrentLocalTime();
+    commitForm_.SetTimes(now, now);
+    RefreshTimeControlsState(window);
+  }
+  std::wstring kept;
+  const auto appendKept = [&kept](bool cleared, std::wstring_view label) {
+    if (cleared) {
+      return;
+    }
+    if (!kept.empty()) {
+      kept += L"、";
+    }
+    kept += label;
+  };
+  appendKept(clearSubject, L"标题");
+  appendKept(clearDescription, L"描述");
+  appendKept(clearCoauthors, L"合作者");
+  std::wstring note = L"提交已创建：作者那一栏留着下次接着用";
+  note += resetTimes ? L"，两个时间也回到此刻。" : L"，你在这期间改过的时间原样留着，没有重置。";
+  if (kept.empty()) {
+    note += L"标题、描述与合作者里这次提交用掉的内容已清空。";
+  } else {
+    note += L"其中" + kept + L"在这期间换了内容，因此原样留着、没有清空。";
+  }
+  note += L"仓库状态正在重读。";
+  state_.SetFormNote(note);
 }
 
 LRESULT CALLBACK MainWindow::Thunk(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -3300,6 +3436,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kPushVerifyCompleted:
       OnPushVerifyCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kCommitProbeCompleted:
+      OnCommitProbeCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
           window, static_cast<uint64_t>(static_cast<uint32_t>(wParam)) |
@@ -3324,6 +3463,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       pullWorker_.Shutdown();
       pushWorker_.Shutdown();
       pushVerifyWorker_.Shutdown();
+      commitWorker_.Shutdown();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

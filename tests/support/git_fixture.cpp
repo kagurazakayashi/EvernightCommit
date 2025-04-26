@@ -700,6 +700,25 @@ platform::AuthorConfigDeps GitFixture::MakeAuthorConfigDepsForTest() {
   return deps;
 }
 
+platform::CommitProbeDeps GitFixture::MakeCommitProbeDepsForTest() {
+  platform::CommitProbeDeps deps;
+  deps.runner = [this](const std::wstring& exePath, const std::wstring& directory,
+                       const std::vector<std::wstring>& arguments) -> git::GitQueryResult {
+    // 与工作区读取、身份读取同一把执行器：临时根守卫与环境隔离一条都不放松，
+    // 因此 write-tree 写出的树对象只存在于这个夹具仓库的对象库里。
+    GitRun run = RunWith(exePath.empty() ? gitExe_ : exePath, arguments, ResolveOwnedDirectory(directory));
+    git::GitQueryResult result;
+    result.started = run.started;
+    result.timedOut = run.timedOut;
+    result.exited = run.exited;
+    result.exitCode = static_cast<int>(run.exitCode);
+    result.utf16Output = std::move(run.out);
+    result.utf16Error = std::move(run.err);
+    return result;
+  };
+  return deps;
+}
+
 void GitFixture::WriteUserConfig(const std::string& utf8Content) {
   std::ofstream file(std::filesystem::path(emptyConfig_), std::ios::binary | std::ios::trunc);
   if (!file.is_open()) {

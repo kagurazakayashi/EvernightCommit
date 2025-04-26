@@ -90,6 +90,10 @@ inline constexpr UINT kPullProbeCompleted = WM_APP + 9;
 inline constexpr UINT kPushProbeCompleted = WM_APP + 10;
 // 推送之后向发布目标核对（只读 ls-remote）的完成通知；wParam 为请求序号。
 inline constexpr UINT kPushVerifyCompleted = WM_APP + 11;
+// 「创建提交」绑定的那组身份事实（工作区根与 Git 目录／完整分支引用／HEAD 完整对象 ID／
+// 索引内容标识／流程痕迹／提交者身份配置）的后台查询完成通知；wParam 为请求序号。
+// 确认框之前的预检与点头之后的执行前复核共用这一条，回来给谁用由界面的阶段标记分辨。
+inline constexpr UINT kCommitProbeCompleted = WM_APP + 12;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -132,5 +136,9 @@ inline constexpr unsigned long kPushProbeTimeoutMs = 20000;
 // 给 30 秒，超时只说明「这一处没能核实」，不据此断言推送失败，也不自动重试。
 // 上限不宜再放大：程序退出时 WM_DESTROY 会等工作线程收尾，最长就阻塞这么久（隐藏查询没有取消接口）。
 inline constexpr unsigned long kPushVerifyTimeoutMs = 30000;
+// 「创建提交」的身份预检里最慢的一条是 git write-tree（大仓库要现算若干棵树），量级与 git status
+// 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、
+// 命令不发，绝不退回用早前那一份事实继续，也不自动重试。
+inline constexpr unsigned long kCommitProbeTimeoutMs = 20000;
 
 }  // namespace gc::ui

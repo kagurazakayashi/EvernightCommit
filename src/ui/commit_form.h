@@ -66,9 +66,10 @@ public:
   void SelectCoauthorRows(const std::vector<int>& rows);
   // 把整张表单倒回「空」：标题、描述、作者、合作者都清空。时间不动（由 SetTimes 单独控制）。
   void ClearFields();
-  // 提交成功后的清理：只清「这次写了什么」（标题、描述、合作者），
-  // 作者那一栏是可复用的身份要留着，时间则由调用方按提交那一刻重设。
-  void ClearMessageFields();
+  // 提交成功后的清理：在「这次写了什么」（标题、描述、合作者）里只清调用方点名的那几栏，
+  // 作者那一栏是可复用的身份一律留着，时间由调用方自己按情况决定要不要回到此刻。
+  // 逐栏给布尔值而不是整份清空，是因为命令窗口跑的那段时间里用户可能已经另写了草稿。
+  void ClearCommittedFields(bool subject, bool description, bool coauthors);
 
   [[nodiscard]] HWND SummaryEdit() const noexcept { return summary_; }
   [[nodiscard]] HWND DescriptionEdit() const noexcept { return description_; }

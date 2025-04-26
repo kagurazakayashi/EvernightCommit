@@ -110,7 +110,7 @@ GC_TEST(commit_form_session_committed_clears_body_keeps_author) {
   session.NoteAuthorDefaultApplied(L"张三 <z@e.com>");
   GC_CHECK_MESSAGE(session.HasUserContent(), "四个欄位都动过");
 
-  session.NoteCommitted();
+  session.NoteCommitted(true, true, true);
   GC_CHECK_MESSAGE(!session.IsUserContent(Field::subject), "已经提交出去的标题不再是用户内容");
   GC_CHECK_MESSAGE(!session.IsUserContent(Field::description), "描述同上");
   GC_CHECK_MESSAGE(!session.IsUserContent(Field::coauthors), "合作者同上");
@@ -128,9 +128,26 @@ GC_TEST(commit_form_session_committed_clears_body_keeps_author) {
   defaultsOnly.BindRepository(L"P:\\repo-a");
   defaultsOnly.NoteAuthorDefaultApplied(L"张三 <z@e.com>");
   defaultsOnly.NoteUserEdit(Field::subject);
-  defaultsOnly.NoteCommitted();
+  defaultsOnly.NoteCommitted(true, true, true);
   GC_CHECK_MESSAGE(!defaultsOnly.HasUserContent(),
                    "只剩默认作者时，提交后的空表单不该在换仓库时白问一句");
+}
+
+GC_TEST(commit_form_session_committed_keeps_marks_for_fields_not_cleared) {
+  // 提交跑完之前用户又写了新草稿：那一栏并没有被这次提交清空，「是你写的」记号必须留着，
+  // 否则它会被当成可以悄悄覆盖的默认值，或在换仓库时被误判成「没有用户内容」。
+  CommitFormSession session;
+  session.BindRepository(L"P:\\repo-a");
+  session.NoteUserEdit(Field::subject);
+  session.NoteUserEdit(Field::description);
+  session.NoteUserEdit(Field::coauthors);
+
+  session.NoteCommitted(true, false, false);
+
+  GC_CHECK_MESSAGE(!session.IsUserContent(Field::subject), "确实被清空的标题不再是用户内容");
+  GC_CHECK_MESSAGE(session.IsUserContent(Field::description), "没被清空的描述仍然是用户内容");
+  GC_CHECK_MESSAGE(session.IsUserContent(Field::coauthors), "没被清空的合作者仍然是用户内容");
+  GC_CHECK_MESSAGE(session.NeedsSwitchDecision(L"P:\\repo-b"), "留着的新草稿换仓库时仍要先问");
 }
 
 GC_TEST(commit_form_session_default_remembered_value_is_comparable) {

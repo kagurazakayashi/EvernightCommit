@@ -7,6 +7,7 @@
 #include "git/command_window.h"
 #include "git/command_window.h"
 #include "platform/windows/author_config.h"
+#include "platform/windows/commit_probe.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/workspace_status.h"
 
@@ -151,6 +152,11 @@ public:
   // 隔离环境里 GIT_CONFIG_GLOBAL 指向夹具自己的档案、GIT_CONFIG_NOSYSTEM=1，
   // 因此「使用者層」就是這個臨時檔案，絕不會讀到本机真实的用户与系统配置。
   [[nodiscard]] platform::AuthorConfigDeps MakeAuthorConfigDepsForTest();
+
+  // 同上，装配「一次提交身份预检」（rev-parse／write-tree／config --null）的执行依赖。
+  // 集成测试因此能直接驱动生产的那条编排路径：问哪几条、怎么判读，都在被测代码里，
+  // 夹具只提供「以隔离环境执行一条 Git 查询」这件事。
+  [[nodiscard]] platform::CommitProbeDeps MakeCommitProbeDepsForTest();
 
   // 覆寫夾具的「使用者層」設定檔內容（UTF-8 原始位元組）。
   void WriteUserConfig(const std::string& utf8Content);
