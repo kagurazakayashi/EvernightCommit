@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "git/push_plan.h"  // MaskPushUrlCredentials：确认框里展示 URL 前先过一次凭据掩码
+
 namespace gc::git {
 namespace {
 
@@ -16,41 +18,26 @@ bool EndsWith(std::wstring_view text, std::wstring_view suffix) noexcept {
 }
 
 std::wstring DisplayUrl(const FetchRemoteEntry& entry) {
-  return entry.fetchUrl.empty() ? std::wstring(L"（这个远端没有记录 fetch URL）") : entry.fetchUrl;
+  return entry.fetchUrl.empty() ? std::wstring(L"（这个远端没有记录 fetch URL）")
+                                : MaskPushUrlCredentials(entry.fetchUrl);
 }
 
-// ready 方案的确认文字：范围承诺全部写在这里，用户点头前看到的就是命令将做到的。
-std::wstring BuildConfirmationText(const FetchRemoteEntry& entry, std::wstring_view sourceSentence,
-                                   std::wstring_view repositoryDirectory) {
-  std::wstring text;
-  text += L"抓取目标：" + entry.name + L"　" + DisplayUrl(entry) + L"\n";
-  text += L"目标来历：" + std::wstring(sourceSentence) + L"\n";
-  text += L"将在命令窗口里执行：git fetch --recurse-submodules=no " + entry.name;
-  if (!repositoryDirectory.empty()) {
-    text += L"（工作目录：" + std::wstring(repositoryDirectory) + L"）";
-  }
-  text += L"\n\n";
-  text += L"fetch 只更新这个远端的远端跟踪引用（refs/remotes/ 下）：\n";
-  text += L" · 不移动 HEAD、不改任何本地分支，也不会把提交合并进你的工作（那是 pull 的事）；\n";
-  text += L" · 不动索引与工作区文件；\n";
-  text += L" · 不隐式 prune 过期的跟踪引用，也不一次抓取所有远端（没有 --all）；\n";
-  text += L" · 不递归抓取子模块——--recurse-submodules=no 已明确写在命令里，仓库配置里的\n";
-  text += L"   submodule.recurse 不会把这一步的范围扩大。\n";
-  text += L"需要口令或交互时，命令窗口里由 Git 自己提问，沿用你已有的认证方式；失败时窗口里\n";
-  text += L"留着 Git 的真实输出。确定要执行吗？取消不会打开命令窗口，也不会碰这个仓库。";
-  return text;
-}
-
-// 一条 ready 方案的其余共同字段。
-void FillReadyFields(FetchPlan* plan, const FetchRemoteEntry& entry) {
-  plan->state = FetchPlanState::ready;
-  plan->remoteName = entry.name;
-  plan->remoteUrl = entry.fetchUrl;
-  plan->arguments = {L"fetch", L"--recurse-submodules=no", entry.name};
-  plan->commandLabel = L"git fetch --recurse-submodules=no " + entry.name;
-  plan->notice = L"fetch 范围：只更新远端「" + entry.name +
-                 L"」的远端跟踪引用；HEAD、本地分支、索引与工作区都不受影响，"
-                 L"不 prune、不抓所有远端、不递归子模块、不合并。";
+// 一份「范围已经核得住」的 ready 方案：参数、命令展示、范围说明与确认正文全部取自
+// git/fetch_scope 的决策——界面 fetch 按钮与 pull 第一步因此拿到的是同一份承诺。
+FetchPlan ReadyFromScope(const FetchScopeDecision& scope, const FetchRemoteEntry& entry,
+                         std::wstring_view sourceSentence, std::wstring_view repositoryDirectory) {
+  FetchPlan plan;
+  plan.state = FetchPlanState::ready;
+  plan.operationId = L"fetch";
+  plan.displayName = L"fetch";
+  plan.remoteName = entry.name;
+  plan.remoteUrl = entry.fetchUrl;
+  plan.arguments = scope.arguments;
+  plan.commandLabel = scope.commandLabel;
+  plan.notice = L"fetch 范围：" + scope.noticeCore;
+  plan.confirmationText = BuildFetchConfirmationText(scope, entry.name, DisplayUrl(entry), sourceSentence,
+                                                     repositoryDirectory);
+  return plan;
 }
 
 FetchPlan BlockedPlan(std::wstring reason) {
@@ -105,6 +92,9 @@ std::vector<std::wstring> BuildFetchRemotesArguments(std::wstring_view repositor
 
 FetchTargetFacts InterpretFetchTarget(const FetchTargetQueries& queries) {
   FetchTargetFacts facts;
+  // 抓取范围的配置先读回来：它按远端名归组，与「目标是谁」是两件独立的事，
+  // 后面无论目标是分支配置给的还是用户当场选的，这同一份事实都可用。
+  facts.scope = InterpretFetchScope(queries.scope);
 
   const UndoQueryRead symbolic = ReadUndoQuery(queries.symbolicRef);
   if (symbolic.outcome == UndoQueryOutcome::failed) {
@@ -224,16 +214,16 @@ FetchPlan BuildFetchPlan(const FetchTargetFacts& facts, std::wstring_view reposi
 
   if (configured != nullptr) {
     // 当前分支明确配置的远端，而且它确实在远端清单里：这就是「可确定的目标」。
-    FetchPlan ready;
-    ready.operationId = L"fetch";
-    ready.displayName = L"fetch";
-    FillReadyFields(&ready, *configured);
+    // 目标定了还得这个远端的抓取范围核得住，否则一样不发命令。
+    const FetchScopeDecision scope = DecideFetchScope(facts.scope, configured->name);
+    if (!scope.allowed) {
+      return BlockedPlan(scope.refusal);
+    }
+    FetchPlan ready = ReadyFromScope(
+        scope, *configured,
+        L"当前分支明确配置的远端（branch." + facts.branchName + L".remote = " + configured->name + L"）",
+        repositoryDirectory);
     ready.explanation = L"抓取目标是当前分支配置的远端「" + configured->name + L"」。";
-    ready.confirmationText =
-        BuildConfirmationText(*configured,
-                              L"当前分支明确配置的远端（branch." + facts.branchName + L".remote = " +
-                                  configured->name + L"）",
-                              repositoryDirectory);
     return ready;
   }
 
@@ -277,14 +267,15 @@ FetchPlan ChooseFetchRemote(const FetchTargetFacts& facts, std::wstring_view rem
                        L"」已经不在刚刚读回的清单里（仓库在外部被改过？）。"
                        L"没有发出任何命令，请重新点 fetch 再选。");
   }
-  FetchPlan ready;
-  ready.operationId = L"fetch";
-  ready.displayName = L"fetch";
-  FillReadyFields(&ready, *entry);
-  ready.explanation = L"抓取目标是你在选择界面挑的既有远端「" + entry->name + L"」。";
-  ready.confirmationText = BuildConfirmationText(
-      *entry, L"你在远端选择界面里刚选定的既有远端（不是猜的：分支配置里没有指定它）",
+  // 选完立刻按同一份范围策略核对：能中和的中和，核不住的映射在执行前拒绝（不改配置、不猜映射）。
+  const FetchScopeDecision scope = DecideFetchScope(facts.scope, entry->name);
+  if (!scope.allowed) {
+    return BlockedPlan(scope.refusal);
+  }
+  FetchPlan ready = ReadyFromScope(
+      scope, *entry, L"你在远端选择界面里刚选定的既有远端（不是猜的：分支配置里没有指定它）",
       repositoryDirectory);
+  ready.explanation = L"抓取目标是你在选择界面挑的既有远端「" + entry->name + L"」。";
   return ready;
 }
 

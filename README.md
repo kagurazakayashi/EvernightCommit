@@ -20,8 +20,12 @@
 （仓库的第一个提交走带旧值核对的 `git update-ref -d`），
 只移动那一个分支引用、索引与工作区分毫不动；浅仓库的历史边界会被识别出来并明确拒绝（见 3.11 节），
 以及 **`fetch` 按钮**：先只读问出抓取目标（当前分支配置的远端，或让你在既有远端清单里明确选择），
-再在命令窗口里执行真实的 `git fetch --recurse-submodules=no <远端>`——只更新远端跟踪引用，
-HEAD、本地分支、索引与工作区都不受影响（见 3.12 节）。**
+再核对会影响抓取范围的配置（`fetch.prune`／`remote.<远端>.prune`／`pruneTags`／`tagOpt`，以及那句
+决定「哪些本地引用会被写」的 `remote.<远端>.fetch` 映射），然后在命令窗口里执行真实的
+`git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>`——只更新那个远端在
+`refs/remotes/<远端>/` 之下的远端跟踪引用（`.git/FETCH_HEAD` 与对象库按 fetch 本身的行为会变化），
+HEAD、本地分支、本地标签、索引与工作区都不受影响；映射会把引用写到别处的仓库在执行前被拒绝并点名
+那一句配置（见 3.12 节）。**
 以及 **`pull` 按钮**：分「获取」与「整合」两个可见阶段，两条命令都在命令窗口里执行，
 中间夹三轮只读预检——先问出本地分支与它明确的上游，判出可快进 / 已分叉 / 本地领先，
 用不改动工作区与索引的 `git merge-tree --write-tree` 预演内容冲突；整合策略尊重已有的
@@ -898,10 +902,12 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
     （`git push` 上去制造“已知已发布”，未推送的新提交回落普通确认）——该 bare fixture 形态
     供后续 fetch/pull/push 步骤复用。
 
-### 3.12 fetch（`git fetch --recurse-submodules=no <远端>`）
+### 3.12 fetch（`git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>`）
 
-顶部 `fetch` 按钮向一个明确的远端抓取，**只更新远端跟踪引用**（`refs/remotes/…`）：
-它不移动 HEAD、不改任何本地分支、不动索引与工作区，也不顺带 `pull`。对应开发计划步骤 15。
+顶部 `fetch` 按钮向一个明确的远端抓取，**只更新那个远端在 `refs/remotes/<远端>/` 之下的远端跟踪引用**：
+它不移动 HEAD、不改任何本地分支与本地标签、不动索引与工作区，也不顺带 `pull`。
+会被改动的是这批跟踪引用、`.git/FETCH_HEAD` 与对象库——`fetch` 不是磁盘只读操作，
+确认框与状态栏都按这个口径说，不写成「什么都没动」。对应开发计划步骤 15。
 
 > **联网边界**：用户点击 `fetch` 按钮时访问**用户自己配置的远端**（含网络远端），
 > 这是产品功能、属于用户操作，认证沿用用户已有的凭据助手/SSH agent/交互提示；
@@ -911,40 +917,89 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 
 1. **抓取目标只认两样东西**，此外一概不猜。按下按钮后先发起一轮只读预检
    （`symbolic-ref HEAD`、`branch.<分支名>.remote` 的有效配置、`git remote` 的既有远端清单，
+   外加 `git config --null --get-regexp` 两条「影响抓取范围的配置」查询，
    全部隐藏窗口、带 `--no-optional-locks`，不弹命令窗口、不接触任何远端）：
    当前分支**明确配置**了远端且它确实在清单里 → 目标直接确定，摆出确认框；
    否则（分支没配远端、配置指向已不存在的远端、游离 HEAD）把既有远端连同各自 fetch URL
    一个个摆进**远端选择界面**，选谁由用户点头。只有一个普通远端时也照实列为候选，
-   默认选中它，但“点不点”仍在用户手里。
+   默认选中它，但“点不点”仍在用户手里。无论目标是配置给的还是用户选的，
+   **都过同一道范围核对**才给确认框。
 2. **一个远端也没有就明说**：拒绝执行、不猜 `origin`、不自动创建远端、不改动任何配置；
    查询失败或 `git remote` 回答不合约定时同样不在这上面猜目标。
-3. **范围写死在命令里**：`git fetch --recurse-submodules=no <远端>`——`--recurse-submodules=no`
-   显式关闭子模块递归，仓库配置里的 `submodule.recurse` 不会悄悄扩大这一步的范围；
-   命令里没有 `--prune`（不隐式清理过期跟踪引用）、没有 `--all`（不一次抓所有远端）、
-   没有 `pull`/`merge`。确认框把这几点逐条讲清，并写明目标来历（分支配置 / 刚选定）。
-4. **真实执行留在命令窗口**：走与 `status` 同一个外部命令窗口执行器，需要口令或交互时由命令窗口里
+3. **范围写死在命令里，而不只是「参数里没有 `--prune`」**（本机 Git 2.53 实测 + Git 官方文档）：
+   `git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>`。
+   每个中和项各挡一件事：
+   - `--recurse-submodules=no`：`submodule.recurse` / `fetch.recurseSubmodules` 不会把这一步扩大到子模块；
+   - `--no-prune`：挡掉 `fetch.prune`（全局）与 `remote.<远端>.prune`（远端级）——
+     这两条按文档「等同于在命令行上给了 `--prune`」，会**删除**过期的远端跟踪引用；
+     实测命令行上的 `--no-prune` 覆盖它们（把两条配置都设成 `true` 后 `git fetch --dry-run -v`
+     报出 `[deleted]`，加上 `--no-prune` 就不再报）；
+   - `--no-prune-tags`：挡掉 `fetch.pruneTags` / `remote.<远端>.pruneTags`——文档写明它
+     等同于额外声明 `refs/tags/*:refs/tags/*`，动的是**本地标签**；实测该映射确实会被加进来，
+     因此这一项不能省；
+   - `--no-tags`：关掉 Git 默认的**标签自动跟随**（抓下来的对象所指的标签会被写进 `refs/tags/`），
+     并按文档覆盖 `remote.<远端>.tagOpt`；
+   - 命令里没有 `--all`／`--multiple`，且始终点名单个远端，所以 `fetch.all=true` 与
+     `remotes.<组>` 那种远端组展开都不参与（文档：显式指定远端即覆盖 `fetch.all`；实测
+     `git fetch <组名>` 会把组名当仓库名而失败，只有 `--all`/`--multiple`/`git remote update` 才展开）。
+4. **命令行绕不过的那一句只能验证**：`remote.<远端>.fetch` 决定「哪些本地引用会被写」。
+   本程序逐条核对它的目标端，全部落在 `refs/remotes/<远端>/` 之下才肯执行；
+   指向 `refs/heads/`、`refs/tags/`、别的远端命名空间，或镜像仓库那种 `+refs/*:refs/*`，
+   以及没有目标端／目标端为空的写法，一律**在执行前拒绝并点名具体那一句配置**——
+   不改写用户配置，也不换一套 refspec 去「凑」出承诺（那样会连带替换掉用户自己的分支过滤与上游映射）。
+   合法形态原样放行：单分支过滤 `+refs/heads/topic*:refs/remotes/origin/topic*` 这类映射，
+   以及以 `^` 开头的负 refspec（文档写明负 refspec 只排除、不含目标端，是缩小而不是扩大）。
+   只配了 `remote.<远端>.mirror=true` 而映射照常时**放行**：文档写明 mirror 只改变 push 的形态，
+   不影响 fetch；确认框把这一点说出来。多个 `remote.<远端>.url` 也只作披露——
+   文档写明 fetch 用的是第一个地址。至于 `.git/branches/<名>` 那种 Git 正在淘汰的档案形态，
+   它的映射确实会把远端分支写进本地 `refs/heads/`，但 `git remote` 根本不列它，
+   而本程序的候选只来自 `git remote`，因此不可能被选中。
+5. **读不懂就不承诺**：`--get-regexp` 的回答缺结尾 NUL、被截断、认不出键名，或 prune/pruneTags/all
+   的取值不符合 Git 的布尔语法（`true/yes/on/1`、`false/no/off/0`，省略取值即为真），
+   一律拒绝执行并说明原因。实测本机 Git 2.53：`remote.origin.prune = maybe` 这种写法连
+   `git remote -v` 都会先失败，本程序的预检因此读不回事实——那种场合 Git 自己也不接受这次抓取。
+   展示出来的配置原文一律限长并先做凭据掩码（URL 里的账号口令不会被抄到屏幕上）。
+6. **真实执行留在命令窗口**：走与 `status` 同一个外部命令窗口执行器，需要口令或交互时由命令窗口里
    的 Git 自己提问，**沿用用户已有的认证方式**（凭据助手、SSH agent、交互式提示都在原生 `git.exe`
    那一侧，本程序不代管、也不写入任何凭据或配置）。结束后窗口保留，应用独立按 `result.txt`
    取回 Git 退出码——不以“窗口已打开”当作抓取成功。
-5. **失败如实收场、不自动重试**：无远端、远端不可达、认证不过、用户在窗口里取消、命令非 0 退出，
-   都按真实退出码给出结论并恢复按钮，绝不反复自动重试，也绝不删除或改写远端配置
+7. **失败如实收场、不自动重试**：无远端、映射不合格、远端不可达、认证不过、用户在窗口里取消、
+   命令非 0 退出，都按真实退出码给出结论并恢复按钮；绝不反复自动重试，也**不会因此改用
+   `--prune`、换成别的远端或别的地址、替你设置上游、或删除改写任何远端配置**
    （“无效本地目标”那条用例专门核对：fetch 失败后 `remote.<name>.url` 原样还在）。
-6. **抓取成功后重读**：结论里说明“只更新了远端跟踪引用”，随后自动刷新重读仓库摘要与上游；
-   下一次点 `撤回最近提交` 的发布状态判断用的就是这批新读回的引用——同一条本地提交，
-   fetch 前判“本地信息未发现已发布”，fetch 到确实包含它的远端引用后改判“已知已发布”
-   （见 3.11 第 3 点，三态判据完全共用）。
-7. **测试**。`tests/fetch_plan_tests.cpp` 用桩回答断言三条查询的参数形态、`git remote -v`
-   的解析（fetch/push 行、纯名字行、中文与含空格 URL、只有 push 行退用其 URL）、
-   `--quiet`/`config` 的“明确没有”与“查询失败”的分别，以及目标判定的四条规矩
-   （配置命中即确定 / 没配置或配置对不上或游离 HEAD 一律列候选 / 一个也没有则拒绝且不猜 origin /
-   查询失败不猜）、命令里绝不含 `--prune`/`--all`/`pull`、递归选项写死。
-   `tests/fetch_fixture_tests.cpp` 在真实临时仓库里驱动生产预检与方案，把方案合成的命令原样交给
-   真实 `git.exe`：B 推送新提交后 A 抓取——核对 `refs/remotes/origin/main` 确实前进，
-   而 A 的 HEAD、`refs/heads/main`、`ls-files -s` 逐条不差、工作区 `status` 仍干净；
-   抓取后同一条本地提交的发布状态从“未发现已发布”变“已知已发布”并回落强制确认；
-   无远端仓库判 blocked 且 `git remote` 仍为空；指向根内不存在目录的“无效本地目标”以 Git 真实
-   失败收场且 `remote.<name>.url` 不被删除；测试远端守卫拒绝 `http/https/ssh/git/file://`、
-   scp 形态、UNC 与根外路径。三方形态（bare 远端 + A/B 两工作区）由 `RemoteRig` 夹具自动搭好。
+8. **确认框说的是这一刻读回的配置，不是事务**：范围核对覆盖「点确定之前」；点头之后到 Git 真正读配置
+   之间，外部程序仍可改动这份配置（包括那句 `remote.<name>.fetch` 映射），本程序不持有 Git 的锁，
+   也没有事务级隔离——确认框把这句边界原样写出来，不自称锁住了任意外部写入者。
+9. **抓取成功后重读**：结论里说明“只按确认框上那份范围更新了远端跟踪引用（`FETCH_HEAD` 与对象库
+   随之变化）”，随后自动刷新重读仓库摘要与上游；下一次点 `撤回最近提交` 的发布状态判断用的就是
+   这批新读回的引用——同一条本地提交，fetch 前判“本地信息未发现已发布”，fetch 到确实包含它的
+   远端引用后改判“已知已发布”（见 3.11 第 3 点，三态判据完全共用）。
+10. **与 `pull` 第一步同一个实现**：目标解析、命令行参数、范围验证与确认正文全部出自
+    `src/git/fetch_scope.*` 这一份策略，`fetch` 按钮与 `pull` 的获取阶段都从它取，
+    不可能各说一套范围（`tests/fetch_scope_tests.cpp` 逐字比对两边给出的参数数组与命令展示）。
+11. **测试**。`tests/fetch_scope_tests.cpp` 用桩回答的 `git config --null --get-regexp` 覆盖
+    记录形态（含点分的远端名、省略取值的布尔键、混合大小写的键、残缺与截断）、四类中和项、
+    全局/远端级 prune 与 pruneTags、`tagOpt`、`fetch.all`、映射越界的每一类拒绝、
+    合法过滤与负 refspec 的放行、mirror 与多地址的披露、凭据掩码，以及两个入口逐字一致。
+    `tests/fetch_plan_tests.cpp` 用桩回答断言三条目标查询的参数形态、`git remote -v` 的解析
+    （fetch/push 行、纯名字行、中文与含空格 URL、只有 push 行退用其 URL）、
+    `--quiet`/`config` 的“明确没有”与“查询失败”的分别，以及目标判定的四条规矩
+    （配置命中即确定 / 没配置或配置对不上或游离 HEAD 一律列候选 / 一个也没有则拒绝且不猜 origin /
+    查询失败不猜）、命令里绝不含 `--all`/`--multiple`/`pull`、六个参数一个不少。
+    `tests/fetch_scope_fixture_tests.cpp` 与 `tests/fetch_fixture_tests.cpp` 在真实临时仓库里驱动
+    生产预检与方案，把方案合成的命令原样交给真实 `git.exe`：
+    不产生任何提交的那一组（可直接运行）用 `hash-object` 造出过期跟踪引用与本地标签，
+    核对产品命令跑完后**完整引用清单、HEAD、索引与工作区逐条不变**，而同一份配置下让 Git 自己
+    `--dry-run` 会报出 `[deleted]`（证明“没删”不是空跑），并核对 `FETCH_HEAD` 确实被写；
+    同一组还覆盖映射越界的两种拒绝（`refs/heads/` 与镜像的 `refs/*`）、只有 mirror=true 时的放行、
+    合法过滤 + 负 refspec 的放行、以及读不懂的布尔取值。
+    需要真实提交/推送才能造场的四条（远端标签不被写入、`tagOpt=--tags` 被 `--no-tags` 覆盖、
+    远端删分支后不被 prune、`pull` 第一步与 `fetch` 按钮同一条命令）**按本工程约束由用户运行**，
+    命令见仓库内的开发进度记录；它们同样只在临时根内的本地 bare 上跑，绝不接触网络。
+    既有三方链路用例（B 推 A 抓：跟踪引用前进而 HEAD/`refs/heads/main`/`ls-files -s`/工作区不变、
+    发布状态随之改判、无远端判 blocked 且不写配置、无效本地目标以 Git 真实失败收场、
+    测试远端守卫拒绝 `http/https/ssh/git/file://`、scp 形态、UNC 与根外路径）保持不变，
+    由 `RemoteRig` 夹具自动搭好三方形态。
 
 ### 3.13 pull（先 `git fetch`，再 `git merge` / `git rebase`）
 
@@ -954,7 +1009,7 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 
 ```
 点 pull → 预检①（只读）→ 确认框「本地分支 ← 远端分支」
-        → 命令窗口：git fetch --recurse-submodules=no <远端>     ← 阶段一「获取」
+        → 命令窗口：git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>   ← 阶段一「获取」
         → 预检②（只读，含关系与冲突预演）→ 需要时选策略 → 带风险清单的确认框
         → 预检③（只读，执行前复核）→ 命令窗口：git -c … merge|rebase … <完整ID>   ← 阶段二「整合」
         → 按退出码结案并自动刷新
@@ -964,18 +1019,25 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
    `symbolic-ref --quiet HEAD`、`rev-parse --verify --quiet HEAD`、
    `for-each-ref --format=%(upstream:remotename)%(09)%(upstream)%(09)%(upstream:remoteref)`、
    四条策略配置（`branch.<分支>.rebase`、`pull.rebase`、`pull.ff`、`merge.ff`）、
+   两条影响抓取范围的配置查询（`git config --null --get-regexp`，见 3.12 第 3～5 点）、
    `git status --porcelain=v2 -z`，外加按 Git 目录里的档案判断的流程痕迹——全部隐藏窗口、
    带 `--no-optional-locks`，不弹命令窗口、不接触任何远端。以下情形给出**具体原因**并拒绝：
    不在分支上（游离 HEAD）、这个分支还没有任何提交、**没有明确上游**
    （`branch.<分支>.remote` / `.merge` 没配或只有半截）、有 merge/rebase/cherry-pick/revert/bisect
-   还没走完、还有未解决的冲突条目、任何一条查询没读回可采信的回答。
+   还没走完、还有未解决的冲突条目、上游那个远端的 fetch 映射会把引用写到允许命名空间之外、
+   任何一条查询没读回可采信的回答。
    拒绝时不产生命令，也**不猜 `origin/main`、不代跑 `git branch --set-upstream-to`、
    不写任何配置文件**——那种状态本程序说不准，Git 自己也会先拒绝，加参数绕不过去。
 2. **获取是网络操作，就让它留在命令窗口里**。确认后执行的是
-   `git fetch --recurse-submodules=no <远端>`，与 `fetch` 按钮同一范围口径
-   （不 `--all`、不 `--prune`、不递归子模块、不合并）；需要口令时由命令窗口里的 Git 自己提问。
+   `git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>`——目标解析、
+   参数生成、范围验证与确认正文都与 `fetch` 按钮**同出一份实现**（`src/git/fetch_scope.*`），
+   两边的参数数组与命令展示逐字相同，各有测试钉住（不 `--all`、不删引用、不写本地分支与标签、
+   不递归子模块、不合并）；这一步同样只保证「HEAD、本地分支、索引与工作区不在范围内」，
+   `FETCH_HEAD`、对象库与允许命名空间里的跟踪引用会随抓取变化，确认框就这么写。
+   需要口令时由命令窗口里的 Git 自己提问。
    这一步**不藏在界面的“刷新”里**：刷新永远是本地只读查询。获取失败（非 0、被拒、认证不过）
-   就停在这一步——不自动重试、不改配置，也不去做任何整合。
+   就停在这一步——不自动重试、不因此改用 `--prune`、不换远端或别的地址、不替你设置上游、
+   不改配置，也不去做任何整合。
 3. **关系判据用完整对象 ID，四种关系各说各话**。预检②先用
    `rev-list --left-right --count <HEAD 完整ID>…<跟踪引用完整ID>` 问出「本地独有 / 远端独有」几个提交，
    据此分为**已一致 / 可快进 / 本地领先 / 已分叉**；再问 `merge-base`、
@@ -1042,6 +1104,11 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
     未提交改动重叠与未跟踪撞名都被点名且 Git 真的拒绝、本地那份内容一字未动、
     `pull.rebase=true` 时不问策略直接变基且历史是线性的（HEAD 只有一个父、父提交正是远端那份）、
     取消整合后只剩「跟踪引用前移」这一处遗留、外部改动让执行前复核报出原因。
+    抓取那一步与 `fetch` 按钮的一致性另有两处钉子：纯逻辑的 `fetch_and_pull_share_one_fetch_scope_policy`
+    / `fetch_and_pull_both_refuse_an_unsafe_mapping`（比对两边的参数数组、命令展示与范围正文，
+    以及越界映射时两边都 blocked），以及真实仓库里的
+    `fetch_scope_fixture_pull_uses_the_same_command`（同一条命令原样执行，只有跟踪引用前移，
+    本地分支/索引/工作区逐条不变；这条含提交与推送，按本工程约束由用户运行）。
     每个用例都核对夹具那份「用户层」配置档案跑完仍然是空的——整条链路从不写配置。
 
 > **联网边界**与 3.12 同一口径：用户点 `pull` 时访问的是**用户自己配置的远端**，认证沿用其已有的
@@ -1192,8 +1259,12 @@ src/
                            确认文字与恢复线索，不碰 Win32、不读文件系统，可桩测）、
                            fetch 目标判读与方案（fetch_plan：三条只读查询的参数构造、
                            `git remote -v` 解析、目标判定——分支配置命中即 ready、否则列候选
-                           chooseRemote、一个也没有或查询失败 blocked 且不猜 origin；
-                           `fetch --recurse-submodules=no <远端>` 命令形态与确认文字，可桩测）、
+                           chooseRemote、一个也没有或查询失败 blocked 且不猜 origin，可桩测）、
+                           抓取范围策略（fetch_scope：两条 `git config --null --get-regexp` 的
+                           参数构造与判读、四个中和项（--recurse-submodules=no／--no-prune／
+                           --no-prune-tags／--no-tags）与点名单个远端合成的命令形态、
+                           remote.<远端>.fetch 映射的逐条验证（越界即拒绝）、
+                           确认正文与随操作显示的范围说明——界面 fetch 按钮与 pull 第一步共用这同一份）、
                            pull 两阶段判读与方案（pull_plan：阶段一查询（分支 / HEAD / 上游三栏 /
                            四条策略配置 / porcelain v2 现状 / 流程痕迹）与阶段二关系查询
                            （rev-list 左右计数、merge-base、--name-only -z 带入清单、
@@ -1433,7 +1504,9 @@ Git 机器输出走 stdout、致命信息走 stderr，两条流分别捕获后�
 已在步骤 13 完成，见 3.10；`撤回最近提交` 已在步骤 14 完成，只移动那一个分支引用（带预期旧值的
 `git update-ref`），浅仓库边界会被识别并拒绝，见 3.11；
 `fetch` 已在步骤 15 完成——只读预检定出抓取目标（分支配置或用户在远端选择界面明确点选），
-命令窗口里执行真实的 `git fetch --recurse-submodules=no <远端>`，只更新远端跟踪引用，见 3.12；
+命令窗口里执行真实的
+`git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags <远端>`，
+只更新那个远端在 `refs/remotes/<远端>/` 之下的跟踪引用（`FETCH_HEAD` 与对象库随之变化），见 3.12；
 同一步骤把**可复用的本地远端测试夹具**补齐（`GitFixture` 多工作区辅助 + 测试远端守卫 +
 `RemoteRig`「bare 远端 + A/B 两工作区」三方形态），供后续 pull/push 步骤继续复用，见 2.1；
 `pull` 已在步骤 16 完成——分「获取」与「整合」两个可见阶段，中间夹三轮只读预检与一次执行前复核，

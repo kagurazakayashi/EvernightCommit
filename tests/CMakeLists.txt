@@ -21,6 +21,8 @@ add_executable(gc_tests
   environment_block_tests.cpp
   fetch_fixture_tests.cpp
   fetch_plan_tests.cpp
+  fetch_scope_fixture_tests.cpp
+  fetch_scope_tests.cpp
   git_fixture_tests.cpp
   git_environment_fixture_tests.cpp
   git_environment_tests.cpp

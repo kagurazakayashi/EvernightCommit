@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "git/commit_plan.h"       // RepositoryWorkflowState（Git 目录里的流程痕迹）
+#include "git/fetch_scope.h"       // 抓取階段共用這一份範圍策略（與界面 fetch 按鈕同一個來源）
 #include "git/repository.h"
 #include "git/undo_commit_plan.h"  // 复用 UndoQueryRead / ReadUndoQuery 这一套判读
 #include "git/workspace_model.h"
@@ -18,7 +19,9 @@ namespace gc::git {
 //
 // pull 分兩個階段，邊界寫死在這裡：
 //   * 階段一「抓取」：先把本地分支與它對應的遠端分支擺出來，經用户點頭後在**命令窗口**裡
-//     fetch（網絡操作必須看得見，絕不藏在界面的「刷新」裡）；
+//     fetch（網絡操作必須看得見，絕不藏在界面的「刷新」裡）。這一步的目標解析、命令行參數、
+//     配置核對與範圍文字**全部出自 git/fetch_scope**，與界面 fetch 按鈕是同一份實現——
+//     兩個入口不可能各說一套範圍；
 //   * 階段二「整合」：fetch 成功後重新讀回事實，判出本地與遠端的關係與可預見的風險，
 //     再經用户點頭執行原生的整合命令。
 // 整合用的是 fetch 下來的那一份具體提交（完整對象 ID），不是 `git pull`：後者會再抓取一次，
@@ -114,9 +117,6 @@ struct PullUpstreamInfo {
     std::wstring_view repositoryDirectory, std::wstring_view trackingRef);
 [[nodiscard]] std::vector<std::wstring> BuildPullConfigArguments(std::wstring_view repositoryDirectory,
                                                                 std::wstring_view key);
-// 點擊_pull_ 之後在命令窗口裡發出的那條抓取：與界面 fetch 按鈕同一個範圍口徑。
-[[nodiscard]] std::vector<std::wstring> BuildPullFetchArguments(std::wstring_view repositoryDirectory,
-                                                               std::wstring_view remoteName);
 // ---- 階段二（fetch 之後）的關係查詢 ----
 [[nodiscard]] std::vector<std::wstring> BuildPullAheadBehindArguments(
     std::wstring_view repositoryDirectory, std::wstring_view headObjectId,
@@ -153,6 +153,9 @@ struct PullTargetQueries {
   GitQueryResult configMergeFf;
   GitQueryResult status;
   bool statusRan = false;
+  // 影響抓取範圍的配置（遠端級與全局級各一條 `git config --null --get-regexp`）：
+  // 階段一的抓取參數與範圍承諾由 git/fetch_scope 決定，缺了這兩份回答就發不出抓取。
+  FetchScopeQueries scope;
   // Git 目录里的流程痕迹：由平台层按档案存在性探得后随查询一起交进来（本模組不碰檔案系統），
   // 判读函数只负责把它如实搬到事实里。probed 为 false 表示这次没探（按「没有痕迹」处理）。
   RepositoryWorkflowState workflow;
@@ -199,6 +202,9 @@ struct PullTargetFacts {
   // 真能不能整合由 Git 自己說——它那種場合本來就先不接受。
   RepositoryWorkflowState workflow;
   bool workflowProbed = false;
+
+  // 影響抓取範圍的配置事實（階段一的抓取參數與範圍文字都由它決定）。
+  FetchScopeFacts scope;
 };
 
 // 把一組原始查詢判讀成事實。純函數：所有輸入都是平台層帶回的结果，可用樁輸出完整測試。
@@ -244,8 +250,8 @@ struct PullRelationshipFacts {
 // ---- 方案：階段一（抓取） ----
 
 enum class PullFetchPlanState {
-  blocked = 0,  // 前提不成立：不產生命令
-  ready,        // 本地分支與遠端分支都問清了：給確認框
+  blocked = 0,  // 前提不成立，或这个远端的抓取范围无法承诺：不产生命令
+  ready,        // 本地分支与远端分支都问清了：给确认框
 };
 
 struct PullFetchPlan {
@@ -257,7 +263,7 @@ struct PullFetchPlan {
   std::wstring remoteBranchRef;
   std::wstring localBranchRef;
 
-  std::vector<std::wstring> arguments;  // {fetch, --recurse-submodules=no, <remote>}
+  std::vector<std::wstring> arguments;  // git/fetch_scope 生成的那一份（与界面 fetch 按钮同源）
   std::wstring operationId;             // 執行器操作 ID（純 ASCII：pull-fetch）
   std::wstring displayName;             // L"pull 抓取"
   std::wstring commandLabel;
