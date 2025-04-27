@@ -26,9 +26,10 @@ struct FetchProbeDeps {
   git::GitQueryRunner runner;
 };
 
-// 只读地发起一组目标查询（当前分支 / 分支配置的远端 / 远端清单），并把回答交给
-// git/fetch_plan 判读。全程隐藏窗口子进程，不弹命令窗口、不写对象库、不访问远端；
-// 不在分支上时根本不发「分支配置的远端」那条查询（那种仓库本来也没有分支名可拼键）。
+// 只读地发起一组目标查询（当前分支 / 分支配置的远端 / 远端清单），外加 git/fetch_scope
+// 那两条「影响抓取范围」的配置查询，并把回答交给 git/fetch_plan 判读。全程隐藏窗口子进程，
+// 不弹命令窗口、不写对象库、不访问远端；不在分支上时根本不发「分支配置的远端」那条查询
+// （那种仓库本来也没有分支名可拼键）。
 [[nodiscard]] git::FetchTargetFacts CollectFetchTarget(const FetchProbeRequest& request,
                                                        const FetchProbeDeps& deps);
 

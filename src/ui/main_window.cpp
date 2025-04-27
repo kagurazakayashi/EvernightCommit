@@ -1844,20 +1844,22 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   // 下一次点「撤回最近提交」的发布状态判断用的就是这批新读回的引用。
   if (fetchOperation) {
     if (outcome.succeeded) {
-      conclusion += L"｜fetch 只更新远端跟踪引用；分支摘要正按新状态重读，"
-                    L"HEAD、本地分支、索引与工作区没有被这次操作改动。";
+      conclusion += L"｜fetch 只按确认框上那份范围更新了远端跟踪引用（.git/FETCH_HEAD 与对象库随抓取变化，"
+                    L"这是 fetch 本身的行为）；HEAD、本地分支、索引与工作区不归它动。"
+                    L"分支摘要正按新状态重读。";
     } else {
       conclusion += L"｜fetch 未成功：远端跟踪引用是否变化以重读结果为准。本程序不自动重试，"
-                    L"也不会删除或改写任何远端配置；原因看命令窗口里 Git 的真实输出。";
+                    L"也不会因此 prune、换远端或改写任何远端配置；原因看命令窗口里 Git 的真实输出。";
     }
   }
-  // pull 的两个阶段各自有各自的结论：获取成功只是「远端跟踪引用更新了」，
+  // pull 的两个阶段各自有各自的结论：获取成功只是「远端跟踪引用按承诺更新了」，
   // 整合的结论才涉及分支/索引/工作区。两者都不把「窗口还开着」当成 Git 成功。
   if (pullFetchOperation) {
     conclusion += outcome.succeeded
-                      ? L"｜pull 第一步（获取）完成：只更新了远端跟踪引用；正在重读现状并核对本地与远端的关系…"
+                      ? L"｜pull 第一步（获取）完成：只按确认框上那份范围更新了远端跟踪引用"
+                        L"（FETCH_HEAD 与对象库随之变化）；正在重读现状并核对本地与远端的关系…"
                       : L"｜pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
-                        L"本程序不自动重试，也不会删除或改写任何远端配置。";
+                        L"本程序不自动重试，也不会因此 prune、换远端或改写任何远端配置。";
   }
   if (pullIntegrateOperation) {
     conclusion += outcome.succeeded
@@ -2533,8 +2535,9 @@ void MainWindow::RequestFetch(HWND window) {
                        [](const platform::FetchProbeRequest& pending) {
                          return platform::RunFetchProbeLoad(pending);
                        });
-  state_.SetStatusNote(L"fetch 前先在后台只读询问：当前分支、这个分支配置的远端、仓库既有远端清单"
-                       L"（只读查询，不弹命令窗口、不接触任何远端），问回来后给出抓取目标…");
+  state_.SetStatusNote(L"fetch 前先在后台只读询问：当前分支、这个分支配置的远端、仓库既有远端清单，"
+                       L"外加会影响抓取范围的配置（prune／pruneTags／标签跟随与这个远端的 fetch 映射）"
+                       L"——都是只读查询，不弹命令窗口、不接触任何远端；问回来后核对范围并给出抓取目标…");
   RefreshTexts(window);
 }
 
@@ -2706,8 +2709,8 @@ void MainWindow::RequestPull(HWND window) {
                         return platform::RunPullProbeLoad(pending);
                       });
   state_.SetStatusNote(L"pull 第一步：先在后台只读问清「在哪个分支、这个分支的上游是谁、你的 "
-                       L"pull/rebase 与 ff 配置怎么写的、工作区现状」（不弹命令窗口、不接触任何远端），"
-                       L"问回来后先把要处理的分支对摆给你看…");
+                       L"pull/rebase 与 ff 配置怎么写的、会影响抓取范围的配置（prune／标签／fetch 映射）、"
+                       L"工作区现状」（不弹命令窗口、不接触任何远端），问回来后先把要处理的分支对摆给你看…");
   RefreshTexts(window);
 }
 
@@ -2791,7 +2794,7 @@ void MainWindow::OnPullFetchSettled(HWND window, bool fetchSucceeded) {
     pendingPull_ = PendingPull{};
     state_.SetStatusNote(L"pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
                          L"远端跟踪引用有没有被这次抓取改动，以正在重读的现状为准；本程序不自动重试，"
-                         L"也不会删除或改写任何远端配置。原因看命令窗口里 Git 的真实输出。");
+                         L"也不会因此 prune、改用别的远端或改写任何远端配置。原因看命令窗口里 Git 的真实输出。");
     RefreshTexts(window);
     return;
   }

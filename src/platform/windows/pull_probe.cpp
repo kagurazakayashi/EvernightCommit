@@ -101,6 +101,13 @@ git::PullTargetFacts CollectPullTarget(const PullProbeRequest& request, const Pu
   queries.statusRan = true;
   queries.status = RunQuery(deps.runner, request.exePath, dir, git::BuildWorkspaceStatusArguments(dir));
 
+  // 影响抓取范围的两条配置查询：阶段一那条 fetch 的参数与范围承诺由 git/fetch_scope 按它们决定，
+  // 与界面 fetch 按钮发的是同样两条、走的是同一个判读函数。
+  queries.scope.remoteConfig =
+      RunQuery(deps.runner, request.exePath, dir, git::BuildFetchScopeRemoteConfigArguments(dir));
+  queries.scope.globalConfig =
+      RunQuery(deps.runner, request.exePath, dir, git::BuildFetchScopeGlobalConfigArguments(dir));
+
   // 流程痕迹的依据是 Git 目录里的档案（MERGE_HEAD、rebase-merge\ …），与创建提交/撤回同一來源：
   // 正在走 merge/rebase 的仓库不能叠一次 pull，而这既不是查询也不是命令能问出来的。
   if (!request.absoluteGitDir.empty()) {

@@ -351,16 +351,6 @@ std::vector<std::wstring> BuildPullConfigArguments(std::wstring_view repositoryD
                                    L"config", L"--get", std::wstring(key)};
 }
 
-std::vector<std::wstring> BuildPullFetchArguments(std::wstring_view repositoryDirectory,
-                                                  std::wstring_view remoteName) {
-  if (remoteName.empty()) {
-    return {};
-  }
-  // 与界面 fetch 按钮同一个范围口径：只更新这一个远端的跟踪引用，不 --all、不 prune、不递归子模块。
-  return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"fetch",
-                                   L"--recurse-submodules=no", std::wstring(remoteName)};
-}
-
 std::vector<std::wstring> BuildPullAheadBehindArguments(std::wstring_view repositoryDirectory,
                                                         std::wstring_view headObjectId,
                                                         std::wstring_view trackingObjectId) {
@@ -440,6 +430,9 @@ PullUpstreamInfo ParsePullUpstreamLine(std::wstring_view line) {
 
 PullTargetFacts InterpretPullTarget(const PullTargetQueries& queries) {
   PullTargetFacts facts;
+  // 抓取范围的配置先读回来：阶段一那条 fetch 的参数与承诺由 git/fetch_scope 按这份事实生成，
+  // 与界面 fetch 按钮用的是同一个判读函数（两个入口不可能各说一套范围）。
+  facts.scope = InterpretFetchScope(queries.scope);
 
   const UndoQueryRead symbolic = ReadUndoQuery(queries.symbolicRef);
   if (symbolic.outcome == UndoQueryOutcome::failed) {
@@ -793,6 +786,14 @@ PullFetchPlan BuildPullFetchPlan(const PullTargetFacts& facts, std::wstring_view
     return block(refusal + L"\n\n没有发出任何命令，也没有接触远端或改动仓库。");
   }
 
+  // 抓取阶段与界面 fetch 按钮共用 git/fetch_scope 那一份策略：目标就是分支上游的那个远端，
+  // 命令行上能中和的副作用（prune／pruneTags／标签跟随／子模块递归）一律中和，
+  // 中和不了的映射（remote.<远端>.fetch 指向别的本地命名空间）在执行前拒绝并点名那一句配置。
+  const FetchScopeDecision scope = DecideFetchScope(facts.scope, facts.upstreamRemote);
+  if (!scope.allowed) {
+    return block(scope.refusal + L"\n\n没有发出任何命令，也没有接触远端或改动仓库。");
+  }
+
   PullFetchPlan plan;
   plan.state = PullFetchPlanState::ready;
   plan.operationId = L"pull-fetch";
@@ -801,31 +802,30 @@ PullFetchPlan BuildPullFetchPlan(const PullTargetFacts& facts, std::wstring_view
   plan.trackingRef = facts.upstreamTrackingRef;
   plan.remoteBranchRef = facts.upstreamRemoteBranch;
   plan.localBranchRef = facts.branchRef;
-  // 抓取参数不带 -C：这条命令走命令窗口执行器，工作目录由执行器显式指定。
-  plan.arguments = {L"fetch", L"--recurse-submodules=no", facts.upstreamRemote};
-  plan.commandLabel = L"git fetch --recurse-submodules=no " + facts.upstreamRemote;
+  plan.arguments = scope.arguments;
+  plan.commandLabel = scope.commandLabel;
   plan.explanation = L"本地分支 " + facts.branchName + L" 的上游是远端「" + facts.upstreamRemote +
                      L"」的 " + RemoteBranchDisplay(facts) + L"。";
-  plan.notice = L"pull 第一步（获取）范围：只更新远端「" + facts.upstreamRemote +
-                L"」的远端跟踪引用；HEAD、本地分支、索引与工作区都不受影响，不 prune、不抓所有远端、"
-                L"不递归子模块、不合并。";
+  plan.notice = L"pull 第一步（获取）范围：" + scope.noticeCore;
 
-  std::wstring text;
-  text += L"这次 pull 要处理的分支对：\n";
-  text += L" · 本地分支：" + facts.branchRef + L"（现在在 " + ShortObjectId(facts.headObjectId) + L"）\n";
-  text += L" · 远端分支：远端「" + facts.upstreamRemote + L"」的 " + RemoteBranchDisplay(facts) + L"\n";
-  text += L" · " + TrackingRefSentence(facts);
-  text += L"\n将在命令窗口里执行：git fetch --recurse-submodules=no " + facts.upstreamRemote +
-          L"（工作目录：" + std::wstring(repositoryDirectory) + L"）\n\n";
-  text += L"这是 pull 的第一步「获取」，它只做上面那一句：把远端最新的位置读到本地的 " +
-          facts.upstreamTrackingRef + L"。\n";
-  text += L"不移动你的分支、不动索引与工作区、也不把任何东西合并进你的工作。\n";
-  text += ConfigSentence(facts);
-  text += L"抓取结束后，本程序会重新读一回仓库现状，把「本地与远端的关系、可预见的风险、"
-          L"准备用哪种整合方式」摆给你看，再问一次才动手整合。\n";
-  text += L"需要口令或交互时，命令窗口里由 Git 自己提问，沿用你已有的认证方式；失败时窗口里留着\n";
-  text += L"Git 的真实输出。取消这一步：不打开命令窗口、不接触远端、不改动仓库。";
-  plan.confirmationText = std::move(text);
+  std::wstring leading;
+  leading += L"这次 pull 要处理的分支对：\n";
+  leading += L" · 本地分支：" + facts.branchRef + L"（现在在 " + ShortObjectId(facts.headObjectId) +
+             L"）\n";
+  leading += L" · 远端分支：远端「" + facts.upstreamRemote + L"」的 " + RemoteBranchDisplay(facts) + L"\n";
+  leading += L" · " + TrackingRefSentence(facts) + L"\n";
+
+  std::wstring stage;
+  stage += L"这一步只做上面那一条命令：把远端最新的位置读到本地的 " + facts.upstreamTrackingRef +
+           L"，整合是它成功之后的下一步，本程序不会把两件事捆在一起做。\n";
+  stage += ConfigSentence(facts);
+  stage += L"抓取结束后，本程序会重新读一回仓库现状，把「本地与远端的关系、可预见的风险、"
+           L"准备用哪种整合方式」摆给你看，再问一次才动手整合。\n";
+
+  plan.confirmationText = BuildFetchConfirmationText(
+      scope, facts.upstreamRemote, L"",
+      L"当前分支的上游配置（branch." + facts.branchName + L".remote = " + facts.upstreamRemote + L"）",
+      repositoryDirectory, leading, stage);
   return plan;
 }
 

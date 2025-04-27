@@ -1,7 +1,7 @@
 // 「pull」判读与方案的纯逻辑测试：全部用桩化的 GitQueryResult 与手工搭出的事实驱动生产逻辑，
 // 不起真实 Git、不碰文件系统、不接触网络。覆盖：
 //   * 各条只读查询的参数形态（-C 绑定、--no-optional-locks、--quiet 语义、-z 清单、
-//     merge-tree 的无损预演形态、fetch 的范围口径）；
+//     merge-tree 的无损预演形态、抓取阶段那两条「影响范围」的配置查询）；
 //   * 阶段一判读：分支 / HEAD / 上游三栏 / 四条配置 / 现状，以及「没设」与「查询失败」的区别；
 //   * 阶段二判读：rev-list 的「左 右」两数与四种关系、merge-tree 的三种结局
 //     （0 无冲突、1 有冲突并能认出文件名、129 视为不支持而降级为保守提示）；
@@ -132,6 +132,10 @@ PullTargetQueries HealthyTargetQueries() {
   queries.configMergeFf = NoResult();
   queries.statusRan = true;
   queries.status = Answer(0, L"");  // porcelain v2 的「没有任何变化」就是空输出
+  // 抓取范围的配置：默认「这类配置一条也没有」（--get-regexp 无匹配 = 退出码 1 + 空输出）。
+  // 阶段一的抓取参数由 git/fetch_scope 按这份事实生成，缺了回答就发不出抓取。
+  queries.scope.remoteConfig = NoResult();
+  queries.scope.globalConfig = NoResult();
   return queries;
 }
 
@@ -243,14 +247,6 @@ GC_TEST(pull_query_arguments_bind_repository_and_stay_read_only) {
   GC_CHECK(HasArgument(incoming, L"--name-only") && HasArgument(incoming, L"-z"));
   const std::vector<std::wstring> conflicts = gc::git::BuildPullConflictListingArguments(kRoot);
   GC_CHECK(HasArgument(conflicts, L"--diff-filter=U") && HasArgument(conflicts, L"-z"));
-
-  // 抓取目标为空就不发；非空时范围口径与界面 fetch 一致（不 --all、不 prune、不递归子模块）。
-  GC_CHECK(gc::git::BuildPullFetchArguments(kRoot, L"").empty());
-  const std::vector<std::wstring> fetch = gc::git::BuildPullFetchArguments(kRoot, L"origin");
-  GC_CHECK(HasArgument(fetch, L"fetch") && HasArgument(fetch, L"--recurse-submodules=no") &&
-           HasArgument(fetch, L"origin"));
-  GC_CHECK(!HasArgument(fetch, L"--all") && !HasArgument(fetch, L"--prune") &&
-           !HasArgument(fetch, L"pull") && !HasArgument(fetch, L"--rebase"));
 
   GC_CHECK(gc::git::BuildPullConfigArguments(kRoot, L"").empty());
   const std::vector<std::wstring> config = gc::git::BuildPullConfigArguments(kRoot, L"pull.rebase");
@@ -447,15 +443,31 @@ GC_TEST(pull_fetch_plan_ready_names_both_branches_and_promises_scope) {
   GC_CHECK(plan.remoteName == L"origin");
   GC_CHECK(plan.trackingRef == L"refs/remotes/origin/main");
   GC_CHECK(plan.localBranchRef == L"refs/heads/main");
-  GC_CHECK(plan.arguments ==
-           std::vector<std::wstring>({L"fetch", L"--recurse-submodules=no", L"origin"}));
+  // 抓取参数出自 git/fetch_scope：四个中和项一个都不能少，也不许出现任何扩大范围的形态。
+  GC_CHECK(plan.arguments == std::vector<std::wstring>({L"fetch", L"--recurse-submodules=no",
+                                                        L"--no-prune", L"--no-prune-tags", L"--no-tags",
+                                                        L"origin"}));
+  GC_CHECK(!HasArgument(plan.arguments, L"--all"));
+  GC_CHECK(!HasArgument(plan.arguments, L"--multiple"));
+  GC_CHECK(!HasArgument(plan.arguments, L"--prune"));
+  GC_CHECK(!HasArgument(plan.arguments, L"--tags"));
+  GC_CHECK(!HasArgument(plan.arguments, L"pull"));
+  GC_CHECK(!HasArgument(plan.arguments, L"--rebase"));
   GC_CHECK(plan.operationId == L"pull-fetch");
   GC_CHECK(TextContains(plan.confirmationText, L"refs/heads/main"));
   GC_CHECK(TextContains(plan.confirmationText, L"refs/remotes/origin/main"));
-  GC_CHECK(TextContains(plan.confirmationText, L"git fetch --recurse-submodules=no origin"));
+  GC_CHECK(TextContains(plan.confirmationText,
+                        L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags origin"));
+  // 范围承诺与界面 fetch 按钮同出一处：允许命名空间、被中和的配置、会变的东西都得说清。
+  GC_CHECK(TextContains(plan.confirmationText, L"只更新远端「origin」在 refs/remotes/origin/ 之下"));
+  GC_CHECK(TextContains(plan.confirmationText, L".git/FETCH_HEAD"));
+  GC_CHECK(TextContains(plan.confirmationText, L"对象库"));
+  GC_CHECK(TextContains(plan.confirmationText, L"不说「磁盘完全只读」"));
+  GC_CHECK(TextContains(plan.confirmationText, L"确实会被写"));
   // 确认框必须交代这是两步里的第一步，以及这一步不做什么。
-  GC_CHECK(TextContains(plan.confirmationText, L"第一步"));
-  GC_CHECK(TextContains(plan.confirmationText, L"不动索引与工作区"));
+  GC_CHECK(TextContains(plan.notice, L"第一步"));
+  GC_CHECK(TextContains(plan.confirmationText, L"整合是它成功之后的下一步"));
+  GC_CHECK(TextContains(plan.confirmationText, L"不合并、不改上游"));
   // 已有配置要展示出来：策略不是界面替人定的。
   GC_CHECK(TextContains(plan.confirmationText, L"pull.rebase"));
   GC_CHECK(TextContains(plan.confirmationText, L"pull.ff"));

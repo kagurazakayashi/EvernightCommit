@@ -61,6 +61,12 @@ git::FetchTargetFacts CollectFetchTarget(const FetchProbeRequest& request, const
 
   queries.remotes =
       RunQuery(deps.runner, request.exePath, dir, git::BuildFetchRemotesArguments(dir));
+  // 影响抓取范围的两条配置查询（远端级与全局级）：与 pull 第一步用的是 git/fetch_scope
+  // 里同一份参数构造，两个入口的范围口径因此不可能分叉。
+  queries.scope.remoteConfig =
+      RunQuery(deps.runner, request.exePath, dir, git::BuildFetchScopeRemoteConfigArguments(dir));
+  queries.scope.globalConfig =
+      RunQuery(deps.runner, request.exePath, dir, git::BuildFetchScopeGlobalConfigArguments(dir));
   return git::InterpretFetchTarget(queries);
 }
 

@@ -1,8 +1,10 @@
 // 「fetch」判读与方案的纯逻辑测试：全部用桩化的 GitQueryResult 驱动生产逻辑，
-// 不起真实 Git、不碰文件系统。覆盖：三条只读查询的参数形态（-C 绑定、--quiet 语义）、
+// 不起真实 Git、不碰文件系统。覆盖：三条目标查询的参数形态（-C 绑定、--quiet 语义）、
 // git remote -v 输出的解析（fetch/push 行、只有名字的行、中文与空格 URL）、
 // 目标判定的四条规矩——分支配置命中即确定；配置与清单对不上/没配置/游离 HEAD 时
 // 一律摆出既有远端让人选；一个也没有就明说不猜 origin；查询失败不在这上面猜。
+// 抓取范围（prune／标签／映射）本身在 tests/fetch_scope_tests.cpp 专项覆盖，这里只核对
+// 两个入口都从那份策略取参数与确认文字。
 // 真实 Git 的远端效果与「B 推 A 抓」的完整链路在 fetch_fixture_tests.cpp 用临时仓库验证。
 #include <algorithm>
 #include <cstdio>
@@ -64,6 +66,8 @@ std::string Narrow(std::wstring_view text) {
 }
 
 // 一份「分支 main、配置了 origin、清单里有 origin」的桩查询组。
+// 抓取范围的两条配置查询默认回答「这类配置一条也没有」（--get-regexp 无匹配 = 退出码 1 + 空输出），
+// 需要按配置判定的形态由各用例改写 queries.scope（详见 tests/fetch_scope_tests.cpp）。
 FetchTargetQueries HealthyQueries() {
   FetchTargetQueries queries;
   queries.symbolicRef = Answer(0, L"refs/heads/main\n");
@@ -71,6 +75,8 @@ FetchTargetQueries HealthyQueries() {
   queries.branchRemote = Answer(0, L"origin\n");
   queries.remotes = Answer(0, L"origin\tD:\\\\bare\\\\origin.git (fetch)\n"
                               L"origin\tD:\\\\bare\\\\origin.git (push)\n");
+  queries.scope.remoteConfig = Answer(1, L"");
+  queries.scope.globalConfig = Answer(1, L"");
   return queries;
 }
 
@@ -181,19 +187,26 @@ GC_TEST(fetch_ready_only_from_explicit_branch_remote_config) {
   const FetchPlan plan = gc::git::BuildFetchPlan(HealthyFacts(), kRoot);
   GC_CHECK(plan.state == FetchPlanState::ready);
   GC_CHECK(plan.remoteName == L"origin");
-  GC_REQUIRE_MESSAGE(plan.arguments.size() == 3, "ready 方案应凑出三条参数");
+  // 参数是 git/fetch_scope 生成的那一份：递归关掉 + prune/pruneTags/标签逐项中和 + 点名单个远端。
+  GC_REQUIRE_MESSAGE(plan.arguments.size() == 6, "ready 方案应凑出六条参数");
   GC_CHECK(plan.arguments[0] == L"fetch");
   GC_CHECK(plan.arguments[1] == L"--recurse-submodules=no");
-  GC_CHECK(plan.arguments[2] == L"origin");
-  // 范围承诺：递归选项明确写死；没有 --prune、没有 --all、不会顺带 pull。
+  GC_CHECK(plan.arguments[2] == L"--no-prune");
+  GC_CHECK(plan.arguments[3] == L"--no-prune-tags");
+  GC_CHECK(plan.arguments[4] == L"--no-tags");
+  GC_CHECK(plan.arguments[5] == L"origin");
+  // 范围承诺：没有 --prune/--all/--multiple，也不会顺带 pull。
   GC_CHECK(!HasArgument(plan.arguments, L"--prune"));
   GC_CHECK(!HasArgument(plan.arguments, L"--all"));
+  GC_CHECK(!HasArgument(plan.arguments, L"--multiple"));
   GC_CHECK(!HasArgument(plan.arguments, L"pull"));
   GC_CHECK(plan.operationId == L"fetch" && plan.displayName == L"fetch");
   GC_CHECK(TextContains(plan.confirmationText, L"branch.main.remote"));
-  GC_CHECK(TextContains(plan.confirmationText, L"git fetch --recurse-submodules=no origin"));
-  GC_CHECK(TextContains(plan.confirmationText, L"不移动 HEAD"));
-  GC_CHECK(TextContains(plan.confirmationText, L"不隐式 prune"));
+  GC_CHECK(TextContains(plan.confirmationText,
+                        L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags origin"));
+  GC_CHECK(TextContains(plan.confirmationText, L"HEAD 与本地分支都不在这次的范围里"));
+  GC_CHECK(TextContains(plan.confirmationText, L"不删除任何引用"));
+  GC_CHECK(TextContains(plan.confirmationText, L".git/FETCH_HEAD"));
   GC_CHECK(TextContains(plan.confirmationText, L"工作目录"));
   GC_CHECK(TextContains(plan.notice, L"只更新远端"));
 }
@@ -226,7 +239,7 @@ GC_TEST(fetch_unconfigured_but_single_remote_still_needs_an_explicit_choice) {
   GC_CHECK(chosen.state == FetchPlanState::ready);
   GC_CHECK(chosen.remoteName == L"origin");
   GC_CHECK(TextContains(chosen.confirmationText, L"你在远端选择界面里刚选定的既有远端"));
-  GC_REQUIRE_MESSAGE(chosen.arguments.size() == 3, "选定的方案应凑出三条参数");
+  GC_REQUIRE_MESSAGE(chosen.arguments.size() == 6, "选定的方案应凑出六条参数");
   GC_CHECK(chosen.arguments[1] == L"--recurse-submodules=no");
 }
 
