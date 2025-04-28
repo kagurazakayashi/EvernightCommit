@@ -13,6 +13,12 @@
 //   * 本地未提交改动重叠 / 未跟踪文件撞名：预检列出受影响文件并要求明确继续；
 //     真跑时 Git 的拒绝与预检结论一致，本地未提交的内容一字未动；
 //   * 已配置 pull.rebase=true：分叉时不问策略、直接给变基命令，执行后历史是线性的；
+//     本地有合并提交时确认框点名「会被压平」，执行后父子图里确实没有合并提交；
+//   * branch.<名>.rebase=merges：命令真的带 --rebase-merges，执行后父子图里合并提交仍是两父；
+//   * branch.<名>.rebase=（空值）：存在即说了算，压掉 pull.rebase=true，真的产生两父合并提交；
+//   * pull.ff=only 凌驾配置策略：分叉时发 merge --ff-only，Git 给出原生拒绝、仓库零改动；
+//   * interactive 与无效取值：blocked、不产生任何命令，无效取值还与原生 git pull 的
+//     fatal 互相印证；自定义 merge driver 命中：预演结论降档为「强提示」并进入复核比对；
 //   * 取消整合：那次可见的 fetch 只留下「远端跟踪引用前移」，本地分支/索引/工作区不动；
 //   * 执行前复核：外部把分支挪走时 DescribePullChange 给出原因（旧方案作废）；
 //   * 整条链路跑完后，夹具那份「用户层」配置档案仍然是空的——本程序从不写配置。
@@ -647,6 +653,342 @@ GC_TEST(pull_configured_rebase_decides_without_asking_and_replays_linearly) {
   const std::wstring parents =
       Trimmed(fixture.RunCheckedInRepo({L"rev-list", L"--parents", L"-n", L"1", L"HEAD"}).out);
   GC_CHECK(parents == newHead + L" " + bSha);           // 只有一个父：没有合并提交
+}
+
+// ---- 保留合并结构的变基：配置说 merges，命令与父子图都得说同一件事 ----
+
+// 让 A 在本地先做一次合并：feature 分支的提交被 merge 进 main（产生一个两父的合并提交）。
+// 这是「本地独有提交里有合并提交」的落地形态——merges 策略必须保住它，普通变基必须如实披露压平。
+void AddLocalMergeOnA(RemoteRig& rig) {
+  GitFixture& fixture = rig.fixture();
+  rig.UseA();
+  fixture.RunCheckedInRepo({L"checkout", L"-b", L"feature"});
+  fixture.WriteFile(L"feat.txt", "feature 的改动\n");
+  fixture.StageAll();
+  fixture.Commit(L"feature 的提交");
+  fixture.RunCheckedInRepo({L"checkout", L"main"});
+  fixture.RunCheckedInRepo({L"merge", L"--no-edit", L"feature"});
+}
+
+std::vector<std::wstring> HeadParentLines(GitFixture& fixture, std::wstring_view range) {
+  const GitRun listed = fixture.RunCheckedInRepo(
+      {L"rev-list", L"--parents", std::wstring(range)});
+  std::vector<std::wstring> lines;
+  std::wstring current;
+  for (const wchar_t c : Trimmed(listed.out)) {
+    if (c == L'\n') {
+      lines.push_back(current);
+      current.clear();
+      continue;
+    }
+    current.push_back(c);
+  }
+  if (!current.empty()) {
+    lines.push_back(current);
+  }
+  return lines;
+}
+
+GC_TEST(pull_rebase_merges_config_carries_rebase_merges_and_keeps_merge_structure) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+
+  AddLocalMergeOnA(rig);
+  const std::wstring headBefore = fixture.HeadSha();
+
+  rig.UseB();
+  fixture.WriteFile(L"b.txt", "来自 B\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 的提交");
+  fixture.Push(L"origin", L"main");
+  const std::wstring bSha = fixture.HeadSha();
+
+  rig.UseA();
+  // 分支级配置说了算：branch.main.rebase = merges。
+  fixture.RunCheckedInRepo({L"config", L"branch.main.rebase", L"merges"});
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+
+  const PullProbeOutcome outcome = Probe(fixture, true);
+  GC_REQUIRE_MESSAGE(outcome.target.queryOk, ToUtf8(outcome.target.queryFailure));
+  GC_CHECK(outcome.target.configBranchRebase == L"merges");
+  GC_CHECK(outcome.target.configBranchRebasePresent);
+  GC_CHECK(outcome.relationship.relationship == PullRelationship::diverged);
+  // 「本地独有提交里有几个合并提交」必须由真实查询回答出来（这里是那一次合并）。
+  GC_CHECK(outcome.relationship.localMergeCountKnown);
+  GC_CHECK(outcome.relationship.localMergeCount == 1);
+
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::rebaseMerges);
+  // 命令必须真的带 --rebase-merges——「识别出 merges 却发普通变基」就是本项修的错。
+  GC_CHECK(ListContains(plan.arguments, L"--rebase-merges"));
+  GC_CHECK(ListContains(plan.arguments, L"rebase"));
+  GC_CHECK(plan.arguments.back() == bSha);
+  GC_CHECK(Contains(plan.strategySource, L"branch.main.rebase = merges"));
+  GC_CHECK(Contains(plan.confirmationText, L"保留合并结构"));
+  GC_CHECK(Contains(plan.confirmationText, L"--rebase-merges：本地独有提交里的 1 个合并提交"));
+
+  const GitRun integrated = ExecutePlan(fixture, plan.arguments);
+  GC_REQUIRE_MESSAGE(integrated.Success(),
+                     "保留结构的变基应当成功；退出码 " + std::to_string(integrated.exitCode) + "：" +
+                         ToUtf8(integrated.err));
+  const std::wstring newHead = fixture.HeadSha();
+  GC_CHECK(newHead != headBefore);  // 重放了，ID 变了
+  // 落地核对父子图，而不是只看命令行有没有那个参数：
+  // base..HEAD 里仍恰有一个两父提交，而且它的其中一个父正是远端那一份。
+  const std::wstring base = outcome.relationship.mergeBaseObjectId;
+  size_t mergeLines = 0;
+  bool remoteIsParentOfMerge = false;
+  for (const std::wstring& line : HeadParentLines(fixture, base + L".." + newHead)) {
+    size_t tokens = 1;
+    for (const wchar_t c : line) {
+      if (c == L' ') {
+        ++tokens;
+      }
+    }
+    if (tokens >= 4) {  // 「自身 父1 父2」：两父以上即合并提交
+      ++mergeLines;
+      if (Contains(line, bSha)) {
+        remoteIsParentOfMerge = true;
+      }
+    }
+  }
+  GC_CHECK_MESSAGE(mergeLines == 1,
+                   "合并结构必须被保住（应恰有 1 个合并提交，实际 " + std::to_string(mergeLines) + "）");
+  GC_CHECK_MESSAGE(remoteIsParentOfMerge, "重放后的合并提交应把远端那份提交作为父之一");
+  GC_CHECK(fixture.ShowFileAtHead(L"feat.txt") == "feature 的改动\n");
+  GC_CHECK(fixture.ShowFileAtHead(L"b.txt") == "来自 B\n");
+  GC_CHECK(fixture.StatusPorcelain().empty());
+}
+
+// 普通变基（pull.rebase=true）遇到本地合并提交：原生就是压平，本程序必须在确认里点名，
+// 落地后用父子图验证「确实被压平了、也确实提前说清楚了」。
+GC_TEST(pull_plain_rebase_config_flattens_local_merge_and_says_so) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+
+  AddLocalMergeOnA(rig);
+
+  rig.UseB();
+  fixture.WriteFile(L"b.txt", "来自 B\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 的提交");
+  fixture.Push(L"origin", L"main");
+  const std::wstring bSha = fixture.HeadSha();
+
+  rig.UseA();
+  fixture.RunCheckedInRepo({L"config", L"pull.rebase", L"true"});
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+
+  const PullProbeOutcome outcome = Probe(fixture, true);
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::rebase);
+  GC_CHECK(!ListContains(plan.arguments, L"--rebase-merges"));
+  GC_CHECK(plan.requiresForce);
+  // 压平这件事被如实点名，并给出 merges 出路——不许悄悄压平后还宣称保住了结构。
+  GC_CHECK(Contains(RiskText(plan), L"1 个合并提交"));
+  GC_CHECK(Contains(RiskText(plan), L"压平"));
+  GC_CHECK(Contains(RiskText(plan), L"设为 merges"));
+
+  const GitRun integrated = ExecutePlan(fixture, plan.arguments);
+  GC_REQUIRE_MESSAGE(integrated.Success(),
+                     "普通变基应当成功；退出码 " + std::to_string(integrated.exitCode) + "：" +
+                         ToUtf8(integrated.err));
+  const std::wstring base = outcome.relationship.mergeBaseObjectId;
+  const GitRun merges = fixture.RunCheckedInRepo(
+      {L"rev-list", L"--count", L"--merges", base + L".." + fixture.HeadSha()});
+  GC_CHECK_MESSAGE(Trimmed(merges.out) == L"0",
+                   "普通变基后不应再有合并提交（原生行为），实际：" + ToUtf8(merges.out));
+  GC_CHECK(fixture.ShowFileAtHead(L"b.txt") == "来自 B\n");
+}
+
+// ---- 配置的拒绝形态：ff-only 凌驾、交互式与无效取值都不产生「另一种策略」 ----
+
+GC_TEST(pull_ff_only_config_beats_configured_rebase_and_leaves_repo_untouched) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+
+  rig.UseB();
+  fixture.WriteFile(L"b.txt", "来自 B\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 的提交");
+  fixture.Push(L"origin", L"main");
+
+  rig.UseA();
+  fixture.WriteFile(L"a.txt", "来自 A\n");
+  fixture.StageAll();
+  fixture.Commit(L"A 的提交");
+  // 配置既定了变基、又要求只快进：原生规则是 ff-only 优先，分叉时当场拒绝。
+  fixture.RunCheckedInRepo({L"config", L"pull.rebase", L"true"});
+  fixture.RunCheckedInRepo({L"config", L"pull.ff", L"only"});
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+
+  const PullProbeOutcome outcome = Probe(fixture, true);
+  const RepoStamp before = Stamp(fixture);
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);
+  GC_CHECK(ListContains(plan.arguments, L"--ff-only"));
+  GC_CHECK(!ListContains(plan.arguments, L"rebase"));  // 绝不是变基
+  GC_CHECK(plan.requiresForce);
+  GC_CHECK(Contains(plan.strategySource, L"优先于策略"));
+
+  // 命令照发：Git 自己给出原生的拒绝，仓库一个字节不动。
+  const GitRun integrated = ExecutePlan(fixture, plan.arguments);
+  GC_CHECK_MESSAGE(!integrated.Success() && integrated.exitCode != 0,
+                   "分叉 + --ff-only 应当被 Git 拒绝");
+  GC_CHECK(Contains(integrated.err + integrated.out, L"Not possible to fast-forward"));
+  GC_CHECK_MESSAGE(StampDiff(before, Stamp(fixture)).empty(), StampDiff(before, Stamp(fixture)));
+}
+
+GC_TEST(pull_interactive_and_invalid_rebase_config_refuse_without_any_command) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+
+  rig.UseB();
+  fixture.WriteFile(L"b.txt", "来自 B\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 的提交");
+  fixture.Push(L"origin", L"main");
+
+  rig.UseA();
+  fixture.WriteFile(L"a.txt", "来自 A\n");
+  fixture.StageAll();
+  fixture.Commit(L"A 的提交");
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+  const RepoStamp before = Stamp(fixture);
+
+  // 交互式：原生会开编辑器当场定历史，本程序承诺不了「确认=得到」——拒绝且不降级。
+  fixture.RunCheckedInRepo({L"config", L"pull.rebase", L"interactive"});
+  {
+    const PullProbeOutcome outcome = Probe(fixture, true);
+    GC_REQUIRE_MESSAGE(outcome.target.queryOk, ToUtf8(outcome.target.queryFailure));
+    GC_CHECK(outcome.target.configPullRebase == L"interactive");
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+    GC_CHECK_MESSAGE(plan.state == PullPlanState::blocked, ToUtf8(plan.explanation));
+    GC_CHECK(plan.arguments.empty());
+    GC_CHECK(Contains(plan.explanation, L"交互式变基"));
+    GC_CHECK(Contains(plan.explanation, L"悄悄换成普通变基或合并"));
+  }
+
+  // 无效取值：原生 git pull 在联网前就 die——本程序同样拒绝，并且拒绝得跟原生同一个理由。
+  fixture.RunCheckedInRepo({L"config", L"--unset", L"pull.rebase"});
+  fixture.RunCheckedInRepo({L"config", L"pull.rebase", L"bogus"});
+  {
+    const PullProbeOutcome outcome = Probe(fixture, true);
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+    GC_CHECK_MESSAGE(plan.state == PullPlanState::blocked, ToUtf8(plan.explanation));
+    GC_CHECK(plan.arguments.empty());
+    GC_CHECK(Contains(plan.explanation, L"pull.rebase"));
+  }
+  // 原生对照（本地 bare 远端、且 Git 先因无效配置 die，根本不接触远端）：结论与本程序一致。
+  const GitRun native = ExecutePlan(fixture, {L"pull"});
+  GC_CHECK_MESSAGE(!native.Success(), "原生 git pull 对 bogus 取值同样必须拒绝");
+  GC_CHECK(Contains(native.err, L"invalid value for 'pull.rebase'"));
+
+  fixture.RunCheckedInRepo({L"config", L"--unset", L"pull.rebase"});
+  GC_CHECK_MESSAGE(StampDiff(before, Stamp(fixture)).empty(), StampDiff(before, Stamp(fixture)));
+}
+
+// 「存在即说了算」的落地形态：branch 层的空值把 pull.rebase=true 压掉，真的产生合并提交。
+GC_TEST(pull_branch_empty_value_overrides_pull_rebase_and_makes_merge_commit) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+
+  rig.UseB();
+  fixture.WriteFile(L"b.txt", "来自 B\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 的提交");
+  fixture.Push(L"origin", L"main");
+  const std::wstring bSha = fixture.HeadSha();
+
+  rig.UseA();
+  fixture.WriteFile(L"a.txt", "来自 A\n");
+  fixture.StageAll();
+  fixture.Commit(L"A 的提交");
+  const std::wstring aSha = fixture.HeadSha();
+  fixture.RunCheckedInRepo({L"config", L"pull.rebase", L"true"});
+  fixture.RunCheckedInRepo({L"config", L"branch.main.rebase", L""});  // 设了，值是空的
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+
+  const PullProbeOutcome outcome = Probe(fixture, true);
+  GC_CHECK(outcome.target.configBranchRebasePresent);
+  GC_CHECK(outcome.target.configBranchRebase.empty());
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(IntegrateInputFrom(outcome));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);  // 空值=假=合并，不是「没设」
+  GC_CHECK(Contains(plan.strategySource, L"branch.main.rebase"));
+
+  const GitRun integrated = ExecutePlan(fixture, plan.arguments);
+  GC_REQUIRE_MESSAGE(integrated.Success(), ToUtf8(integrated.err));
+  const std::wstring parents =
+      Trimmed(fixture.RunCheckedInRepo({L"rev-list", L"--parents", L"-n", L"1", L"HEAD"}).out);
+  // 落地父子图：两父的合并提交，父之一是刚抓回来的远端提交。
+  const std::wstring::size_type firstSpace = parents.find(L' ');
+  GC_CHECK(parents.substr(firstSpace).find(L' ') != std::wstring::npos);
+  GC_CHECK(Contains(parents, aSha));
+  GC_CHECK(Contains(parents, bSha));
+}
+
+// 自定义 merge driver 命中时，预检事实与方案层都必须把预演结论降档。
+GC_TEST(pull_custom_merge_driver_downgrades_dry_run_certainty) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  SeedTrackedFile(rig, L"f.txt", "第一行\n共同的起点\n第三行\n");
+  GitFixture& fixture = rig.fixture();
+
+  rig.UseB();
+  fixture.WriteFile(L"f.txt", "第一行\nB 改的\n第三行\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 改了第二行");
+  fixture.Push(L"origin", L"main");
+
+  rig.UseA();
+  fixture.WriteFile(L"f.txt", "第一行\nA 改的\n第三行\n");
+  fixture.StageAll();
+  fixture.Commit(L"A 也改了第二行");
+  // 定义一个外部 merge driver（没有 .gitattributes 引用时合并其实用不到它——
+  // 但本程序无法据此断言预演与真实合并等效，配置存在就得降档）。
+  fixture.RunCheckedInRepo({L"config", L"merge.big.driver", L"cat %A %B > %X"});
+  GC_REQUIRE_MESSAGE(ExecutePlan(fixture, {L"fetch", L"--recurse-submodules=no", L"origin"}).Success(),
+                     "获取应当成功");
+
+  const PullProbeOutcome outcome = Probe(fixture, true);
+  GC_REQUIRE_MESSAGE(outcome.target.queryOk, ToUtf8(outcome.target.queryFailure));
+  GC_CHECK(outcome.target.mergeEquivalence ==
+           gc::git::PullMergeEquivalenceProbe::some);
+  GC_CHECK(ListContains(outcome.target.mergeEquivalenceKeys, L"merge.big.driver"));
+
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+      IntegrateInputFrom(outcome, PullStrategyChoice::chooseMerge));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.requiresForce);
+  GC_CHECK(Contains(RiskText(plan), L"merge.big.driver"));
+  GC_CHECK(Contains(RiskText(plan), L"强提示"));
+  GC_CHECK(Contains(plan.confirmationText, L"结论的可信档位被降低"));
+  // 「没读回来」不等于「没有」：unset 之后清单回到明确为空的档位，执行前复核也会把这一处变化报出来。
+  fixture.RunCheckedInRepo({L"config", L"--unset", L"merge.big.driver"});
+  const PullProbeOutcome afterUnset = Probe(fixture, true);
+  GC_CHECK(afterUnset.target.mergeEquivalence ==
+           gc::git::PullMergeEquivalenceProbe::none);
+  GC_CHECK(Contains(gc::git::DescribePullChange(outcome.target, afterUnset.target), L"合并等效性"));
 }
 
 // ---- 取消整合：那次可见的 fetch 只留下「跟踪引用前移」 ----

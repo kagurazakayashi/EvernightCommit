@@ -96,6 +96,12 @@ git::PullTargetFacts CollectPullTarget(const PullProbeRequest& request, const Pu
     }
   }
 
+  // 合并等效性配置（外部 merge driver、遗留策略）：它不改变命令形态，只决定冲突预演结论
+  // 能不能被当成保证；读取失败按「没读回来」降档处理，绝不当成「没有」。
+  queries.mergeEquivalenceRan = true;
+  queries.mergeEquivalence = RunQuery(deps.runner, request.exePath, dir,
+                                      git::BuildPullMergeEquivalenceArguments(dir));
+
   // 工作区/索引现状与界面列表、撤回预检用的是同一条查询与同一套解析：
   // 「这次整合会不会盖到你没提交的东西上」判的就是这份现状，不能在这里另发明一种定义。
   queries.statusRan = true;
@@ -155,6 +161,14 @@ git::PullRelationshipFacts CollectPullRelationship(const git::PullTargetFacts& t
     queries.incomingRan = true;
     queries.incoming = RunQuery(deps.runner, request.exePath, dir,
                                 git::BuildPullIncomingArguments(dir, base.firstLine, tracking));
+    if (counted.relationship == git::PullRelationship::diverged) {
+      // 「本地独有提交里有几个合并提交」：普通变基会把它们压平、--rebase-merges 会保留——
+      // 确认框要按实际策略把这一处父子图的影响说准，所以基准问出来后顺手只读问一句。
+      queries.localMergeCountRan = true;
+      queries.localMergeCount =
+          RunQuery(deps.runner, request.exePath, dir,
+                   git::BuildPullLocalMergeCountArguments(dir, base.firstLine, head));
+    }
   }
   if (counted.relationship == git::PullRelationship::diverged) {
     // 冲突预演在此刻还不知道最终会选合并还是变基（选择框还没弹）。它只是把「合并路线上

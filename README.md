@@ -28,10 +28,14 @@ HEAD、本地分支、本地标签、索引与工作区都不受影响；映射�
 那一句配置（见 3.12 节）。**
 以及 **`pull` 按钮**：分「获取」与「整合」两个可见阶段，两条命令都在命令窗口里执行，
 中间夹三轮只读预检——先问出本地分支与它明确的上游，判出可快进 / 已分叉 / 本地领先，
-用不改动工作区与索引的 `git merge-tree --write-tree` 预演内容冲突；整合策略尊重已有的
-`pull.rebase` / `branch.<分支>.rebase` / `pull.ff` / `merge.ff` 配置（配置没定而双方分叉时
-由用户当场选，默认偏向合并），点头之后再核对一次现状，然后才在命令窗口里执行
-`git -c submodule.recurse=false merge --no-autostash …` 或 `… rebase --no-autostash <完整ID>`（见 3.13 节）。**
+用不改工作区与索引的 `git merge-tree --write-tree` 预演内容冲突（它会向对象库写不可达的
+结果对象，不是「完全不写仓库」）；整合策略按 Git 2.53 的原生规矩读
+`pull.rebase` / `branch.<分支>.rebase` / `pull.ff` / `merge.ff` 配置——`merges` 会真的带上
+`--rebase-merges`，`interactive` 与本 Git 自己都会拒绝的取值则明确拒绝、不悄悄换成别的策略，
+配置没定而双方分叉时由用户当场选（默认偏向合并），点头之后再核对一次现状与配置，
+然后才在命令窗口里执行
+`git -c submodule.recurse=false merge --no-autostash …` 或
+`… rebase --no-autostash [<--rebase-merges>] <完整ID>`（见 3.13 节）。**
 以及 **`推送` 按钮**：先只读问清「在哪个分支、要推哪一份提交、上游是谁、这次实际会推给哪个远端的
 哪个地址」，把**源分支 / 目标远端 / 目标分支**与发布 URL 一起摆出来确认，然后在命令窗口里执行
 带完整显式 refspec 的 `git push`——只推这一条引用，不带 `--force` / `--mirror` / `--all` / `--tags`，
@@ -1018,7 +1022,9 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 1. **前提由 Git 的回答决定，猜不出来就拒绝**。预检①问的是
    `symbolic-ref --quiet HEAD`、`rev-parse --verify --quiet HEAD`、
    `for-each-ref --format=%(upstream:remotename)%(09)%(upstream)%(09)%(upstream:remoteref)`、
-   四条策略配置（`branch.<分支>.rebase`、`pull.rebase`、`pull.ff`、`merge.ff`）、
+   四条策略配置查询（`branch.<分支>.rebase`、`pull.rebase`、`pull.ff`、`merge.ff`）、
+   一条合并等效性配置清单（`git config --null --get-regexp`，覆盖 `merge.<名>.driver` 与
+   `pull.twohead`/`pull.octopus`）、
    两条影响抓取范围的配置查询（`git config --null --get-regexp`，见 3.12 第 3～5 点）、
    `git status --porcelain=v2 -z`，外加按 Git 目录里的档案判断的流程痕迹——全部隐藏窗口、
    带 `--no-optional-locks`，不弹命令窗口、不接触任何远端。以下情形给出**具体原因**并拒绝：
@@ -1041,29 +1047,53 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 3. **关系判据用完整对象 ID，四种关系各说各话**。预检②先用
    `rev-list --left-right --count <HEAD 完整ID>…<跟踪引用完整ID>` 问出「本地独有 / 远端独有」几个提交，
    据此分为**已一致 / 可快进 / 本地领先 / 已分叉**；再问 `merge-base`、
-   `diff --name-only -z <基准> <远端ID>`（这次会带进哪些路径）。已一致与本地领先都是
+   `diff --name-only -z <基准> <远端ID>`（这次会带进哪些路径），分叉时还会问一句
+   `rev-list --count --merges <基准>..<HEAD>`（本地独有提交里有几个合并提交——普通变基会把它们
+   压平，确认框要点名这个数）。已一致与本地领先都是
    `nothingToIntegrate`：一条命令也不给（本地领先属于 push 的范围，不是 pull 能解决的方向问题）。
    可快进的场合内容不可能冲突，**冲突预演根本不发起**；分叉时才做预演。
-4. **内容冲突用不改动工作区/索引的能力预演**：`git merge-tree --write-tree --name-only <HEAD> <远端>`
-   ——它只把结果 tree 写进对象库（不可达，`gc` 自行回收），引用、索引与工作区分毫不动；
+4. **内容冲突预演不改工作区与索引，但不是「完全不写仓库」**：`git merge-tree --write-tree --name-only <HEAD> <远端>`
+   ——它把结果 tree 写进对象库（不可达，`gc` 自行回收），引用、索引与工作区分毫不动；
    绝不在用户工作区里先真合一次再 `reset` 回去模拟 dry-run，也绝不自动 stash。
    退出码 0/1 分别是「预演无冲突 / 有冲突」，冲突文件名从输出里按约定取出；
    这个 Git 不认该子命令时（退出码 129/128）降级为**「没能预演，保守提醒」**并计入风险，
-   不装作「没有冲突」。
-5. **整合策略尊重已有配置，且预检与实际策略必须一致**。优先序照 Git 自己的规矩：
-   `branch.<分支>.rebase` 覆盖 `pull.rebase`（`true`/`false`/`merges`），
-   `pull.ff` 覆盖 `merge.ff`（`only`/`false`/默认）。确认框里写明这个结论是**哪条配置给的**。
+   不装作「没有冲突」。预演用的三方合并机械与真实合并并非在所有配置下都等效：仓库里存在
+   `merge.<名>.driver`（外部合并程序）或遗留的 `pull.twohead`/`pull.octopus` 配置、或那份清单
+   没能完整读回时，预演结论一律**如实降档为「强提示而非保证」**并计入风险，让「没有冲突」
+   不再被当成免检通行证。
+5. **整合策略按 Git 2.53 的原生解析读配置，选择、确认、预演与命令必须说同一件事**。
+   `branch.<分支>.rebase` 只要**存在**就单独说了算（哪怕它的取值是 Git 不认的——原生同样是
+   当场 fatal 而不回落 `pull.rebase`），不存在才轮到 `pull.rebase`；布尔取值大小写不敏感，
+   `merges`/`interactive` 及缩写 `m`/`i` 必须严格小写；空值与裸键按原生布尔语义就是「假」（合并），
+   与「没设」是两回事，判读层带着「存在与否」走。可执行的形态有三种：合并、普通变基、
+   **保留合并结构的变基**——`merges`/`m` 会真的翻译成 `git rebase --rebase-merges`，
+   落地后合并提交仍是两父（集成测试用父子图核对，不是只看参数）。`interactive`/`i` 原生要开
+   交互式编辑器、最终形态由用户当场改定的 todo 清单决定——本程序承诺不了「确认的形态=得到的形态」，
+   只有真会执行它的场合（分叉且未被 ff-only 抢先）明确拒绝并交代人工办法，绝不悄悄换成普通变基或
+   合并（可快进与无事可做时原生本来就不开编辑器，照常放行）；Git 自己都会当场拒绝的取值
+   （`bogus`、`MERGES`、已并入 merges 的 `preserve`……）同样明确拒绝、点名那条配置，不降级、
+   不猜。快进意愿按原生次序生效：`pull.ff` 存在即覆盖 `merge.ff`；配置给的 `pull.ff=only`
+   **优先于任何策略**——分叉时发出 `merge --ff-only` 让 Git 给出与原生一致的拒绝（仓库零改动），
+   可快进时就是快进；用户当场选过策略（等价命令行 `--rebase`/`--no-rebase`）时原生把 `only`
+   降回默认，本程序照此建模并说明；`merge.ff` 只在合并路线被读到——它既不压制「问用户」，
+   也不参与变基。反过来，**可快进 + 变基意图一律快进**：即便配置写着「绝不快进」，原生在这种
+   组合也强制快进、不产生多余的合并提交。`merge.ff` 的无效取值原生 merge 明确忽略——照默认走，
+   不跟着掉档；`pull.ff` 的无效取值则同 `pull.rebase` 一样如实拒绝。
    双方分叉而配置没定策略时，把「合并」「变基」两个候选摆出来由用户当场选（合并排第一，
-   与本程序的默认倾向一致），选完还会再给一次带风险清单的确认——本程序从不写配置文件。
+   与本程序的默认倾向一致；原生 git pull 在这种情况下同样拒绝并要求当场定），选完还会再给
+   一次带风险清单的确认——本程序从不写配置文件。
    因为实际执行的是 `git merge`（它看不见 `pull.ff`），配置里的快进意愿被**翻译成命令行上显式的
    `--ff-only` / `--no-ff`**：预检声称的形态与命令真正做的形态因此是同一件事。
    **变基这一路不做合并式预演**：重放是逐提交的，冲突可能出现在中间某一步，
-   拿合并预演的结论去声称「变基不会冲突」是假话——确认框里明说这一点。
-6. **命令形态把范围写死**（示例为已分叉选合并）：
+   拿合并预演的结论去声称「变基不会冲突」是假话——确认框里明说这一点；普通变基还会按
+   `rev-list --count --merges` 的实数点名「本地这几个合并提交会被压平」并给出 `merges` 出路。
+6. **命令形态把范围写死**（按配置/选择定下的策略各给一条示例）：
    ```
-   git -c submodule.recurse=false merge  --no-autostash --no-edit <远端提交完整ID>
-   git -c submodule.recurse=false rebase --no-autostash            <远端提交完整ID>
-   git -c submodule.recurse=false merge  --no-autostash --ff-only  <远端提交完整ID>   （可快进）
+   git -c submodule.recurse=false merge  --no-autostash --no-edit        <远端提交完整ID>   （合并）
+   git -c submodule.recurse=false merge  --no-autostash --no-ff --no-edit <远端提交完整ID>   （配置要求不快进）
+   git -c submodule.recurse=false merge  --no-autostash --ff-only        <远端提交完整ID>   （可快进；或 ff-only 配置下由 Git 拒绝）
+   git -c submodule.recurse=false rebase --no-autostash                  <远端提交完整ID>   （变基）
+   git -c submodule.recurse=false rebase --no-autostash --rebase-merges  <远端提交完整ID>   （配置 merges：保留合并结构）
    ```
    `-c …` 与 `--no-autostash` 只对这一个子进程生效：不写配置，`autoStash` 类配置也不会
    把「替你 stash」这件事悄悄做掉，子模块不会被递归改动。目标用**完整对象 ID**而不是引用名——
@@ -1072,13 +1102,16 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 7. **风险清单与「不保证」**。`requiresForce` 的风险条目逐条给原因并点名受影响文件：
    预演报出的冲突文件、未提交改动与带入路径的重叠、未跟踪文件与远端带来的同名路径撞车、
    变基会重写本地这几个提交（ID 变化、已推送过就会与协作者分叉，本程序不自动 force push）、
-   预演不可用、配置与当前关系相矛盾（如 `pull.ff=only` 而双方已分叉）。
+   普通变基遇到本地合并提交时按实数点名「会被压平」并给出 `merges` 出路、
+   预演不可用、自定义 merge driver／遗留策略命中（或那份清单没读全）时预演结论降档为强提示、
+   配置与当前关系相矛盾（如 `pull.ff=only` 而双方已分叉——照配置发出的那条会被 Git 原生拒绝）。
    风险确认框的按钮是「按这份预检继续整合」与「取消」（TaskDialog，失败时退回是/否并注明等价），
    「继续」只越过本程序的风险提示，不追加任何更激烈的参数。确认文字末尾写明预检**不是保证**：
    点头之后远端可能又变、hooks 可能拒绝、外部程序可能改同一个仓库。
 8. **点头之后还要再核对一次现状才动手**。预检③把预检①那套查询原样重发一遍，
    `DescribePullChange` 逐处比对：分支引用、HEAD、那条远端跟踪引用的位置、
-   工作区/索引的**逐条**现状（按「哪一侧、哪个路径、什么状态字元」排序比对，不只数个数）、
+   四条策略配置的「存在与否 + 取值」（确认框是按那一刻的配置承诺的形态）、
+   合并等效性清单、工作区/索引的**逐条**现状（按「哪一侧、哪个路径、什么状态字元」排序比对，不只数个数）、
    流程痕迹有无变化。任何一处对不上就放弃执行、给出「从什么变成什么」的原因并刷新——
    预检之后的远端又动了也一样：不把旧预检当保证，也不靠盲目重复 fetch 把这件事盖过去。
 9. **失败与冲突保留现场**。整合非 0 退出时，界面读回现场并明确说明：
@@ -1093,8 +1126,12 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
 11. **测试**。`tests/pull_plan_tests.cpp` 用桩回答断言查询参数形态、
     `--quiet`/`config` 的「明确没有」≠「查询失败」、上游三栏解析（含缺栏）、
     `rev-list` 四种关系、`merge-tree` 三种结局（0/1/129）、`-z` 清单里含空格与中文的路径原样可比、
-    五种前提拒绝、命令形态与配置优先序、预演结论不得跨策略借用、风险清单点名文件、
-    执行前复核的逐处比对。`tests/pull_probe_fixture_tests.cpp` 用 `RemoteRig`
+    五种前提拒绝、**策略配置的完整矩阵**（`branch` 存在即覆盖、布尔大小写不敏感、`merges`/`m`
+    实际生成 `--rebase-merges`、`interactive` 只在原生会执行它的场合拒绝、无效取值与空值的
+    原生含义、`pull.ff=only` 优先于配置策略、用户选择按原生降回、`merge.ff` 不压制提问也不参与
+    变基、可快进+变基意图不产生多余合并提交）、合并提交压平的如实披露、
+    预演结论不得跨策略借用、merge driver 命中时的降档、风险清单点名文件、
+    执行前复核的逐处比对（含四条配置与等效性清单）。`tests/pull_probe_fixture_tests.cpp` 用 `RemoteRig`
     （bare 远端 + A/B 两个本地工作区，全程同根内本地路径、不放行任何网络形态）驱动
     **生产预检编排与生产方案层**，并把方案合成的命令原样交给真实 `git.exe` 执行，逐项断言：
     无上游拒绝且不写配置、已一致/本地领先不给命令、可快进只前移分支引用且命令钉在抓回来的完整 ID、
@@ -1103,6 +1140,12 @@ Git 程序验证可用、仓库已识别为可用工作区。`status` 另外要�
     未合并清单读回同一份文件名；`merge --abort` 只是用例自己的收尾）、
     未提交改动重叠与未跟踪撞名都被点名且 Git 真的拒绝、本地那份内容一字未动、
     `pull.rebase=true` 时不问策略直接变基且历史是线性的（HEAD 只有一个父、父提交正是远端那份）、
+    `branch.<名>.rebase=merges` 的命令真的带 `--rebase-merges` 且**落地后父子图里合并提交仍是两父**、
+    普通变基对本地合并提交先点名压平、事后图里确实没有合并提交、
+    `branch.<名>.rebase=`（空值）压掉 `pull.rebase=true` 并真的产生两父合并提交、
+    `pull.ff=only` 凌驾配置策略时发出的 `merge --ff-only` 被 Git 原生拒绝且仓库零改动、
+    `interactive`/无效取值一律 blocked 不产生命令（无效取值还与原生 `git pull` 的 fatal 互相印证）、
+    自定义 merge driver 命中时预检事实与确认文案同步降档、
     取消整合后只剩「跟踪引用前移」这一处遗留、外部改动让执行前复核报出原因。
     抓取那一步与 `fetch` 按钮的一致性另有两处钉子：纯逻辑的 `fetch_and_pull_share_one_fetch_scope_policy`
     / `fetch_and_pull_both_refuse_an_unsafe_mapping`（比对两边的参数数组、命令展示与范围正文，
@@ -1266,15 +1309,17 @@ src/
                            remote.<远端>.fetch 映射的逐条验证（越界即拒绝）、
                            确认正文与随操作显示的范围说明——界面 fetch 按钮与 pull 第一步共用这同一份）、
                            pull 两阶段判读与方案（pull_plan：阶段一查询（分支 / HEAD / 上游三栏 /
-                           四条策略配置 / porcelain v2 现状 / 流程痕迹）与阶段二关系查询
+                           四条策略配置（含「存在与否」）/ 合并等效性清单 / porcelain v2 现状 / 流程痕迹）与阶段二关系查询
                            （rev-list 左右计数、merge-base、--name-only -z 带入清单、
-                           merge-tree --write-tree 冲突预演）的参数构造与判读；
+                           merge-tree --write-tree 冲突预演、--count --merges 本地合并提交数）的参数构造与判读；
                            前提拒绝——无上游/游离/尚无提交/流程在走/有冲突/查询失败一律不产生命令；
-                           四种关系与 nothingToIntegrate；配置优先序（branch.<分支>.rebase > pull.rebase、
-                           pull.ff > merge.ff）翻译成命令上显式的 --ff-only/--no-ff；
-                           分叉且配置未定则 chooseStrategy；风险清单（预演冲突、未提交改动重叠、
-                           未跟踪撞名、变基重写、预演不可用降级）；执行前复核 DescribePullChange
-                           逐处比对；未合并清单解析。不碰 Win32、不读文件系统，可桩测）、
+                           四种关系与 nothingToIntegrate；策略与快进配置按原生 2.53 的解析矩阵
+                           （branch 存在即覆盖 pull、merges/m 实际生成 --rebase-merges、interactive
+                           与无效取值明确拒绝、pull.ff=only 优先于配置策略、用户选择按原生降回、
+                           merge.ff 不压制提问也不参与变基）翻译成命令上显式的参数；
+                           分叉且配置未定则 chooseStrategy；风险清单（预演冲突与其降档、未提交改动重叠、
+                           未跟踪撞名、变基重写与合并压平披露、预演不可用降级）；执行前复核 DescribePullChange
+                           逐处比对（含四条配置与等效性清单）；未合并清单解析。不碰 Win32、不读文件系统，可桩测）、
                            push 判读与方案（push_plan：预检查询（分支 / HEAD / 上游三栏 /
                            `config --list --null` 一次问回全部生效配置 / `remote get-url --push` /
                            rev-list 左右计数）的参数构造与判读；发布远端优先序
@@ -1431,17 +1476,26 @@ tests/
                            pull_plan_tests（pull 两个阶段的查询形态与判读：--quiet/config 的
                            「明确没有」≠失败、上游三栏缺栏、rev-list 四种关系、merge-tree 的
                            0/1/129 三种结局、-z 清单里含空格与中文的路径；五种前提拒绝且不产生命令；
-                           配置优先序翻成显式 --ff-only/--no-ff；分叉未配置则 chooseStrategy 且合并
-                           排第一；变基一路不借用合并预演的结论；风险清单点名重叠与未跟踪文件；
-                           执行前复核 DescribePullChange 逐处比对）/
+                           策略配置矩阵：branch 存在即覆盖 pull（含无效值与空值）、布尔大小写不敏感、
+                           merges/m 实际生成 --rebase-merges、interactive 只在原生会执行它的场合拒绝、
+                           无效取值一律 blocked；pull.ff=only 优先于配置策略、用户选择按原生降回、
+                           merge.ff 不压制提问也不参与变基、可快进+变基意图不产生多余合并提交；
+                           分叉未配置则 chooseStrategy 且合并排第一；变基一路不借用合并预演的结论、
+                           本地合并提交压平按实数披露；merge driver 命中时预演降档为强提示；
+                           风险清单点名重叠与未跟踪文件；执行前复核 DescribePullChange 逐处比对
+                           ——含四条配置的「存在与否+取值」与合并等效性清单）/
                            pull_probe_fixture_tests（RemoteRig 三方真实仓库驱动生产预检编排与方案，
                            并把方案命令原样交给真实 git.exe：无上游拒绝且不写配置、已一致/本地领先
                            不给命令、可快进只前移分支引用且命令钉在抓回来的完整 ID、无冲突分叉先问
                            策略再产生两个父的合并提交、文本冲突被预演点名而预检一字不动（真跑留下
                            冲突现场、未合并清单读回同名文件）、未提交改动重叠与未跟踪撞名都被点名且
-                           Git 真的拒绝、pull.rebase=true 时直接变基且历史线性、取消整合只剩跟踪引用
-                           前移这一处遗留、外部改动让执行前复核算旧方案作废；跑完「用户层」配置档案
-                           仍为空，全程无网络形态远端）/
+                           Git 真的拒绝、pull.rebase=true 时直接变基且历史线性、merges 配置真的带
+                           --rebase-merges 且落地父子图保住两父、普通变基点名压平且事后图确实线性、
+                           branch 空值压掉 pull.rebase=true 并真产生合并提交、pull.ff=only 被 Git
+                           原生拒绝且仓库零改动、interactive/无效取值 blocked 不产生命令（与原生
+                           fatal 互相印证）、merge driver 命中时预检与确认同步降档、取消整合只剩
+                           跟踪引用前移这一处遗留、外部改动让执行前复核算旧方案作废；跑完「用户层」
+                           配置档案仍为空，全程无网络形态远端）/
                            fetch_fixture_tests（RemoteRig 三方真实仓库：B 推送→A 抓取只动
                            远端跟踪引用、HEAD/分支/索引/工作区逐条不差；抓取后撤回发布状态
                            由「未发现已发布」改判「已知已发布」；无远端拒绝且不猜 origin、
@@ -1510,8 +1564,9 @@ Git 机器输出走 stdout、致命信息走 stderr，两条流分别捕获后�
 同一步骤把**可复用的本地远端测试夹具**补齐（`GitFixture` 多工作区辅助 + 测试远端守卫 +
 `RemoteRig`「bare 远端 + A/B 两工作区」三方形态），供后续 pull/push 步骤继续复用，见 2.1；
 `pull` 已在步骤 16 完成——分「获取」与「整合」两个可见阶段，中间夹三轮只读预检与一次执行前复核，
-整合策略尊重既有 `pull.rebase` / `pull.ff` 等配置、用 `merge-tree --write-tree` 做无损冲突预演，
-见 3.13；
+整合策略按 Git 原生规矩读 `pull.rebase` / `pull.ff` 等配置（`merges` 实际带 `--rebase-merges`，
+`interactive` 与无效取值明确拒绝）、用 `merge-tree --write-tree` 预演冲突（不改工作区与索引，
+会向对象库写不可达的结果对象），见 3.13；
 `推送` 已在步骤 17 完成——只读预检定出「源分支 / 目标远端 / 目标分支 / 实际发布 URL」，
 命令窗口里执行带完整显式 refspec 的 `git push --recurse-submodules=no`（不带 `--force` 之类的
 更激烈形态），终态之后再向**发布目标**逐个发只读 `git ls-remote` 核实那条引用的实际位置，见 3.14。）

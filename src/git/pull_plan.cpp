@@ -26,8 +26,13 @@ std::wstring LowerAscii(std::wstring_view text) {
   return result;
 }
 
-// Git 认的布尔取值（大小写不敏感）。pull.rebase=merges 这种三态值由调用方先单独判过。
-std::optional<bool> ParseConfigBool(std::wstring_view value) {
+// Git 的 git_parse_maybe_bool：空串与 NULL（裸键）都是 0=假；布尔家族大小写不敏感；
+// 其余返回不认。pull.rebase / pull.ff / merge.ff 的原生解析全部以它为第一关，
+// 「设成空值」与「没设」的含义差别就出在这里——空值是明确的「假」，不是没表态。
+std::optional<bool> NativeMaybeBool(std::wstring_view value) {
+  if (value.empty()) {
+    return false;
+  }
   const std::wstring text = LowerAscii(value);
   if (text == L"true" || text == L"yes" || text == L"1" || text == L"on") {
     return true;
@@ -136,12 +141,71 @@ std::vector<std::wstring> SplitTabs(std::wstring_view line, size_t expected) {
   return fields;
 }
 
-// 两份配置里挑出「这次该合并还是该变基」。优先序照 Git 自己的规矩：
-// branch.<分支名>.rebase 覆盖 pull.rebase；两条都没设就是「没有明确策略」。
-struct StrategyIntent {
-  bool decided = false;
-  bool rebase = false;
-  std::wstring source;  // 这个结论是谁给的（展示用，配置项原文）
+// 两条 rebase 类配置（branch.<分支名>.rebase、pull.rebase）按原生规矩的判读结果。
+// 语义依据是 Git 2.53 的 rebase.c:rebase_parse_value() 与 pull.c:config_get_rebase()，
+// 本机 Git 2.53.0.windows.3 实测核对（见 tests 与本文件头注释）：
+//   * 布尔家族先判（大小写不敏感）：真→变基；假、空值、裸键→合并；
+//   * 布尔不认时只认**严格小写**的 merges/m（原生翻成 --rebase-merges）与
+//     interactive/i（原生执行 git rebase -i）；"MERGES"、"I" 在这一步都是无效值；
+//   * preserve/p 原生提示「已并入 merges」之后仍按无效值 die；
+//   * 其余一律无效——原生 git pull 在接触远端之前就 fatal（实测），所以这里同样拒绝，
+//     绝不降级成「当作没设」或「普通变基」。
+enum class PullRebaseConfigValue {
+  absent = 0,    // Git 明确回答没设（退出码 1）
+  merge,         // 布尔假家族 / 空值 / 裸键：原生按「合并」处理
+  rebase,        // 布尔真家族
+  rebaseMerges,  // merges / m：变基并保留本地合并结构
+  interactive,   // interactive / i：交互式变基（本程序不执行）
+  invalid,       // 其余取值：原生 pull 当场拒绝
+};
+
+PullRebaseConfigValue ParseRebaseConfigValue(std::wstring_view value) {
+  if (const std::optional<bool> boolean = NativeMaybeBool(value)) {
+    return *boolean ? PullRebaseConfigValue::rebase : PullRebaseConfigValue::merge;
+  }
+  if (value == L"merges" || value == L"m") {
+    return PullRebaseConfigValue::rebaseMerges;
+  }
+  if (value == L"interactive" || value == L"i") {
+    return PullRebaseConfigValue::interactive;
+  }
+  return PullRebaseConfigValue::invalid;
+}
+
+// 配置取值的展示形态：空值要说明它在原生布尔语义里就是「假」，不能显示成看起来没内容。
+std::wstring ConfigValueDisplay(std::wstring_view raw) {
+  if (raw.empty()) {
+    return L"（空值：原生布尔语义按「假」处理）";
+  }
+  return std::wstring(raw);
+}
+
+std::wstring RebaseConfigMeaning(PullRebaseConfigValue value) {
+  switch (value) {
+    case PullRebaseConfigValue::merge:
+      return L"原生按「合并」处理";
+    case PullRebaseConfigValue::rebase:
+      return L"原生按变基处理（线性重放）";
+    case PullRebaseConfigValue::rebaseMerges:
+      return L"原生按变基处理并保留合并结构（--rebase-merges），本程序照此写进命令行";
+    case PullRebaseConfigValue::interactive:
+      return L"原生要执行交互式变基（git rebase -i，todo 清单由编辑器当场决定）";
+    case PullRebaseConfigValue::invalid:
+      return L"原生 git pull 会在解析配置时就拒绝（invalid value），本程序同样拒绝整合";
+    case PullRebaseConfigValue::absent:
+      break;
+  }
+  return L"没有这条配置";
+}
+
+// 定策略的那一条配置。优先级照原生：branch.<分支名>.rebase **存在**就单独说了算
+// ——哪怕它是无效值（实测：branch 无效而 pull=true 时，fatal 点名的是 branch 键），
+// 不存在才轮到 pull.rebase；两条都没有才是「配置没表态」。
+struct PullStrategyConfig {
+  PullRebaseConfigValue value = PullRebaseConfigValue::absent;
+  std::wstring key;     // 定这条结论的配置项原文（branch.main.rebase / pull.rebase）
+  std::wstring raw;     // Git 回答的原始取值（absent 时为空）
+  std::wstring source;  // 展示句：哪条配置、什么值、原生怎么理解
 };
 
 std::wstring BranchRebaseKey(std::wstring_view branchName) {
@@ -149,79 +213,103 @@ std::wstring BranchRebaseKey(std::wstring_view branchName) {
          L".rebase";
 }
 
-StrategyIntent ResolveStrategyIntent(const PullTargetFacts& target) {
-  StrategyIntent intent;
-  if (!target.configBranchRebase.empty()) {
-    if (LowerAscii(target.configBranchRebase) == L"merges") {
-      intent.decided = true;
-      intent.rebase = true;
-      intent.source = BranchRebaseKey(target.branchName) + L" = merges（变基，但保留合并结构）";
-      return intent;
-    }
-    if (const std::optional<bool> value = ParseConfigBool(target.configBranchRebase)) {
-      intent.decided = true;
-      intent.rebase = *value;
-      intent.source = BranchRebaseKey(target.branchName) + L" = " + target.configBranchRebase;
-      return intent;
-    }
-    // 分支层给了个 Git 不认的取值：不猜它想说什么，交给 pull 层与「让用户选」。
-    intent.source = BranchRebaseKey(target.branchName) + L" = " + target.configBranchRebase +
-                    L"（这个取值本程序不解释）";
-    return intent;
+PullStrategyConfig ResolveStrategyConfig(const PullTargetFacts& target) {
+  PullStrategyConfig cfg;
+  const auto fill = [&cfg](std::wstring key, std::wstring raw) {
+    cfg.key = std::move(key);
+    cfg.raw = std::move(raw);
+    cfg.value = ParseRebaseConfigValue(cfg.raw);
+    cfg.source = cfg.key + L" = " + ConfigValueDisplay(cfg.raw) + L"（" +
+                 RebaseConfigMeaning(cfg.value) + L"）";
+  };
+  if (target.configBranchRebasePresent) {
+    fill(BranchRebaseKey(target.branchName), target.configBranchRebase);
+    return cfg;
   }
-  if (!target.configPullRebase.empty()) {
-    if (LowerAscii(target.configPullRebase) == L"merges") {
-      intent.decided = true;
-      intent.rebase = true;
-      intent.source = L"pull.rebase = merges（变基，但保留合并结构）";
-      return intent;
-    }
-    if (const std::optional<bool> value = ParseConfigBool(target.configPullRebase)) {
-      intent.decided = true;
-      intent.rebase = *value;
-      intent.source = L"pull.rebase = " + target.configPullRebase;
-      return intent;
-    }
-    intent.source = L"pull.rebase = " + target.configPullRebase + L"（这个取值本程序不解释）";
-    return intent;
+  if (target.configPullRebasePresent) {
+    fill(L"pull.rebase", target.configPullRebase);
+    return cfg;
   }
-  intent.source = L"branch.〈分支〉.rebase 与 pull.rebase 都没设（Git 自己在这种情况下按合并走，并且会警告）";
-  return intent;
+  cfg.source = L"branch.〈分支〉.rebase 与 pull.rebase 都没设（原生 git pull 在这种情况下按合并走，"
+               L"分叉时还会先警告再拒绝，要用户当场定）";
+  return cfg;
 }
 
-// pull.ff > merge.ff。因为实际执行的是 `git merge`（它看不见 pull.ff），
-// 所以这里把配置翻译成命令行上显式的 --ff-only / --no-ff：
-// 「预检声称的形态」与「命令实际做的形态」因此是同一件事，不存在用合并预检冒充别的策略。
-struct FastForwardIntent {
-  std::optional<bool> only;  // true：只在可快进时整合；false：绝不快进（总产生合并提交）；空：没意见
+// pull.ff / merge.ff 按原生规矩的判读结果。依据 pull.c:config_get_ff() 与
+// merge.c 对 merge.ff 的处理（本机实测核对）：
+//   * pull.ff：布尔真→--ff（等于默认）；布尔假/空值→--no-ff；严格小写 only→--ff-only；
+//     其余值原生 pull 在联网前就 die；
+//   * merge.ff：同一套布尔+only，但**看不懂的取值被原生 merge 明确忽略**（源码注释
+//     "do not barf on values from future versions"），按默认处理——与 pull.ff 的
+//     「die」是不同的原生行为，判读必须分开；
+//   * pull.ff 存在时说了算；它不参与的地方（变基路线根本不会执行 merge）merge.ff 也无从生效。
+enum class PullFfConfigValue {
+  absent = 0,  // 没有这条配置（或 merge.ff 设了个被原生忽略的值——行为等同没设）
+  allow,       // 布尔真家族：能快进就快进（默认）
+  never,       // 布尔假家族 / 空值：绝不快进，可快进也要产生合并提交
+  only,        // only：只在可快进时整合，否则拒绝
+  invalid,     // pull.ff 的其余取值：原生 pull 当场拒绝
+};
+
+// mergeFf 为 true 时按 merge.ff 的「忽略不懂值」规矩，false 时按 pull.ff 的「die」规矩。
+std::pair<PullFfConfigValue, bool> ParseFfConfigValue(std::wstring_view value, bool mergeFf) {
+  if (const std::optional<bool> boolean = NativeMaybeBool(value)) {
+    return {*boolean ? PullFfConfigValue::allow : PullFfConfigValue::never, true};
+  }
+  if (value == L"only") {
+    return {PullFfConfigValue::only, true};
+  }
+  return {mergeFf ? PullFfConfigValue::absent : PullFfConfigValue::invalid, false};
+}
+
+std::wstring FfConfigMeaning(PullFfConfigValue value, bool mergeFf, bool understood) {
+  if (!understood && mergeFf) {
+    return L"原生 merge 会忽略看不懂的取值，按默认（能快进就快进）处理";
+  }
+  switch (value) {
+    case PullFfConfigValue::allow:
+      return L"原生按「能快进就快进」处理（与默认一致）";
+    case PullFfConfigValue::never:
+      return L"原生按「绝不快进」处理：可快进也要产生合并提交";
+    case PullFfConfigValue::only:
+      return L"原生按「只在可快进时整合」处理，分叉时直接拒绝";
+    case PullFfConfigValue::invalid:
+      return L"原生 git pull 会在解析配置时就拒绝（invalid value），本程序同样拒绝整合";
+    case PullFfConfigValue::absent:
+      break;
+  }
+  return L"没有这条配置";
+}
+
+struct PullFfConfig {
+  PullFfConfigValue value = PullFfConfigValue::absent;
+  bool fromPullFf = false;  // 只有出自 pull.ff 的 only 才参与原生「ff-only 优先于策略」规则
+  std::wstring key;
+  std::wstring raw;
   std::wstring source;
 };
 
-FastForwardIntent ResolveFastForwardIntent(const PullTargetFacts& target) {
-  const auto interpret = [](std::wstring_view value) -> std::optional<bool> {
-    const std::wstring text = LowerAscii(value);
-    if (text == L"only") {
-      return true;
-    }
-    if (const std::optional<bool> boolean = ParseConfigBool(value)) {
-      // true = 允许快进 = 默认，没有额外意见；false = 绝不快进。
-      return *boolean ? std::nullopt : std::optional<bool>(false);
-    }
-    return std::nullopt;
+PullFfConfig ResolveFfConfig(const PullTargetFacts& target) {
+  PullFfConfig cfg;
+  const auto fill = [&cfg](std::wstring key, std::wstring raw, bool pullFf) {
+    cfg.key = std::move(key);
+    cfg.raw = std::move(raw);
+    cfg.fromPullFf = pullFf;
+    const auto [value, understood] = ParseFfConfigValue(cfg.raw, !pullFf);
+    cfg.value = value;
+    cfg.source = cfg.key + L" = " + ConfigValueDisplay(cfg.raw) + L"（" +
+                 FfConfigMeaning(cfg.value, !pullFf, understood) + L"）";
   };
-  FastForwardIntent intent;
-  if (!target.configPullFf.empty()) {
-    intent.only = interpret(target.configPullFf);
-    intent.source = L"pull.ff = " + target.configPullFf;
-    return intent;
+  if (target.configPullFfPresent) {
+    fill(L"pull.ff", target.configPullFf, true);
+    return cfg;
   }
-  if (!target.configMergeFf.empty()) {
-    intent.only = interpret(target.configMergeFf);
-    intent.source = L"merge.ff = " + target.configMergeFf;
-    return intent;
+  if (target.configMergeFfPresent) {
+    fill(L"merge.ff", target.configMergeFf, false);
+    return cfg;
   }
-  intent.source = L"pull.ff / merge.ff 都没设（默认：能快进就快进）";
-  return intent;
+  cfg.source = L"pull.ff / merge.ff 都没设（默认：能快进就快进）";
+  return cfg;
 }
 
 // 两个阶段共用的前提核对。返回空串表示前提成立。
@@ -297,8 +385,8 @@ std::wstring TrackingRefSentence(const PullTargetFacts& target) {
 }
 
 std::wstring ConfigSentence(const PullTargetFacts& target) {
-  return L"策略配置：" + ResolveStrategyIntent(target).source + L"\n" +
-         L"快进配置：" + ResolveFastForwardIntent(target).source + L"\n";
+  return L"策略配置：" + ResolveStrategyConfig(target).source + L"\n" +
+         L"快进配置：" + ResolveFfConfig(target).source + L"\n";
 }
 
 std::wstring RemoteBranchDisplay(const PullTargetFacts& target) {
@@ -351,6 +439,14 @@ std::vector<std::wstring> BuildPullConfigArguments(std::wstring_view repositoryD
                                    L"config", L"--get", std::wstring(key)};
 }
 
+std::vector<std::wstring> BuildPullMergeEquivalenceArguments(std::wstring_view repositoryDirectory) {
+  // 记录约定与 git/fetch_scope 的两条 --null --get-regexp 完全一致（键<换行>值<NUL>，
+  // 无命中=退出码 1+空输出）。只取键名做判据，取值不留在事实里（driver 命令行可能含路径等噪声）。
+  return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
+                                   L"config", L"--null", L"--get-regexp",
+                                   L"^(merge\\..*\\.driver|pull\\.(twohead|octopus))$"};
+}
+
 std::vector<std::wstring> BuildPullAheadBehindArguments(std::wstring_view repositoryDirectory,
                                                         std::wstring_view headObjectId,
                                                         std::wstring_view trackingObjectId) {
@@ -391,12 +487,24 @@ std::vector<std::wstring> BuildPullMergeTreeArguments(std::wstring_view reposito
   if (!LooksLikeFullObjectId(headObjectId) || !LooksLikeFullObjectId(trackingObjectId)) {
     return {};
   }
-  // 不改动真实工作区/索引的三方合并预演：结果 tree 只写进对象库（不可达，由 gc 自行回收），
-  // 引用、索引与工作区一个字节都不动。--name-only 让冲突清单一行一个路径。
+  // 三方合并预演：不改真实工作区与索引，但**会向对象库写入结果对象**（不可达，由 gc 回收）——
+  // 所以它不是「完全不写仓库」。--name-only 让冲突清单一行一个路径。
   return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
                                    L"--no-replace-objects", L"merge-tree", L"--write-tree",
                                    L"--name-only", std::wstring(headObjectId),
                                    std::wstring(trackingObjectId)};
+}
+
+std::vector<std::wstring> BuildPullLocalMergeCountArguments(std::wstring_view repositoryDirectory,
+                                                            std::wstring_view baseObjectId,
+                                                            std::wstring_view headObjectId) {
+  if (!LooksLikeFullObjectId(baseObjectId) || !LooksLikeFullObjectId(headObjectId)) {
+    return {};
+  }
+  // 「本地独有的提交里有几个合并提交」：普通变基会把这些合并压平，确认框要报出实数。
+  return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
+                                   L"--no-replace-objects", L"rev-list", L"--count", L"--merges",
+                                   std::wstring(baseObjectId) + L".." + std::wstring(headObjectId)};
 }
 
 std::vector<std::wstring> BuildPullConflictListingArguments(std::wstring_view repositoryDirectory) {
@@ -515,6 +623,7 @@ PullTargetFacts InterpretPullTarget(const PullTargetQueries& queries) {
       }
       if (branchRebase.outcome == UndoQueryOutcome::answered) {
         facts.configBranchRebase = branchRebase.firstLine;
+        facts.configBranchRebasePresent = true;  // 存在就说了算——空值也是「设过、按假处理」。
       }
     }
   }
@@ -523,14 +632,15 @@ PullTargetFacts InterpretPullTarget(const PullTargetQueries& queries) {
     std::wstring_view key;
     const UndoQueryRead* read;
     std::wstring* field;
+    bool* present;
   };
   const UndoQueryRead pullRebase = ReadUndoQuery(queries.configPullRebase);
   const UndoQueryRead pullFf = ReadUndoQuery(queries.configPullFf);
   const UndoQueryRead mergeFf = ReadUndoQuery(queries.configMergeFf);
   const ConfigRead configs[] = {
-      {L"pull.rebase", &pullRebase, &facts.configPullRebase},
-      {L"pull.ff", &pullFf, &facts.configPullFf},
-      {L"merge.ff", &mergeFf, &facts.configMergeFf},
+      {L"pull.rebase", &pullRebase, &facts.configPullRebase, &facts.configPullRebasePresent},
+      {L"pull.ff", &pullFf, &facts.configPullFf, &facts.configPullFfPresent},
+      {L"merge.ff", &mergeFf, &facts.configMergeFf, &facts.configMergeFfPresent},
   };
   for (const ConfigRead& config : configs) {
     if (config.read->outcome == UndoQueryOutcome::failed) {
@@ -540,8 +650,58 @@ PullTargetFacts InterpretPullTarget(const PullTargetQueries& queries) {
     }
     if (config.read->outcome == UndoQueryOutcome::answered) {
       *config.field = config.read->firstLine;
+      *config.present = true;
     }
-    // noResult：Git 明确回答「没有这条配置」，字段留空——「未设置」与「设成了什么」是两回事。
+    // noResult：Git 以退出码 1 明确回答「没有这条配置」——那才是「未设置」；
+    // answered + 空行是「设成了空值」，两回事（见 PullTargetFacts 的注释）。
+  }
+
+  // 合并等效性配置：merge.<名>.driver（外部合并程序）与 pull.twohead/pull.octopus（遗留策略）。
+  // 命中任何一条、或这份清单没能完整读回，冲突预演的结论就降档为「强提示而非保证」；
+  // 「没问」「读不全」都不许当成「没有」。
+  if (queries.mergeEquivalenceRan) {
+    const UndoQueryRead equivalence = ReadUndoQuery(queries.mergeEquivalence);
+    if (equivalence.outcome == UndoQueryOutcome::noResult) {
+      facts.mergeEquivalence = PullMergeEquivalenceProbe::none;
+    } else if (equivalence.outcome == UndoQueryOutcome::answered) {
+      std::wstring recordReason;
+      if (!NulRecordsAreComplete(queries.mergeEquivalence.utf16Output, recordReason)) {
+        facts.mergeEquivalence = PullMergeEquivalenceProbe::unknown;
+      } else {
+        bool trusted = true;
+        std::vector<std::wstring> keys;
+        for (const std::wstring& record : SplitNulList(queries.mergeEquivalence.utf16Output)) {
+          // 记录形态与 fetch_scope 同一套约定：键<换行>值 或 键=值；裸键省略取值。
+          const size_t newline = record.find(L'\n');
+          const size_t equals = record.find(L'=');
+          size_t end = std::wstring::npos;
+          if (newline != std::wstring::npos && (equals == std::wstring::npos || newline < equals)) {
+            end = newline;
+          } else if (equals != std::wstring::npos) {
+            end = equals;
+          }
+          std::wstring key =
+              TrimWide(end == std::wstring::npos ? record : record.substr(0, end));
+          if (key.compare(0, 6, L"merge.") != 0 && key.compare(0, 5, L"pull.") != 0) {
+            trusted = false;  // 认不出键名的清单整份不采信，而不是丢掉可疑的那一条。
+            break;
+          }
+          keys.push_back(std::move(key));
+        }
+        if (!trusted) {
+          facts.mergeEquivalence = PullMergeEquivalenceProbe::unknown;
+        } else {
+          std::sort(keys.begin(), keys.end());
+          keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+          facts.mergeEquivalenceKeys = std::move(keys);
+          facts.mergeEquivalence = facts.mergeEquivalenceKeys.empty()
+                                       ? PullMergeEquivalenceProbe::none
+                                       : PullMergeEquivalenceProbe::some;
+        }
+      }
+    } else {
+      facts.mergeEquivalence = PullMergeEquivalenceProbe::unknown;
+    }
   }
 
   facts.statusRan = queries.statusRan;
@@ -721,6 +881,36 @@ PullRelationshipFacts InterpretPullRelationship(const PullRelationshipQueries& q
     }
   }
 
+  // 「本地独有提交里有几个合并提交」：一行一个非负整数就是 Git 的完整回答；
+  // 读不到时 Known 保持 false——「没问出来」与「0 个」是两种结论。
+  facts.localMergeCountRan = queries.localMergeCountRan;
+  if (queries.localMergeCountRan) {
+    const UndoQueryRead merges = ReadUndoQuery(queries.localMergeCount);
+    if (merges.outcome != UndoQueryOutcome::answered) {
+      facts.localMergeCountDetail = RefusalWith(merges, L"rev-list --count --merges 未成功");
+    } else {
+      const std::wstring_view countLine =
+          merges.lines.empty() ? std::wstring_view() : std::wstring_view(merges.lines.front());
+      const std::vector<std::wstring> tokens = SplitWhitespace(countLine);
+      if (tokens.size() == 1) {
+        try {
+          const long long value = std::stoll(tokens[0]);
+          if (value >= 0) {
+            facts.localMergeCountKnown = true;
+            facts.localMergeCount = value;
+          }
+        } catch (const std::exception&) {
+          // 不是数字：留给下面的 detail。
+        }
+      }
+      if (!facts.localMergeCountKnown) {
+        facts.localMergeCountDetail =
+            L"rev-list --count --merges 的回答不是一个非负整数（读到的那一行是：" +
+            std::wstring(countLine) + L"）";
+      }
+    }
+  }
+
   facts.queryOk = true;
   return facts;
 }
@@ -748,7 +938,9 @@ std::wstring_view PullIntegrateStrategyLabel(PullIntegrateStrategy strategy) noe
     case PullIntegrateStrategy::merge:
       return L"合并（产生一次合并提交）";
     case PullIntegrateStrategy::rebase:
-      return L"变基（把本地独有提交重放到远端提交之上）";
+      return L"变基（把本地独有提交重放到远端提交之上；其中的合并提交会被压平）";
+    case PullIntegrateStrategy::rebaseMerges:
+      return L"保留合并结构的变基（--rebase-merges：本地合并提交重放后仍是合并提交）";
   }
   return L"未定";
 }
@@ -867,6 +1059,29 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
     return block(L"本地与远端的关系判不出来（rev-list 的回答不合约定）。");
   }
 
+  // ---- 配置里有原生 git pull 自己都会拒绝的取值：当场如实拒绝整合 ----
+  // 原生 pull 在解析配置阶段就 die（本机 2.53 实测：fatal: invalid value for '…'），连远端都不接触。
+  // 本程序的获取是独立可见的一步（与 fetch 按钮同源），到整合这一步如实拒绝；
+  // 绝不把坏配置当成没设，也不悄悄降级成合并或普通变基。
+  const PullStrategyConfig strategyCfg = ResolveStrategyConfig(target);
+  const PullFfConfig ffCfg = ResolveFfConfig(target);
+  if (strategyCfg.value == PullRebaseConfigValue::invalid) {
+    return block(L"配置 " + strategyCfg.key + L" = " + ConfigValueDisplay(strategyCfg.raw) +
+                 L" 是 Git 不认的取值：原生 git pull 会在联网之前直接拒绝。可用的取值是 "
+                 L"true/false（及其布尔写法 yes/no/on/off/1/0，大小写不敏感）、merges/m（保留合并结构的变基）、"
+                 L"interactive/i（交互式，本程序不执行）——其中 merges、interactive 及缩写必须严格小写，"
+                 L"preserve/p 已被并入 merges、同样按无效拒绝。\n"
+                 L"本程序不会把这句配置当成没设，不会替你猜一个策略，也不会改写你的配置文件。"
+                 L"请自己把这条改正（git config --unset " + strategyCfg.key +
+                 L"，或设成上面之一）后再点 pull；也可以直接在自己的终端里跑 git pull。");
+  }
+  if (ffCfg.value == PullFfConfigValue::invalid) {
+    return block(L"配置 " + ffCfg.key + L" = " + ConfigValueDisplay(ffCfg.raw) +
+                 L" 是 Git 不认的取值：原生 git pull 会在联网之前直接拒绝。pull.ff 可用的取值是 "
+                 L"true/false（及布尔写法）与严格小写的 only。\n"
+                 L"本程序不把它当成没设，也不改写配置；请自己改正后再点 pull。");
+  }
+
   // ---- 远端没有新东西：无事可做，连命令都不造 ----
   if (relationship.behind == 0) {
     PullIntegratePlan nothing;
@@ -885,9 +1100,10 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
     return nothing;
   }
 
-  // ---- 策略：配置说了话就用配置的；配置没说话就让用户当场选（默认偏向合并） ----
-  const StrategyIntent intent = ResolveStrategyIntent(target);
-  const FastForwardIntent ff = ResolveFastForwardIntent(target);
+  // ---- 策略：配置说了话就照配置；配置没表态且分叉时让用户当场选（默认偏向合并） ----
+  // 下面这套判定与 Git 2.53 原生 pull 逐步对齐（pull.c 主流程 + rebase.c/merge.c 的配置解析，
+  // 本机实测）：选择的形态、确认的文案与命令参数必须说同一件事。
+  // 「识别出 merges 却发不带 --rebase-merges 的普通变基」「识别出 interactive 却当没设」都在杜绝之列。
   const bool canFastForward = relationship.relationship == PullRelationship::fastForward;
   const bool diverged = relationship.relationship == PullRelationship::diverged;
 
@@ -896,108 +1112,260 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
   plan.displayName = L"pull 整合";
   std::wstring strategySource;
 
-  if (diverged && !intent.decided && input.choice == PullStrategyChoice::none) {
+  // 用户当场选择等价于命令行 --rebase / --no-rebase；配置给的方向等价于纯配置。
+  // 原生规则一：配置里的 pull.ff=only 优先于任何策略（源码注释「ff-only takes precedence
+  // over rebase」——分叉时 pull 直接拒绝，根本不执行变基）；但命令行一旦显式定过策略，
+  // 原生把 --ff-only 降回默认快进（源码注释写明这是留给显式 --rebase/--no-rebase 的口子）。
+  const bool userChose = input.choice != PullStrategyChoice::none;
+  const bool userChoseRebase = userChose && input.choice == PullStrategyChoice::chooseRebase;
+  const bool ffOnlyWins = ffCfg.value == PullFfConfigValue::only && ffCfg.fromPullFf && !userChose;
+  const bool configRebase =
+      strategyCfg.value == PullRebaseConfigValue::rebase ||
+      strategyCfg.value == PullRebaseConfigValue::rebaseMerges ||
+      strategyCfg.value == PullRebaseConfigValue::interactive;
+
+  // 交互式配置的拒绝范围：只有「真会执行交互式变基」的场合才拒绝——
+  // 可快进时原生根本不开编辑器（can_ff 一律强制 --ff-only 合并），无事可做更轮不到变基；
+  // 分叉且没被 ff-only 抢先，才会真的落到 git rebase -i——那种场合如实拒绝。
+  if (diverged && !ffOnlyWins && strategyCfg.value == PullRebaseConfigValue::interactive) {
+    return block(L"配置 " + strategyCfg.key + L" = " + ConfigValueDisplay(strategyCfg.raw) +
+                 L"：原生 git pull 会执行交互式变基（git rebase -i，最终历史由你在编辑器里当场改定的"
+                 L"todo 清单决定）。\n"
+                 L"本程序的确认框承诺「确认的是什么形态，得到的就是什么形态」；交互式变基的形态要等"
+                 L"编辑器关掉之后才定得下来，预检无法对它下结论，那份合并式冲突预演对它也不适用，"
+                 L"事后核对更无从谈起。因此本程序拒绝执行这一种策略：不发出任何命令、不动仓库，"
+                 L"也不会把它悄悄换成普通变基或合并。\n"
+                 L"要按交互式变基走，请在自己的终端里执行 git pull（或 git rebase -i 加远端提交ID）；"
+                 L"要让本程序整合，请把这条配置改成 true、false 或 merges——本程序绝不改写你的配置文件。");
+  }
+
+  if (diverged && strategyCfg.value == PullRebaseConfigValue::absent && !userChose && !ffOnlyWins) {
     plan.state = PullPlanState::chooseStrategy;
     plan.strategyCandidates = {
         L"合并：远端那 " + std::to_wstring(relationship.behind) + L" 个提交与本地那 " +
             std::to_wstring(relationship.ahead) + L" 个提交之间产生一次合并提交（Git 的默认做法）",
         L"变基：把本地那 " + std::to_wstring(relationship.ahead) +
-            L" 个提交重放到远端提交之上（本地这几个提交的 ID 会被改写）"};
+            L" 个提交重放到远端提交之上（本地这几个提交的 ID 会被改写；其中有合并提交会被压平，"
+            L"要保留合并结构请把配置设为 merges）"};
     plan.explanation = L"本地与远端已经分叉：本地独有 " + std::to_wstring(relationship.ahead) +
                        L" 个提交，远端独有 " + std::to_wstring(relationship.behind) + L" 个提交。\n" +
                        ConfigSentence(target) +
                        L"你的仓库没有给出明确的 pull 策略，本程序不替你定、也不写任何配置文件。"
+                       L"（原生 git pull 在这种情况下同样拒绝，要求你当场定或写进配置。）"
                        L"请在下面选一个（选完还会再给一次带风险清单的确认）：";
     return plan;
   }
-  if (!intent.decided && input.choice != PullStrategyChoice::none) {
-    strategySource = input.choice == PullStrategyChoice::chooseRebase
-                         ? std::wstring(L"你刚才在策略选择里点的「变基」（配置里没有可依据的 pull.rebase）")
-                         : std::wstring(L"你刚才在策略选择里点的「合并」（配置里没有可依据的 pull.rebase）");
-  } else {
-    strategySource = intent.source;
+
+  // 这一路会不会真的重放/合并：ff-only 凌驾与合并路线之外，就是变基路线（rebase 或 rebaseMerges）。
+  const bool rebaseRoute =
+      !ffOnlyWins && (strategyCfg.value == PullRebaseConfigValue::rebase ||
+                      strategyCfg.value == PullRebaseConfigValue::rebaseMerges ||
+                      (strategyCfg.value == PullRebaseConfigValue::absent && userChoseRebase));
+
+  // 「按配置让 Git 自己拒绝」的形态：ff-only 遇上分叉时命令照发，Git 会给出原生拒绝；
+  // 确认文字里预演那一行要如实说明它不参与。
+  bool refusalExpected = false;
+
+  const auto mergeArguments = [&target](std::wstring_view ffFlag) {
+    std::vector<std::wstring> arguments{L"-c", L"submodule.recurse=false", L"merge",
+                                        L"--no-autostash"};
+    if (!ffFlag.empty()) {
+      arguments.push_back(std::wstring(ffFlag));
+    }
+    if (ffFlag != L"--ff-only") {
+      arguments.push_back(L"--no-edit");
+    }
+    arguments.push_back(target.trackingObjectId);
+    return arguments;
+  };
+
+  // 预演结论的可信档位：仓库里存在改变合并等效性的配置（外部 merge driver、遗留策略），
+  // 或那份清单没能完整读回时，「预演说没有冲突」就只是强提示，不是保证。
+  std::wstring dryRunCaveat;
+  if (target.mergeEquivalence == PullMergeEquivalenceProbe::some) {
+    dryRunCaveat = L"仓库里存在改变合并等效性的配置（" + FormatFileList(target.mergeEquivalenceKeys) +
+                   L"）：外部 merge driver / 遗留策略配置会在真实合并时接管相应路径，"
+                   L"merge-tree 预演的结论在这里只是强提示，不构成保证。";
+  } else if (target.mergeEquivalence == PullMergeEquivalenceProbe::unknown ||
+             target.mergeEquivalence == PullMergeEquivalenceProbe::notProbed) {
+    dryRunCaveat = L"合并等效性配置没能完整读回，真实合并是否照预演的机械进行无从核对："
+                   L"预演结论在这里只是强提示，不构成保证。";
   }
 
   std::vector<std::wstring> risks;
   std::wstring commandNote;
 
   if (canFastForward) {
-    if (ff.only.has_value() && !*ff.only) {
-      // 配置要求「绝不快进」：本地虽然可以快进，也不该悄悄违背它——这次会产生合并提交。
+    if (configRebase || userChoseRebase) {
+      // 原生：变基路线且可快进时根本不开重放，直接强制 --ff-only 合并（源码与实测一致）——
+      // 即便配置同时要求「绝不快进」，可快进时也不该产生多余的合并提交。
+      plan.strategy = PullIntegrateStrategy::fastForward;
+      plan.arguments = mergeArguments(L"--ff-only");
+      strategySource =
+          (strategyCfg.value != PullRebaseConfigValue::absent
+               ? strategyCfg.source
+               : std::wstring(L"你刚才在策略选择里点的「变基」（配置里没有可依据的 pull.rebase）")) +
+          L"；本地没有独有提交——原生变基在这种场合就是直接快进（不开重放），本程序照此执行";
+      if (ffCfg.value == PullFfConfigValue::never) {
+        commandNote = L"配置虽要求不快进，但原生在「变基且可快进」时仍强制快进，不产生合并提交，本程序照此";
+      }
+    } else if (ffCfg.value == PullFfConfigValue::never) {
+      // 合并路线 + 配置要求绝不快进：本地虽然可以快进，也不该悄悄违背它——这次会产生合并提交。
       plan.strategy = PullIntegrateStrategy::merge;
-      plan.arguments = {L"-c", L"submodule.recurse=false", L"merge", L"--no-ff", L"--no-autostash",
-                        L"--no-edit", target.trackingObjectId};
+      plan.arguments = mergeArguments(L"--no-ff");
       commandNote = L"你的配置要求不快进，因此这次虽然可以快进仍会产生一次合并提交";
-      risks.push_back(L"配置「" + ff.source + L"」要求不快进：本地其实可以快进，这次仍会产生一次合并提交"
+      risks.push_back(L"配置「" + ffCfg.source + L"」要求不快进：本地其实可以快进，这次仍会产生一次合并提交"
                       L"（这是你那句配置本身的行为，不是本程序自作主张）。");
     } else {
-      // 本地没有独有提交时，变基与快进的结果是同一个引用移动：按快进执行，说法上把配置交代清楚。
       plan.strategy = PullIntegrateStrategy::fastForward;
-      plan.arguments = {L"-c", L"submodule.recurse=false", L"merge", L"--no-autostash", L"--ff-only",
-                        target.trackingObjectId};
-      if (intent.decided && intent.rebase) {
-        strategySource =
-            (intent.source.empty() ? std::wstring(L"没有配置可依据") : intent.source) +
-            L"；本地没有独有提交，变基与快进是同一个移动，因此按快进执行";
-      } else {
-        strategySource = L"本地没有独有提交：把分支引用挪到远端那一份即可（快进）";
-      }
-      if (ff.only.has_value() && *ff.only) {
+      plan.arguments = mergeArguments(L"--ff-only");
+      if (ffCfg.value == PullFfConfigValue::only) {
         commandNote = L"你的配置要求只在可快进时整合，这次正是可快进，一致";
       }
     }
-  } else {
-    const bool useRebase = intent.decided ? intent.rebase : input.choice == PullStrategyChoice::chooseRebase;
-    if (useRebase) {
-      plan.strategy = PullIntegrateStrategy::rebase;
-      // --no-autostash 写死：rebase.autoStash / pull.autoStash 不会把「替你 stash」这件事悄悄做掉。
-      plan.arguments = {L"-c", L"submodule.recurse=false", L"rebase", L"--no-autostash",
-                        target.trackingObjectId};
-      risks.push_back(L"变基会重写本地那 " + std::to_wstring(relationship.ahead) +
-                      L" 个提交（它们的对象 ID 会全部改变）。如果这些提交已经推送过，其他协作者会与你"
-                      L"分叉；本程序不会自动 force push。改写前的位置仍在 reflog 里，可以找回。");
-      risks.push_back(L"变基是逐提交重放的，冲突可能出现在中间某一步。本程序不用合并式预演去声称"
-                      L"「变基不会冲突」——那种结论是假的，所以这一条路上没有冲突预演结果。");
-    } else {
-      plan.strategy = PullIntegrateStrategy::merge;
-      plan.arguments = {L"-c", L"submodule.recurse=false", L"merge", L"--no-autostash", L"--no-edit",
-                        target.trackingObjectId};
-      if (ff.only.has_value() && *ff.only) {
-        // 配置说「只在可快进时整合」，而两边已分叉：忠实反映配置的做法就是让 Git 拒绝这次整合。
-        plan.arguments.insert(plan.arguments.begin() + 3, L"--ff-only");
-        risks.push_back(L"配置「" + ff.source + L"」要求只在可以快进时整合，而本地与远端已经分叉："
-                        L"这次很可能被 Git 直接拒绝（这正是你那句配置的行为）。本程序不会为了让它"
-                        L"「成功」而违背你的配置。");
-      } else if (ff.only.has_value() && !*ff.only) {
-        plan.arguments.insert(plan.arguments.begin() + 3, L"--no-ff");
-      }
-      switch (relationship.dryRun) {
-        case PullMergeDryRun::supported_conflict: {
-          std::wstring item =
-              L"内容冲突预演（git merge-tree，不碰工作区与索引）报告会有冲突";
-          if (!relationship.dryRunConflicts.empty()) {
-            item += L"：" + FormatFileList(relationship.dryRunConflicts);
-          }
-          item += L"。真跑一次合并会在这些文件里留下冲突标记并停在「合并进行中」；届时本程序不会 "
-                  L"abort、不会 reset，也不会替你选任何一方的内容。";
-          risks.push_back(std::move(item));
-          break;
-        }
-        case PullMergeDryRun::unsupported:
-        case PullMergeDryRun::failed:
-          risks.push_back(L"内容冲突没能预演（" +
-                          (relationship.dryRunDetail.empty()
-                               ? std::wstring(PullMergeDryRunLabel(relationship.dryRun))
-                               : relationship.dryRunDetail) +
-                          L"），所以「会不会冲突」本程序并不知道，只能保守提醒你先想想远端那 " +
-                          std::to_wstring(relationship.behind) + L" 个提交改了什么。");
-          break;
-        case PullMergeDryRun::supported_clean:
-        case PullMergeDryRun::notRun:
-        default:
-          break;
-      }
+  } else if (diverged && ffOnlyWins) {
+    // 配置给的 pull.ff=only 优先于一切策略：分叉时原生 pull 直接拒绝（Not possible to
+    // fast-forward, aborting.）。本程序把同一条 merge --ff-only 发出去，让命令窗口里的
+    // Git 给出原生的拒绝——仓库零改动，也不假装那句配置不存在。
+    plan.strategy = PullIntegrateStrategy::merge;
+    plan.arguments = mergeArguments(L"--ff-only");
+    refusalExpected = true;
+    strategySource =
+        (strategyCfg.value != PullRebaseConfigValue::absent
+             ? strategyCfg.source +
+                   std::wstring(L"；但配置给的 pull.ff=only 在原生规则里优先于策略"
+                                L"（分叉时根本不开合并/变基）")
+             : std::wstring(L"配置没定策略；而 pull.ff=only 优先于一切：原生只在可快进时整合")) +
+        L"。这次双方已分叉，照此发出 merge --ff-only，由 Git 自己给出原生的拒绝";
+    risks.push_back(L"本地与远端已分叉，而配置「" + ffCfg.source + L"」要求只在可快进时整合："
+                    L"Git 会像原生 git pull 一样拒绝这次整合（Not possible to fast-forward, "
+                    L"aborting.），仓库不会有任何改动。本程序不会为了让它「成功」而违背你的配置。");
+  } else if (diverged && rebaseRoute) {
+    const bool keepMerges = strategyCfg.value == PullRebaseConfigValue::rebaseMerges;
+    plan.strategy =
+        keepMerges ? PullIntegrateStrategy::rebaseMerges : PullIntegrateStrategy::rebase;
+    // --no-autostash 写死：rebase.autoStash / pull.autoStash 不会把「替你 stash」这件事悄悄做掉。
+    plan.arguments = {L"-c", L"submodule.recurse=false", L"rebase", L"--no-autostash"};
+    if (keepMerges) {
+      plan.arguments.push_back(L"--rebase-merges");  // 配置说保留合并结构，命令就真的带上它
     }
+    plan.arguments.push_back(target.trackingObjectId);
+    if (strategyCfg.value != PullRebaseConfigValue::absent) {
+      strategySource = strategyCfg.source;
+    }
+    if (userChose && ffCfg.value == PullFfConfigValue::only && ffCfg.fromPullFf) {
+      commandNote = L"你当场选了策略（等价命令行 --rebase）：原生在这种组合把 pull.ff=only 降回默认，"
+                    L"变基照常执行，本程序照此";
+    }
+    std::wstring rewrite =
+        keepMerges ? L"变基（--rebase-merges，保留合并结构）会重写本地那 " : L"变基会重写本地那 ";
+    rewrite += std::to_wstring(relationship.ahead) +
+               L" 个提交（它们的对象 ID 会全部改变）。如果这些提交已经推送过，其他协作者会与你"
+               L"分叉；本程序不会自动 force push。改写前的位置仍在 reflog 里，可以找回。";
+    risks.push_back(std::move(rewrite));
+    risks.push_back(L"变基是逐提交重放的，冲突可能出现在中间某一步" +
+                    std::wstring(keepMerges ? L"（保留合并结构时还包括合并重放那一步）" : L"") +
+                    L"。本程序不用合并式预演去声称「变基不会冲突」——那种结论是假的，"
+                    L"所以这一条路上没有冲突预演结果。");
+    if (keepMerges) {
+      if (relationship.localMergeCountKnown) {
+        commandNote = L"--rebase-merges：本地独有提交里的 " +
+                      std::to_wstring(relationship.localMergeCount) +
+                      L" 个合并提交重放后仍是合并提交，父子图保持合并形态";
+      } else {
+        risks.push_back(L"没能问出本地独有提交里有几个合并提交（" +
+                        (relationship.localMergeCountDetail.empty()
+                             ? std::wstring(L"原因未知")
+                             : relationship.localMergeCountDetail) +
+                        L"）；--rebase-merges 会按合并结构重放，这一点不因此改变。");
+      }
+    } else if (relationship.localMergeCountKnown && relationship.localMergeCount > 0) {
+      risks.push_back(L"本地独有提交里有 " + std::to_wstring(relationship.localMergeCount) +
+                      L" 个合并提交：普通变基会按线性历史重放，它们的合并结构会被压平、丢弃"
+                      L"（这是原生 pull.rebase=true 的行为，本程序如实披露，不假装保留）。"
+                      L"要保留合并结构，请把 " + BranchRebaseKey(target.branchName) +
+                      L" 或 pull.rebase 设为 merges（本程序会实际带上 --rebase-merges）。");
+    } else if (!relationship.localMergeCountKnown) {
+      risks.push_back(L"没能问出本地独有提交里有没有合并提交（" +
+                      (relationship.localMergeCountDetail.empty()
+                           ? std::wstring(L"原因未知")
+                           : relationship.localMergeCountDetail) +
+                      L"）：普通变基遇到合并提交会将其压平，这次的确切形态无法事先报准。");
+    }
+  } else {
+    // 合并路线（配置说合并、用户选合并、或配置没表态且可快进以外的情形）。因为实际执行的是
+    // `git merge`（它看不见 pull.ff），配置里的快进意愿在这里被翻译成命令行上显式的旗标，
+    // 「预检声称的形态」与「命令实际做的形态」因此是同一件事。
+    plan.strategy = PullIntegrateStrategy::merge;
+    std::wstring ffFlag;
+    if (ffCfg.value == PullFfConfigValue::only && !ffCfg.fromPullFf) {
+      // merge.ff=only：原生由 merge 子进程读到并拒绝分叉整合；这里显式写成同样的 --ff-only。
+      ffFlag = L"--ff-only";
+      refusalExpected = true;
+      risks.push_back(L"配置「" + ffCfg.source + L"」要求只在可以快进时整合，而本地与远端已经分叉："
+                      L"这次很可能被 Git 直接拒绝（这正是你那句配置的行为）。本程序不会为了让它"
+                      L"「成功」而违背你的配置。");
+    } else if (ffCfg.value == PullFfConfigValue::only && ffCfg.fromPullFf && userChose) {
+      // 用户当场选过策略 + pull.ff=only（等价命令行 --no-rebase）：原生在这种组合把
+      // --ff-only 降回默认——合并提交照常产生，不额外写 ff 旗标。
+      commandNote = L"配置 pull.ff=only 在这里按原生规则降回默认：命令行显式定过策略（你当场选的）时，"
+                    L"--ff-only 不再是硬约束，合并照常";
+    } else if (ffCfg.value == PullFfConfigValue::never) {
+      ffFlag = L"--no-ff";
+    }
+    plan.arguments = mergeArguments(ffFlag);
+    if (strategyCfg.value != PullRebaseConfigValue::absent) {
+      strategySource = strategyCfg.source;
+    }
+    switch (relationship.dryRun) {
+      case PullMergeDryRun::supported_conflict: {
+        std::wstring item = L"内容冲突预演（git merge-tree --write-tree：不改工作区与索引，"
+                            L"只向对象库写不可达的结果对象）报告会有冲突";
+        if (!relationship.dryRunConflicts.empty()) {
+          item += L"：" + FormatFileList(relationship.dryRunConflicts);
+        }
+        item += L"。真跑一次合并会在这些文件里留下冲突标记并停在「合并进行中」；届时本程序不会 "
+                L"abort、不会 reset，也不会替你选任何一方的内容。";
+        if (!dryRunCaveat.empty()) {
+          item += L"另外，" + dryRunCaveat;
+        }
+        risks.push_back(std::move(item));
+        break;
+      }
+      case PullMergeDryRun::unsupported:
+      case PullMergeDryRun::failed: {
+        std::wstring item = L"内容冲突没能预演（" +
+                            (relationship.dryRunDetail.empty()
+                                 ? std::wstring(PullMergeDryRunLabel(relationship.dryRun))
+                                 : relationship.dryRunDetail) +
+                            L"），所以「会不会冲突」本程序并不知道，只能保守提醒你先想想远端那 " +
+                            std::to_wstring(relationship.behind) + L" 个提交改了什么。";
+        if (!dryRunCaveat.empty()) {
+          item += L"另外，" + dryRunCaveat;
+        }
+        risks.push_back(std::move(item));
+        break;
+      }
+      case PullMergeDryRun::supported_clean:
+      case PullMergeDryRun::notRun:
+      default:
+        if (!dryRunCaveat.empty() &&
+            relationship.dryRun == PullMergeDryRun::supported_clean) {
+          risks.push_back(L"预演说没有内容冲突，但这份结论的档位被降低了：" + dryRunCaveat);
+        }
+        break;
+    }
+  }
+
+  if (strategySource.empty()) {
+    strategySource =
+        strategyCfg.value != PullRebaseConfigValue::absent
+            ? strategyCfg.source
+            : std::wstring(userChose
+                               ? (userChoseRebase
+                                      ? L"你刚才在策略选择里点的「变基」（配置里没有可依据的 pull.rebase）"
+                                      : L"你刚才在策略选择里点的「合并」（配置里没有可依据的 pull.rebase）")
+                               : L"配置没表态：本地没有独有提交时快进即可（原生同场景也是快进）");
   }
 
   // ---- 工作区重叠风险：本地未提交的东西与这次要带进来的路径撞上 ----
@@ -1049,11 +1417,21 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
   if (!commandNote.empty()) {
     text += L"　" + commandNote + L"\n";
   }
-  // 预演这一行必须跟着策略走：变基路线上那份合并式预演结果不适用，
-  // 把它照抄过来就是拿合并的预检去声称变基无冲突——那是假话。
-  text += plan.strategy == PullIntegrateStrategy::rebase
-              ? std::wstring(L"　预演：变基路线不做合并式预演（上面那句冲突预演结果不适用于它）\n")
-              : L"　预演：" + std::wstring(PullMergeDryRunLabel(relationship.dryRun)) + L"\n";
+  // 预演这一行必须跟着实际执行的策略走：变基路线（含保留合并结构那种）那份合并式预演结果
+  // 不适用；「ff-only 由 Git 自己拒绝」的路线根本不会发生合并内容，预演结论也不参与。
+  if (plan.strategy == PullIntegrateStrategy::rebase ||
+      plan.strategy == PullIntegrateStrategy::rebaseMerges) {
+    text += L"　预演：变基路线不做合并式预演（上面那份合并冲突预演结论不适用于它）\n";
+  } else if (refusalExpected) {
+    text += L"　预演：这次按配置只发快进条件的整合，Git 会先行拒绝（Not possible to fast-forward），"
+            L"不会发生合并内容，预演结论不参与\n";
+  } else {
+    text += L"　预演：" + std::wstring(PullMergeDryRunLabel(relationship.dryRun));
+    if (!dryRunCaveat.empty()) {
+      text += L"（结论的可信档位被降低，见风险条目）";
+    }
+    text += L"\n";
+  }
   text += ConfigSentence(target);
   text += L"-c submodule.recurse=false 与 --no-autostash 只对这一个子进程生效：不写你的配置文件，"
           L"不会替你 stash（autoStash 类配置也被这次覆盖），子模块不会被递归改动。\n";
@@ -1139,6 +1517,44 @@ std::wstring DescribePullChange(const PullTargetFacts& preflight, const PullTarg
                       DescribeObject(preflight.trackingObjectId) + L" 变成了 " +
                       DescribeObject(latest.trackingObjectId) +
                       L"（预检之后又有过抓取，或引用被外部改动过）");
+  }
+  // 策略/快进配置与合并等效性清单也在核对之列：确认框是按「那一刻的配置」承诺的形态，
+  // 点头之后配置被外部改过的话，实际会执行的行为就可能不再是确认里写的那一种。
+  const auto describeConfigValue = [](bool present, const std::wstring& value) {
+    if (!present) {
+      return std::wstring(L"（没设）");
+    }
+    return value.empty() ? std::wstring(L"（空值）") : value;
+  };
+  struct ConfigPair {
+    std::wstring key;
+    bool preflightPresent;
+    const std::wstring* preflightValue;
+    bool latestPresent;
+    const std::wstring* latestValue;
+  };
+  const ConfigPair configPairs[] = {
+      {BranchRebaseKey(preflight.branchName), preflight.configBranchRebasePresent,
+       &preflight.configBranchRebase, latest.configBranchRebasePresent, &latest.configBranchRebase},
+      {L"pull.rebase", preflight.configPullRebasePresent, &preflight.configPullRebase,
+       latest.configPullRebasePresent, &latest.configPullRebase},
+      {L"pull.ff", preflight.configPullFfPresent, &preflight.configPullFf,
+       latest.configPullFfPresent, &latest.configPullFf},
+      {L"merge.ff", preflight.configMergeFfPresent, &preflight.configMergeFf,
+       latest.configMergeFfPresent, &latest.configMergeFf},
+  };
+  for (const ConfigPair& pair : configPairs) {
+    if (pair.preflightPresent != pair.latestPresent ||
+        (pair.preflightPresent && *pair.preflightValue != *pair.latestValue)) {
+      changes.push_back(L"配置 " + pair.key + L" 从「" +
+                        describeConfigValue(pair.preflightPresent, *pair.preflightValue) +
+                        L"」变成了「" + describeConfigValue(pair.latestPresent, *pair.latestValue) +
+                        L"」（确认框里承诺的策略形态是按旧配置说的）");
+    }
+  }
+  if (latest.mergeEquivalenceKeys != preflight.mergeEquivalenceKeys ||
+      latest.mergeEquivalence != preflight.mergeEquivalence) {
+    changes.push_back(L"合并等效性配置清单变了（预演结论的可信档位随之变动）");
   }
   if (!latest.statusOk || !preflight.statusOk) {
     changes.push_back(L"工作区/索引的现状没能读回来");
