@@ -7,10 +7,16 @@
 //     （0 无冲突、1 有冲突并能认出文件名、129 视为不支持而降级为保守提示）；
 //   * 前提拒绝：无上游、游离 HEAD、尚无提交、merge 进行中、查询失败——一律不产生命令，
 //     也不猜 origin、不代设 upstream、不写配置；
-//   * 策略尊重配置：branch.<名>.rebase > pull.rebase、pull.ff > merge.ff；分叉而配置未明确时
-//     交给用户当场选（默认偏向合并）；命令形态与预检策略一致，变基路线不借用合并预演的结论；
+//   * 策略按 Git 2.53 原生规矩的完整矩阵：branch.<名>.rebase **存在**即覆盖 pull.rebase（哪怕无效值、
+//     空值），布尔大小写不敏感、merges/interactive 严格小写；merges→实际带 --rebase-merges；
+//     interactive 只在原生真会执行它的场合拒绝；无效取值一律 blocked；pull.ff 存在即覆盖 merge.ff，
+//     only 优先于配置策略（分叉时发 merge --ff-only 让 Git 原生拒绝），用户当场选择按原生降回默认；
+//     merge.ff=only 不压制提问、不参与变基；可快进+变基意图一律快进、不产生多余合并提交；
+//     命令形态与预检策略一致，变基路线不借用合并预演的结论，本地合并提交压平如实披露；
 //   * 风险清单：预演冲突、未提交改动重叠、未跟踪文件撞名都要列出来并点名文件；
-//   * 执行前复核 DescribePullChange：分支/HEAD/跟踪引用/逐条现状/流程痕迹任一变化都拒绝执行。
+//     自定义 merge driver / 遗留策略命中时，冲突预演降档为「强提示而非保证」；
+//   * 执行前复核 DescribePullChange：分支/HEAD/跟踪引用/逐条现状/流程痕迹/四条配置与等效性清单，
+//     任一变化都拒绝执行。
 // 真实 Git 的两工作区链路（含 fetch→整合落地后的仓库状态）在 pull_probe_fixture_tests.cpp 验证。
 #include <algorithm>
 #include <cstdio>
@@ -130,6 +136,10 @@ PullTargetQueries HealthyTargetQueries() {
   queries.configBranchRebaseRan = true;
   queries.configPullFf = NoResult();
   queries.configMergeFf = NoResult();
+  // 合并等效性配置：默认「确实没有这类配置」（--get-regexp 无匹配 = 退出码 1 + 空输出），
+  // 冲突预演的结论因此保持「保证」档位，由用例按需改写成命中/读不全。
+  queries.mergeEquivalenceRan = true;
+  queries.mergeEquivalence = NoResult();
   queries.statusRan = true;
   queries.status = Answer(0, L"");  // porcelain v2 的「没有任何变化」就是空输出
   // 抓取范围的配置：默认「这类配置一条也没有」（--get-regexp 无匹配 = 退出码 1 + 空输出）。
@@ -252,6 +262,25 @@ GC_TEST(pull_query_arguments_bind_repository_and_stay_read_only) {
   const std::vector<std::wstring> config = gc::git::BuildPullConfigArguments(kRoot, L"pull.rebase");
   GC_CHECK(HasArgument(config, L"config") && HasArgument(config, L"--get") &&
            HasArgument(config, L"pull.rebase"));
+
+  // 合并等效性清单：--null --get-regexp，与 fetch_scope 同一套记录约定；无命中由 Git 明确回答。
+  const std::vector<std::wstring> equivalence = gc::git::BuildPullMergeEquivalenceArguments(kRoot);
+  GC_CHECK(HasArgument(equivalence, L"config") && HasArgument(equivalence, L"--null") &&
+           HasArgument(equivalence, L"--get-regexp"));
+  const bool patternPresent = std::any_of(
+      equivalence.begin(), equivalence.end(), [](const std::wstring& argument) {
+        return TextContains(argument, L"merge\\..*\\.driver") &&
+               TextContains(argument, L"twohead");
+      });
+  GC_CHECK_MESSAGE(patternPresent, "清单必须同时覆盖外部 merge driver 与遗留策略配置");
+
+  // 本地合并提交数：不合格的 ID 不送进 Git；范围写法是 base..head。
+  GC_CHECK(gc::git::BuildPullLocalMergeCountArguments(kRoot, kBase, L"nope").empty());
+  const std::vector<std::wstring> localMerges =
+      gc::git::BuildPullLocalMergeCountArguments(kRoot, kBase, kHead);
+  GC_CHECK(HasArgument(localMerges, L"rev-list") && HasArgument(localMerges, L"--count") &&
+           HasArgument(localMerges, L"--merges"));
+  GC_CHECK(HasArgument(localMerges, std::wstring(kBase) + L".." + std::wstring(kHead)));
 }
 
 // ---- 阶段一判读 ----
@@ -277,12 +306,47 @@ GC_TEST(pull_target_facts_distinguish_unset_config_from_set_value) {
   queries.configPullRebase = Answer(0, L"merges\n");
   queries.configBranchRebase = Answer(0, L"true\n");
   queries.configPullFf = Answer(0, L"only\n");
+  // 空值与「没设」是两回事：Git 以退出码 0 + 空行回答的「设成了空值」必须带 present 标记。
+  queries.configMergeFf = Answer(0, L"\n");
   const PullTargetFacts facts = gc::git::InterpretPullTarget(queries);
   GC_REQUIRE_MESSAGE(facts.queryOk, Narrow(facts.queryFailure));
-  GC_CHECK(facts.configPullRebase == L"merges");
-  GC_CHECK(facts.configBranchRebase == L"true");  // 分支层覆盖 pull 层：判读层只如实搬运
-  GC_CHECK(facts.configPullFf == L"only");
-  GC_CHECK(facts.configMergeFf.empty());
+  GC_CHECK(facts.configPullRebase == L"merges" && facts.configPullRebasePresent);
+  GC_CHECK(facts.configBranchRebase == L"true" && facts.configBranchRebasePresent);  // 分支层覆盖 pull 层：判读层只如实搬运
+  GC_CHECK(facts.configPullFf == L"only" && facts.configPullFfPresent);
+  GC_CHECK(facts.configMergeFf.empty() && facts.configMergeFfPresent);  // 设了、值是空的
+}
+
+GC_TEST(pull_target_facts_read_merge_equivalence_list) {
+  PullTargetQueries queries = HealthyTargetQueries();
+  // 实测记录形态是「键<换行>值<NUL>」：带内嵌 NUL 的输出必须逐段拼进 std::wstring，
+  // 字面量里的 \0 会把后一半直接截掉。
+  std::wstring records;
+  records += L"merge.foo.driver\nC:\\tools\\merge-foo %O %A %B";
+  records.push_back(L'\0');
+  records += L"merge.binary.driver\ntrue";
+  records.push_back(L'\0');
+  queries.mergeEquivalence = AnswerRaw(0, records);
+  const PullTargetFacts facts = gc::git::InterpretPullTarget(queries);
+  GC_REQUIRE_MESSAGE(facts.queryOk, Narrow(facts.queryFailure));
+  GC_CHECK(facts.mergeEquivalence == gc::git::PullMergeEquivalenceProbe::some);
+  GC_REQUIRE_MESSAGE(facts.mergeEquivalenceKeys.size() == 2,
+                       SizeMessage(L"driver 清单", facts.mergeEquivalenceKeys.size(), 2));
+  GC_CHECK(facts.mergeEquivalenceKeys[0] == L"merge.binary.driver");
+  GC_CHECK(facts.mergeEquivalenceKeys[1] == L"merge.foo.driver");
+
+  // 记录残缺：整份不采信，按「无从判断」降档，而不是只留读到的那半条。
+  queries.mergeEquivalence = AnswerRaw(0, L"merge.foo.driver\0C:\\too");
+  const PullTargetFacts broken = gc::git::InterpretPullTarget(queries);
+  GC_CHECK(broken.queryOk);
+  GC_CHECK(broken.mergeEquivalence == gc::git::PullMergeEquivalenceProbe::unknown);
+  GC_CHECK(broken.mergeEquivalenceKeys.empty());
+
+  // 查询本身失败也是 unknown：不许当成「没有」。
+  queries.mergeEquivalence = LaunchFailed();
+  queries.configPullRebase = NoResult();
+  const PullTargetFacts failed = gc::git::InterpretPullTarget(queries);
+  GC_CHECK(failed.queryOk);
+  GC_CHECK(failed.mergeEquivalence == gc::git::PullMergeEquivalenceProbe::unknown);
 }
 
 GC_TEST(pull_target_facts_detached_head_answers_without_upstream_queries) {
@@ -677,18 +741,85 @@ GC_TEST(pull_integrate_plan_branch_rebase_overrides_pull_rebase) {
   GC_CHECK(TextContains(plan.strategySource, L"branch.main.rebase = false"));
 }
 
-GC_TEST(pull_integrate_plan_ff_only_config_on_diverged_branch_stays_faithful) {
+// 一份「分叉」的完整阶段二事实，可另带「本地独有提交里的合并提交数」。
+PullRelationshipFacts DivergedFactsWithLocalMerges(std::wstring_view count) {
+  PullRelationshipQueries queries = DivergedQueries();
+  queries.localMergeCountRan = true;
+  queries.localMergeCount = Answer(0, std::wstring(count) + L"\n");
+  return RelationshipOf(queries);
+}
+
+// 按配置改动后的阶段一事实：四个可改字段用「设置与否 + 取值」直给。
+PullTargetFacts TargetWithRebase(std::wstring_view pullValue, std::wstring_view branchValue = {}) {
+  PullTargetQueries queries = HealthyTargetQueries();
+  if (!pullValue.empty()) {
+    queries.configPullRebase = Answer(0, std::wstring(pullValue) + L"\n");
+  }
+  if (!branchValue.empty()) {
+    queries.configBranchRebase = Answer(0, std::wstring(branchValue) + L"\n");
+  }
+  return gc::git::InterpretPullTarget(queries);
+}
+
+// 分叉 + pull.ff=only（纯配置）：原生规则是 ff-only 优先于任何策略，本程序忠实到「让 Git 自己拒绝」。
+GC_TEST(pull_integrate_plan_pull_ff_only_config_refuses_divergence_via_native_rejection) {
   PullTargetQueries queries = HealthyTargetQueries();
   queries.configPullFf = Answer(0, L"only\n");
   const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
-      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseMerge,
-                     gc::git::InterpretPullTarget(queries)));
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::none, gc::git::InterpretPullTarget(queries)));
   GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
-  // 分叉而配置要求只快进：忠实反映配置 = 让 Git 自己拒绝，而不是违背配置去「讨好」用户。
+  // 忠实反映配置 = 把 merge --ff-only 发出去，让命令窗口里的 Git 给出原生的拒绝。
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);
   GC_CHECK(HasArgument(plan.arguments, L"--ff-only"));
   GC_CHECK(plan.requiresForce);
   GC_CHECK(TextContains(RiskText(plan), L"pull.ff = only"));
   GC_CHECK(TextContains(RiskText(plan), L"违背你的配置"));
+  GC_CHECK(TextContains(plan.confirmationText, L"Not possible to fast-forward"));
+  GC_CHECK(TextContains(plan.confirmationText, L"预演结论不参与"));
+}
+
+// 用户当场选择了策略（等价命令行 --rebase/--no-rebase）：原生在这种组合把 pull.ff=only
+// 降回默认——照此放行，不再写 --ff-only，也不装作这层降级没发生过。
+GC_TEST(pull_integrate_plan_explicit_choice_downgrades_pull_ff_only_like_native) {
+  PullTargetQueries queries = HealthyTargetQueries();
+  queries.configPullFf = Answer(0, L"only\n");
+  const PullTargetFacts target = gc::git::InterpretPullTarget(queries);
+  const PullIntegratePlan merged = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseMerge, target));
+  GC_REQUIRE_MESSAGE(merged.state == PullPlanState::ready, Narrow(merged.explanation));
+  GC_CHECK(merged.strategy == PullIntegrateStrategy::merge);
+  GC_CHECK(!HasArgument(merged.arguments, L"--ff-only"));
+  GC_CHECK(HasArgument(merged.arguments, L"--no-edit"));
+  GC_CHECK(TextContains(merged.confirmationText, L"按原生规则降回默认"));
+  GC_CHECK(!merged.requiresForce);  // 降级后没有额外风险：合并照常产生，现状干净、预演无冲突
+
+  const PullIntegratePlan rebased = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseRebase, target));
+  GC_REQUIRE_MESSAGE(rebased.state == PullPlanState::ready, Narrow(rebased.explanation));
+  GC_CHECK(rebased.strategy == PullIntegrateStrategy::rebase);
+  GC_CHECK(!HasArgument(rebased.arguments, L"--ff-only"));
+  GC_CHECK(TextContains(rebased.confirmationText, L"pull.ff=only 降回默认"));
+}
+
+// merge.ff=only 是 merge 子进程读的配置：它既不该压制「配置没表态时问用户」，
+// 也不该参与变基路线——两个方向都照原生。
+GC_TEST(pull_integrate_plan_merge_ff_only_neither_asks_instead_nor_touches_rebase) {
+  PullTargetQueries queries = HealthyTargetQueries();
+  queries.configMergeFf = Answer(0, L"only\n");
+  const PullTargetFacts target = gc::git::InterpretPullTarget(queries);
+
+  const PullIntegratePlan asked =
+      gc::git::BuildPullIntegratePlan(IntegrateInput(DivergedFacts(), PullStrategyChoice::none, target));
+  GC_CHECK(asked.state == PullPlanState::chooseStrategy);  // 原生这里问的是策略，不是 ff
+
+  const PullIntegratePlan merged =
+      gc::git::BuildPullIntegratePlan(IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseMerge, target));
+  GC_CHECK(HasArgument(merged.arguments, L"--ff-only"));  // 合并子进程会照 merge.ff=only 拒绝分叉
+
+  const PullIntegratePlan rebased = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseRebase, target));
+  GC_CHECK(rebased.strategy == PullIntegrateStrategy::rebase);
+  GC_CHECK(!HasArgument(rebased.arguments, L"--ff-only"));  // 变基根本不执行 merge，那句配置无从生效
 }
 
 GC_TEST(pull_integrate_plan_lists_overlapping_local_changes_as_risk) {
@@ -706,6 +837,262 @@ GC_TEST(pull_integrate_plan_lists_overlapping_local_changes_as_risk) {
   GC_CHECK(TextContains(risks, L"未跟踪"));
   GC_CHECK(!TextContains(risks, L"unrelated.txt"));  // 不在这次带入路径里的不该被牵连
   GC_CHECK(TextContains(risks, L"stash"));           // 明确说不会替用户 stash
+}
+
+// ---- 阶段二方案：策略与配置的完整矩阵（对齐原生 2.53 的解析与优先级） ----
+
+// merges / m：必须实际带上 --rebase-merges——「识别出 merges 却发普通变基」是本任务修的错。
+GC_TEST(pull_integrate_plan_merges_config_actually_carries_rebase_merges) {
+  const PullTargetFacts viaPull = TargetWithRebase(L"merges");
+  const PullIntegratePlan fromPull =
+      gc::git::BuildPullIntegratePlan(IntegrateInput(DivergedFactsWithLocalMerges(L"2"),
+                                                     PullStrategyChoice::none, viaPull));
+  GC_REQUIRE_MESSAGE(fromPull.state == PullPlanState::ready, Narrow(fromPull.explanation));
+  GC_CHECK(fromPull.strategy == PullIntegrateStrategy::rebaseMerges);
+  GC_CHECK(fromPull.arguments == std::vector<std::wstring>({L"-c", L"submodule.recurse=false", L"rebase",
+                                                             L"--no-autostash", L"--rebase-merges",
+                                                             std::wstring(kRemote)}));
+  GC_CHECK(TextContains(fromPull.strategySource, L"pull.rebase = merges"));
+  GC_CHECK(TextContains(fromPull.confirmationText, L"保留合并结构的变基"));
+  // 本地独有提交里那两个合并提交被点名：--rebase-merges 重放后仍是合并提交。
+  GC_CHECK(TextContains(fromPull.confirmationText, L"--rebase-merges：本地独有提交里的 2 个合并提交"));
+  // 变基路线不借用合并预演的结论。
+  GC_CHECK(TextContains(fromPull.confirmationText, L"变基路线不做合并式预演"));
+
+  // branch 层写 merges 覆盖 pull 层的 true。
+  const PullTargetFacts viaBranch = TargetWithRebase(L"true", L"merges");
+  const PullIntegratePlan fromBranch =
+      gc::git::BuildPullIntegratePlan(IntegrateInput(DivergedFacts(), PullStrategyChoice::none, viaBranch));
+  GC_REQUIRE_MESSAGE(fromBranch.state == PullPlanState::ready, Narrow(fromBranch.explanation));
+  GC_CHECK(fromBranch.strategy == PullIntegrateStrategy::rebaseMerges);
+  GC_CHECK(HasArgument(fromBranch.arguments, L"--rebase-merges"));
+  GC_CHECK(TextContains(fromBranch.strategySource, L"branch.main.rebase = merges"));
+
+  // 缩写 m 与 merges 同义。
+  const PullIntegratePlan shortForm = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::none, TargetWithRebase(L"m")));
+  GC_CHECK(shortForm.state == PullPlanState::ready);
+  GC_CHECK(shortForm.strategy == PullIntegrateStrategy::rebaseMerges);
+  GC_CHECK(HasArgument(shortForm.arguments, L"--rebase-merges"));
+}
+
+// 布尔拼写按原生大小写不敏感；merges/interactive 与缩写必须严格小写——"MERGES" 在原生就是无效值。
+GC_TEST(pull_integrate_plan_bool_spellings_case_rules_and_empty_value_meanings) {
+  for (const std::wstring_view truthy : {L"true", L"True", L"TRUE", L"yes", L"on", L"1"}) {
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, TargetWithRebase(truthy)));
+    GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+    GC_CHECK_MESSAGE(plan.strategy == PullIntegrateStrategy::rebase,
+                     Narrow(truthy) + " 应判为普通变基");
+    GC_CHECK(!HasArgument(plan.arguments, L"--rebase-merges"));
+  }
+  for (const std::wstring_view falsy : {L"false", L"FALSE", L"no", L"off", L"0"}) {
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, TargetWithRebase(falsy)));
+    GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+    GC_CHECK_MESSAGE(plan.strategy == PullIntegrateStrategy::merge,
+                     Narrow(falsy) + " 应判为合并");
+  }
+  // "MERGES"/"I" 不是原生认得的取值（严格小写）：如实拒绝，不当没设、不降级。
+  for (const std::wstring_view wrong : {L"MERGES", L"Merges", L"I", L"Interactive", L"preserve",
+                                        L"p", L"bogus", L"2"}) {
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, TargetWithRebase(wrong)));
+    GC_CHECK_MESSAGE(plan.state == PullPlanState::blocked,
+                     Narrow(wrong) + " 是原生会当场拒绝的取值，必须 blocked 而不是执行");
+    GC_CHECK_MESSAGE(plan.arguments.empty(), Narrow(wrong) + " 被拒绝时不得产生任何命令");
+    GC_CHECK(TextContains(plan.explanation, L"pull.rebase"));
+  }
+  // 空值（pull.rebase=）：原生布尔语义就是「假」=合并，且这是「设了」——分叉时不问用户。
+  {
+    PullTargetQueries queries = HealthyTargetQueries();
+    queries.configPullRebase = Answer(0, L"\n");
+    const PullTargetFacts target = gc::git::InterpretPullTarget(queries);
+    GC_CHECK(target.configPullRebasePresent && target.configPullRebase.empty());
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, target));
+    GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+    GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);
+    GC_CHECK(TextContains(plan.strategySource, L"空值"));
+  }
+  // branch 层的空值同样「存在即说了算」：它把 pull.rebase=true 压掉，按合并走。
+  {
+    PullTargetQueries queries = HealthyTargetQueries();
+    queries.configPullRebase = Answer(0, L"true\n");
+    queries.configBranchRebase = Answer(0, L"\n");
+    const PullTargetFacts target = gc::git::InterpretPullTarget(queries);
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, target));
+    GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+    GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);
+    GC_CHECK(TextContains(plan.strategySource, L"branch.main.rebase"));
+  }
+  // branch 层的无效取值同样是「存在即说了算」：原生实测 fatal 点名 branch 键、不回落 pull——
+  // 这里也必须拒绝，而不是把 pull.rebase=true 捡起来用。
+  {
+    PullTargetQueries queries = HealthyTargetQueries();
+    queries.configPullRebase = Answer(0, L"true\n");
+    queries.configBranchRebase = Answer(0, L"bogus\n");
+    const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none,
+                       gc::git::InterpretPullTarget(queries)));
+    GC_CHECK(plan.state == PullPlanState::blocked);
+    GC_CHECK(plan.arguments.empty());
+    GC_CHECK(TextContains(plan.explanation, L"branch.main.rebase"));
+    GC_CHECK(!TextContains(plan.explanation, L"改用普通变基"));
+  }
+}
+
+// interactive/i：原生要开编辑器当场定历史，本程序无法承诺「确认的形态=得到的形态」——
+// 只在真会执行它的场合拒绝；可快进与无事可做时原生本来就不开编辑器，照常放行。
+GC_TEST(pull_integrate_plan_interactive_refused_only_where_native_would_run_it) {
+  for (const std::wstring_view spelling : {std::wstring_view(L"interactive"), std::wstring_view(L"i")}) {
+    const PullTargetFacts target = TargetWithRebase(spelling);
+
+    const PullIntegratePlan divergedPlan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(DivergedFacts(), PullStrategyChoice::none, target));
+    GC_CHECK_MESSAGE(divergedPlan.state == PullPlanState::blocked, Narrow(divergedPlan.explanation));
+    GC_CHECK(divergedPlan.arguments.empty());
+    GC_CHECK(TextContains(divergedPlan.explanation, L"交互式变基"));
+    GC_CHECK(TextContains(divergedPlan.explanation, L"悄悄换成普通变基或合并"));
+    GC_CHECK(TextContains(divergedPlan.explanation, L"不改写你的配置文件"));
+
+    // 可快进：原生 rebase 且 can_ff 时直接强制快进，不开编辑器——照此执行，不是拒绝。
+    const PullIntegratePlan ffPlan = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(CountedRelationship(L"0\t2"), PullStrategyChoice::none, target));
+    GC_REQUIRE_MESSAGE(ffPlan.state == PullPlanState::ready, Narrow(ffPlan.explanation));
+    GC_CHECK(ffPlan.strategy == PullIntegrateStrategy::fastForward);
+    GC_CHECK(TextContains(ffPlan.strategySource, L"直接快进"));
+
+    // 已一致 / 本地领先：轮不到变基，无事可做。
+    const PullIntegratePlan same = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(CountedRelationship(L"0\t0"), PullStrategyChoice::none, target));
+    GC_CHECK(same.state == PullPlanState::nothingToIntegrate);
+    const PullIntegratePlan ahead = gc::git::BuildPullIntegratePlan(
+        IntegrateInput(CountedRelationship(L"2\t0"), PullStrategyChoice::none, target));
+    GC_CHECK(ahead.state == PullPlanState::nothingToIntegrate);
+  }
+}
+
+// ff 配置不许把可快进的分支顶出多余合并提交：原生「变基且可快进」一律强制快进，
+// 连 pull.ff=false 都被源码就地改写；而无效 pull.ff 在任何整合（含无事可做）前就被原生拒绝。
+GC_TEST(pull_integrate_plan_rebase_intent_never_invents_merge_commit_on_ffable_branch) {
+  for (const std::wstring_view rebaseValue : {std::wstring_view(L"true"), std::wstring_view(L"merges")}) {
+    for (const std::wstring_view ffValue : {std::wstring_view(), std::wstring_view(L"false"),
+                                            std::wstring_view(L"only")}) {
+      PullTargetQueries queries = HealthyTargetQueries();
+      queries.configPullRebase = Answer(0, std::wstring(rebaseValue) + L"\n");
+      if (!ffValue.empty()) {
+        queries.configPullFf = Answer(0, std::wstring(ffValue) + L"\n");
+      }
+      const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+          IntegrateInput(CountedRelationship(L"0\t3"), PullStrategyChoice::none,
+                         gc::git::InterpretPullTarget(queries)));
+      GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+      GC_CHECK_MESSAGE(plan.strategy == PullIntegrateStrategy::fastForward,
+                       "可快进 + 变基意图（ff=" + Narrow(ffValue) + "）必须快进，不得产生合并提交");
+      GC_CHECK(HasArgument(plan.arguments, L"--ff-only"));
+      GC_CHECK(!HasArgument(plan.arguments, L"--no-ff"));
+    }
+  }
+  // pull.ff 的无效取值：原生 pull 在解析配置时就 die——即便本轮无事可做也不许放行。
+  PullTargetQueries queries = HealthyTargetQueries();
+  queries.configPullFf = Answer(0, L"bogus\n");
+  const PullIntegratePlan bogus = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(CountedRelationship(L"0\t0"), PullStrategyChoice::none,
+                     gc::git::InterpretPullTarget(queries)));
+  GC_CHECK(bogus.state == PullPlanState::blocked);
+  GC_CHECK(bogus.arguments.empty());
+  GC_CHECK(TextContains(bogus.explanation, L"pull.ff"));
+
+  // merge.ff 的无效取值是另一种原生行为：merge 明确忽略、按默认——不许跟着掉档也不许拒绝。
+  PullTargetQueries mergeFfQueries = HealthyTargetQueries();
+  mergeFfQueries.configMergeFf = Answer(0, L"bogus\n");
+  const PullIntegratePlan ignored = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(CountedRelationship(L"0\t3"), PullStrategyChoice::none,
+                     gc::git::InterpretPullTarget(mergeFfQueries)));
+  GC_REQUIRE_MESSAGE(ignored.state == PullPlanState::ready, Narrow(ignored.explanation));
+  GC_CHECK(ignored.strategy == PullIntegrateStrategy::fastForward);
+  GC_CHECK(!HasArgument(ignored.arguments, L"--no-ff"));
+  GC_CHECK(TextContains(ignored.confirmationText, L"原生 merge 会忽略看不懂的取值"));
+
+  // pull.ff 的空值就是 --no-ff：可快进也按配置产生合并提交（原生实测如此）。
+  PullTargetQueries emptyFf = HealthyTargetQueries();
+  emptyFf.configPullFf = Answer(0, L"\n");
+  const PullIntegratePlan emptyPlan = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(CountedRelationship(L"0\t3"), PullStrategyChoice::none,
+                     gc::git::InterpretPullTarget(emptyFf)));
+  GC_REQUIRE_MESSAGE(emptyPlan.state == PullPlanState::ready, Narrow(emptyPlan.explanation));
+  GC_CHECK(emptyPlan.strategy == PullIntegrateStrategy::merge);
+  GC_CHECK(HasArgument(emptyPlan.arguments, L"--no-ff"));
+}
+
+// 本地独有提交里有没有合并提交，决定「普通变基会压平什么」这句话怎么说；问不回来就如实降确定性。
+GC_TEST(pull_integrate_plan_local_merge_count_discloses_flattening) {
+  // 普通变基 + 两个本地合并提交：如实点名压平，并给出 merges 出路。
+  const PullIntegratePlan flat = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFactsWithLocalMerges(L"2"), PullStrategyChoice::none,
+                     TargetWithRebase(L"true")));
+  GC_REQUIRE_MESSAGE(flat.state == PullPlanState::ready, Narrow(flat.explanation));
+  GC_CHECK(flat.strategy == PullIntegrateStrategy::rebase);
+  GC_CHECK(!HasArgument(flat.arguments, L"--rebase-merges"));
+  GC_CHECK(TextContains(RiskText(flat), L"2 个合并提交"));
+  GC_CHECK(TextContains(RiskText(flat), L"压平"));
+  GC_CHECK(TextContains(RiskText(flat), L"设为 merges"));
+
+  // 普通变基 + 明确 0 个：没有可披露的压平，别凭空吓人。
+  const PullIntegratePlan clean = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFactsWithLocalMerges(L"0"), PullStrategyChoice::none,
+                     TargetWithRebase(L"true")));
+  GC_CHECK(clean.state == PullPlanState::ready);
+  GC_CHECK(!TextContains(RiskText(clean), L"压平"));
+
+  // 没问出来：「不知道」必须成为一条风险，而不是当作 0。
+  const PullIntegratePlan unknown = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::none, TargetWithRebase(L"true")));
+  GC_CHECK(unknown.state == PullPlanState::ready);
+  GC_CHECK(TextContains(RiskText(unknown), L"没能问出"));
+}
+
+// 自定义 merge driver / 遗留策略配置命中时，冲突预演从「保证」降档为「强提示」。
+GC_TEST(pull_integrate_plan_merge_equivalence_downgrades_dry_run_verdict) {
+  PullTargetQueries queries = HealthyTargetQueries();
+  std::wstring records = L"merge.big.driver\njava -jar merge.jar %O %A %B";
+  records.push_back(L'\0');
+  queries.mergeEquivalence = AnswerRaw(0, records);
+  const PullTargetFacts target = gc::git::InterpretPullTarget(queries);
+  GC_CHECK(target.mergeEquivalence == gc::git::PullMergeEquivalenceProbe::some);
+
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseMerge, target));
+  GC_REQUIRE_MESSAGE(plan.state == PullPlanState::ready, Narrow(plan.explanation));
+  GC_CHECK(plan.strategy == PullIntegrateStrategy::merge);
+  GC_CHECK(plan.requiresForce);  // 预演说没冲突，但档位被降低：必须让用户知情
+  GC_CHECK(TextContains(RiskText(plan), L"merge.big.driver"));
+  GC_CHECK(TextContains(RiskText(plan), L"强提示"));
+  GC_CHECK(TextContains(plan.confirmationText, L"结论的可信档位被降低"));
+
+  // 没这类配置时，同一份「预演无冲突」不产生任何冲突相关的风险条目。
+  const PullIntegratePlan plain = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(DivergedFacts(), PullStrategyChoice::chooseMerge, HealthyTargetFacts()));
+  GC_CHECK(plain.state == PullPlanState::ready);
+  GC_CHECK(!plain.requiresForce);
+}
+
+// 预演（合并）的参数形态不替变基背书；merge-tree 的说法必须承认对象库会被写。
+GC_TEST(pull_integrate_plan_dry_run_wording_admits_object_store_writes) {
+  PullTargetQueries conflictQueries = HealthyTargetQueries();
+  const PullTargetFacts target = gc::git::InterpretPullTarget(conflictQueries);
+  PullRelationshipQueries queries = DivergedQueries();
+  queries.mergeTree = Answer(1,
+                             std::wstring(kTree) + L"\nsrc/main.cpp\n\n"
+                             L"CONFLICT (content): Merge conflict in src/main.cpp\n");
+  const PullIntegratePlan plan = gc::git::BuildPullIntegratePlan(
+      IntegrateInput(RelationshipOf(queries), PullStrategyChoice::chooseMerge, target));
+  GC_CHECK(plan.state == PullPlanState::ready);
+  GC_CHECK(TextContains(RiskText(plan), L"只向对象库写不可达的结果对象"));
+  GC_CHECK(!TextContains(RiskText(plan) + plan.confirmationText, L"完全不写仓库"));
+  GC_CHECK(!TextContains(RiskText(plan), L"一个字节都不动"));
 }
 
 // ---- 执行前复核 ----
@@ -749,6 +1136,29 @@ GC_TEST(pull_recheck_accepts_identical_facts_and_rejects_any_change) {
   const std::wstring brokenText = gc::git::DescribePullChange(preflight, broken);
   GC_CHECK(TextContains(brokenText, L"复核没能完成"));
   GC_CHECK(TextContains(brokenText, L"Git 查询超时"));
+}
+
+// 配置与合并等效性清单也是核对项：确认框是按「那一刻的配置」承诺的形态。
+GC_TEST(pull_recheck_catches_config_and_equivalence_changes) {
+  const PullTargetFacts preflight = HealthyTargetFacts();
+
+  PullTargetFacts rebaseAdded = preflight;
+  rebaseAdded.configPullRebase = L"true";
+  rebaseAdded.configPullRebasePresent = true;
+  const std::wstring rebaseText = gc::git::DescribePullChange(preflight, rebaseAdded);
+  GC_CHECK(TextContains(rebaseText, L"pull.rebase"));
+  GC_CHECK(TextContains(rebaseText, L"（没设）"));
+
+  PullTargetFacts branchToggled = preflight;
+  branchToggled.configBranchRebasePresent = true;  // 值都没变，「从不设变成设了」也算变
+  const std::wstring branchText = gc::git::DescribePullChange(preflight, branchToggled);
+  GC_CHECK(TextContains(branchText, L"branch.main.rebase"));
+
+  PullTargetFacts driversAdded = preflight;
+  driversAdded.mergeEquivalence = gc::git::PullMergeEquivalenceProbe::some;
+  driversAdded.mergeEquivalenceKeys = {L"merge.big.driver"};
+  const std::wstring driverText = gc::git::DescribePullChange(preflight, driversAdded);
+  GC_CHECK(TextContains(driverText, L"合并等效性"));
 }
 
 GC_TEST(pull_conflict_state_lists_unmerged_paths_and_survives_missing_info) {

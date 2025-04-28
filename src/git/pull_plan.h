@@ -31,14 +31,27 @@ namespace gc::git {
 //   * 必須在分支上、分支有明確上游（branch.<分支名>.remote + branch.<分支名>.merge，
 //     由 for-each-ref 的 %(upstream…) 如實回答）；無上游／游離 HEAD／尚無提交／有 merge/rebase
 //     等流程在走／還有未解決衝突——一律給出具體原因並拒絕，不代設 upstream、不猜 origin；
-//   * 整合策略尊重既有配置（branch.<分支名>.rebase > pull.rebase、pull.ff > merge.ff），
-//     並在確認文字裡說清是哪條配置定的；分叉而配置未明確時讓用户當場選（默認偏向合併），
-//     本程序絕不寫任何配置檔；
-//   * 內容衝突預演用 `git merge-tree --write-tree`：不碰工作區與索引（只在對象庫裡留一個
-//     不可達的 tree 物件，gc 自行回收），也絕不在用户工作區先真合一次再 reset 回去。
-//     版本不支持（退出碼不是 0/1）時降級為「無法預判」的保守提示，不假稱無衝突；
+//   * 整合策略按 Git 2.53 的原生解析規則讀配置（branch.<分支名>.rebase 存在就蓋過
+//     pull.rebase——哪怕它是無效值；pull.ff 存在就蓋過 merge.ff）：合併、普通變基、
+//     保留合併結構的變基（merges/m → 實際帶 --rebase-merges）是三種可執行形態；
+//     interactive/i 原生會開交互編輯器、本程序如實拒絕並交代原因，不悄悄換成普通變基；
+//     Git 自己都會當場 die 的取值（含大小寫不符的 MERGES、已被併入 merges 的 preserve）
+//     同樣明確拒絕並點名那一條配置，不當作沒設、不降級；空值與裸鍵按原生布爾語義算「假」
+//     （合併），與「未設置」是兩回事（判讀層帶 present 標記）。確認文字裡說清是哪條配置定的；
+//     分叉而配置未明確時讓用户當場選（默認偏向合併），本程序絕不寫任何配置檔；
+//   * ff 意願同樣按原生次序生效：pull.ff=only（配置給的、非用户當場選）優先於一切策略——
+//     分叉時照原生把 merge --ff-only 發出去讓 Git 自己拒絕（原生 die 的文案與之相同），
+//     可快進時就是快進；用户當場選過等價於命令行 --rebase/--no-rebase，原生在這種場合把
+//     pull.ff=only 降回默認快進，本程序照辦並說明；變基路線不讀 ff 配置（原生 merge 從不
+//     執行，那句配置無從生效）；merge.ff 只在合併路線生效，與原生一致；
+//   * 內容衝突預演用 `git merge-tree --write-tree`：不改工作區與索引（只在對象庫裡寫入
+//     不可達的結果對象，gc 自行回收——這不是「完全不寫倉庫」），也絕不在用户工作區先真合
+//     一次再 reset 回去。版本不支持（退出碼不是 0/1）時降級為「無法預判」的保守提示，
+//     不假稱無衝突；倉庫裡存在自定義合併等效性配置（merge.<名>.driver、pull.twohead／
+//     pull.octopus）或該清單讀不全時，預演結論如實降檔為「強提示而非保證」；
 //   * 變基策略下不做合併式預演：重放是逐提交的，衝突點可能不同，用合併預檢宣稱「變基無衝突」
-//     是假話——那種場合只給範圍與提示。
+//     是假話——那種場合只給範圍與提示；普通變基另要把「本地獨有提交裡的合併會被壓平」如實
+//     披露（個數由 rev-list --count --merges 問回來；要保留結構請把配置設成 merges）。
 //
 // 各查詢全部帶 `--no-optional-locks`；symbolic-ref／rev-parse --verify 帶 `--quiet`
 // （「不在分支上」「引用不可解析」以退出碼 1 + 空輸出作答，是明確答案而不是錯誤）；
@@ -56,11 +69,14 @@ enum class PullRelationship {
 
 [[nodiscard]] std::wstring_view PullRelationshipLabel(PullRelationship relationship) noexcept;
 
-// 實際採用的整合形態。
+// 實際採用的整合形態。四種都可能出自配置或用户選擇，確認文字、命令參數與完成後的父子圖
+// 必須说的是同一件事——「识别出 merges 却发一条不带 --rebase-merges 的普通变基」正是本文件
+// 要杜绝的那类自相矛盾。
 enum class PullIntegrateStrategy {
-  fastForward,  // git merge --ff-only <id>
-  merge,        // git merge --no-edit <id>
-  rebase,       // git rebase <id>
+  fastForward,   // git merge --ff-only <id>
+  merge,         // git merge --no-edit [<--no-ff|--ff-only>] <id>
+  rebase,        // git rebase --no-autostash <id>（本地合并提交会被压平，确认框须如实披露）
+  rebaseMerges,  // git rebase --no-autostash --rebase-merges <id>（保留本地合并结构）
 };
 
 [[nodiscard]] std::wstring_view PullIntegrateStrategyLabel(PullIntegrateStrategy strategy) noexcept;
@@ -117,6 +133,12 @@ struct PullUpstreamInfo {
     std::wstring_view repositoryDirectory, std::wstring_view trackingRef);
 [[nodiscard]] std::vector<std::wstring> BuildPullConfigArguments(std::wstring_view repositoryDirectory,
                                                                 std::wstring_view key);
+// 合并等效性配置清单：`config --null --get-regexp`，一次问回所有会改变三方合并行为的东西
+// （merge.<名>.driver 自定义外部合并程序；pull.twohead / pull.octopus 遗留策略配置）。
+// 它们不改变这次执行的命令，却决定「merge-tree 预演的结论」与「真实合并」是否等效：
+// 命中任何一条，冲突预演就从「保证」降档为「强提示」。无命中时 Git 以退出码 1 明确回答「没有」。
+[[nodiscard]] std::vector<std::wstring> BuildPullMergeEquivalenceArguments(
+    std::wstring_view repositoryDirectory);
 // ---- 階段二（fetch 之後）的關係查詢 ----
 [[nodiscard]] std::vector<std::wstring> BuildPullAheadBehindArguments(
     std::wstring_view repositoryDirectory, std::wstring_view headObjectId,
@@ -131,6 +153,12 @@ struct PullUpstreamInfo {
 [[nodiscard]] std::vector<std::wstring> BuildPullMergeTreeArguments(
     std::wstring_view repositoryDirectory, std::wstring_view headObjectId,
     std::wstring_view trackingObjectId);
+// 「本地独有的那几个提交里有没有合并提交」：rev-list --count --merges <基准>..<HEAD>。
+// 普通变基（pull.rebase=true）会把它们压平成线性历史，确认框必须如实披露这个数；
+// base 与 head 必须都是完整对象 ID，否则返回空数组。
+[[nodiscard]] std::vector<std::wstring> BuildPullLocalMergeCountArguments(
+    std::wstring_view repositoryDirectory, std::wstring_view baseObjectId,
+    std::wstring_view headObjectId);
 
 // 整合留下冲突后问那一句「索引里现在有哪些未合并条目」。只读，不带 --no-index 之类的形态，
 // 也不做任何解决冲突的动作——它只是把 Git 已经记下来的现场读回来给界面看。
@@ -138,6 +166,16 @@ struct PullUpstreamInfo {
     std::wstring_view repositoryDirectory);
 
 // ---- 階段一：本地分支／上游配置／現狀 ----
+
+// 合并等效性配置（merge.<名>.driver、pull.twohead／pull.octopus）的探测结论。
+// 它只影响「预演结论的可信档位」，不改变任何命令形态，因此读取失败不算预检失败——
+// 但也不能把「没读回来」读成「没有」：unknown 一律按降档处理。
+enum class PullMergeEquivalenceProbe {
+  notProbed = 0,  // 这次没问（界面之外构造的事实用）
+  none,           // Git 明确回答「没有这类配置」：预演与真实合并按同一机制走
+  some,           // 命中若干条，键名在 mergeEquivalenceKeys
+  unknown,        // 查询没完成或记录不合约定：等效性无从判断
+};
 
 struct PullTargetQueries {
   GitQueryResult symbolicRef;
@@ -151,6 +189,10 @@ struct PullTargetQueries {
   bool configBranchRebaseRan = false;  // 没有分支名时根本不问（键名拼不出来）
   GitQueryResult configPullFf;
   GitQueryResult configMergeFf;
+  // 合并等效性配置清单（见 PullMergeEquivalenceProbe）：与四条策略配置一样进预检查询集，
+  // 执行前复核原样重发的那一套也因此天然带着它。
+  GitQueryResult mergeEquivalence;
+  bool mergeEquivalenceRan = false;
   GitQueryResult status;
   bool statusRan = false;
   // 影響抓取範圍的配置（遠端級與全局級各一條 `git config --null --get-regexp`）：
@@ -185,11 +227,22 @@ struct PullTargetFacts {
   std::wstring trackingObjectId;
   std::wstring trackingDetail;  // 「跟蹤引用還不存在」等可展示的具體說明
 
-  // 四條配置的原始值；空字串表示「未設置」（Git 以退出碼 1 明確回答沒有）。
+  // 四條配置的原始值與「存不存在」。原生解析里「没设」与「设成了空值」是两种含义：
+  // 空值/裸键在布尔语义下就是「假」（pull.rebase= 等于 false=合并；pull.ff= 等于 --no-ff），
+  // 而 branch.<名>.rebase 只要存在就盖过 pull.rebase——所以存在性必须单独带着走。
+  // configPullRebase 等字段只放 Git 回答的原始取值；对应 *Present 为 false 才是「未设置」。
   std::wstring configPullRebase;
+  bool configPullRebasePresent = false;
   std::wstring configBranchRebase;
+  bool configBranchRebasePresent = false;
   std::wstring configPullFf;
+  bool configPullFfPresent = false;
   std::wstring configMergeFf;
+  bool configMergeFfPresent = false;
+
+  // 合并等效性配置探测（决定冲突预演结论的档位，见 PullMergeEquivalenceProbe）。
+  PullMergeEquivalenceProbe mergeEquivalence = PullMergeEquivalenceProbe::notProbed;
+  std::vector<std::wstring> mergeEquivalenceKeys;  // 命中条目的配置键名（不含取值，无凭据风险）
 
   bool statusRan = false;
   bool statusOk = false;
@@ -220,6 +273,8 @@ struct PullRelationshipQueries {
   bool incomingRan = false;
   GitQueryResult mergeTree;
   bool mergeTreeRan = false;
+  GitQueryResult localMergeCount;
+  bool localMergeCountRan = false;
 };
 
 struct PullRelationshipFacts {
@@ -243,6 +298,13 @@ struct PullRelationshipFacts {
   PullMergeDryRun dryRun = PullMergeDryRun::notRun;
   std::vector<std::wstring> dryRunConflicts;
   std::wstring dryRunDetail;
+
+  // 「本地独有提交里有几个合并提交」——普通变基会把它们压平，确认框必须报出这个数。
+  // localMergeCountKnown 为 false 时不许把它当 0：那是「没问出来」，不是「没有」。
+  bool localMergeCountRan = false;
+  bool localMergeCountKnown = false;
+  long long localMergeCount = 0;
+  std::wstring localMergeCountDetail;
 };
 
 [[nodiscard]] PullRelationshipFacts InterpretPullRelationship(const PullRelationshipQueries& queries);
