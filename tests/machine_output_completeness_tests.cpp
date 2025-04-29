@@ -191,13 +191,30 @@ GC_TEST(completeness_push_config_accepts_whole_records) {
 
 GC_TEST(completeness_push_config_refusal_does_not_dump_the_record) {
   // 认不出来的那条记录里可能带凭据：拒绝说明只能给限长且掩码过的摘要。
-  const std::wstring secret = L"https://pusher:secr3t-token@host.example/private.git";
-  const GitQueryResult listing = Answered(std::wstring(L"credential.helper ") + secret +
+  // 注意「无分隔符」本身是合法形态（省略取值的布尔裸键），真正认不出的是
+  // 变量名段（最后一个点之后）带空格的记录——Git 不可能输出那种键。
+  const std::wstring secret = L"https://pusher:secr3t-token@host.example/private";
+  const GitQueryResult listing = Answered(std::wstring(L"leak ") + secret +
                                           std::wstring(1, L'\0'));
   const gc::git::PushConfigListing parsed = gc::git::ParsePushConfigListing(listing);
-  GC_CHECK_MESSAGE(!parsed.readOk, "既无换行也无 `=` 的记录应被拒绝");
+  GC_CHECK_MESSAGE(!parsed.readOk, "变量名段含非法字符的无分隔记录应被拒绝");
   GC_CHECK_MESSAGE(parsed.readFailure.find(L"secr3t-token") == std::wstring::npos,
                    "拒绝说明不得抄出可能的口令");
+}
+
+GC_TEST(completeness_push_config_accepts_valueless_boolean_record) {
+  // 省略取值的布尔裸键（`key<NUL>`，本机 `git config --list --null` 实测形态）是合法记录，
+  // 不得因为「既没有换行也没有 `=`」把整份配置判死——那正是旧实现把合法仓库拒之门外的缺陷。
+  const GitQueryResult listing =
+      Answered(std::wstring(L"remote.origin.mirror") + std::wstring(1, L'\0') +
+               ConfigFields(L"remote.origin.url", L"file:///d:/repo.git") +
+               std::wstring(1, L'\0'));
+  const gc::git::PushConfigListing parsed = gc::git::ParsePushConfigListing(listing);
+  GC_CHECK_MESSAGE(parsed.readOk, Utf8Of(parsed.readFailure));
+  GC_CHECK(parsed.entries.size() == 2);
+  const gc::git::PushConfigEntry* mirror = parsed.LastEntry(L"remote.origin.mirror");
+  GC_CHECK(mirror != nullptr);
+  GC_CHECK(mirror != nullptr && mirror->valueOmitted);
 }
 
 GC_TEST(completeness_identity_config_refuses_truncated_value) {

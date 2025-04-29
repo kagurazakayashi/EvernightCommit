@@ -120,21 +120,24 @@ constexpr std::wstring_view kTipUndoCommit =
     L"本程序不自动恢复。";
 constexpr std::wstring_view kTipPush =
     L"把当前分支送到它上游所对应的那个远端分支（git push）。\r\n"
-    L"点击后先在后台只读问清：在哪个分支、要推哪一份提交、上游是谁、这次实际推给哪个远端的哪个 URL、"
+    L"点击后先在后台只读问清：在哪个分支、要推哪一份提交、上游是谁、这次实际推给哪个远端的哪个地址、"
     L"本地相对上一次抓取领先几个（只读查询，不弹命令窗口、不接触任何远端），问回来后把"
-    L"源分支 / 目标远端 / 目标分支与发布 URL 一起摆给你确认。\r\n"
-    L"命令带完整两侧的显式 refspec，并且写死 --recurse-submodules=no：push.default、"
-    L"remote.<远端>.push、push.followTags、remote.<远端>.tagOpt 都不会把这次的范围扩大；"
-    L"仓库里配了 remote.<远端>.mirror 时只为这一个子进程临时置 false（实测它会让带 refspec 的"
-    L"push 直接被 Git 拒绝）。\r\n"
+    L"源分支 / 要推的完整提交 ID / 目标远端与逐条展开的发布 URL / 目标分支一起摆给你确认。\r\n"
+    L"命令带完整的显式 refspec，源侧写死你确认的那份完整提交 ID（不写会变的分支名），目标侧是完整"
+    L"引用，并且写死 --recurse-submodules=no：push.default、remote.<远端>.push、push.followTags、"
+    L"remote.<远端>.tagOpt 都不会把这次的范围扩大；仓库里配了 remote.<远端>.mirror 时只为这一个"
+    L"子进程临时置 false（实测它会让带 refspec 的 push 直接被 Git 拒绝）。\r\n"
+    L"发布 URL 由 `git remote get-url --push --all` 让 Git 自己逐条展开（pushurl 优先、insteadOf/"
+    L"pushInsteadOf 改写已叠好）；展开不成时直接拒绝，不拿配置里的原样地址顶替。\r\n"
     L"绝不带 --force / --force-with-lease / --mirror / --all / --tags，也不推标签、不动子模块；"
     L"Git 认为不是快进时就会把它拒绝，本程序不会为了让它“成功”而更激烈。\r\n"
     L"没有上游、游离 HEAD、分支还没有提交、发布目标问不出一个明确地址时一律拒绝，并给出具体原因："
     L"不猜 origin、不代设 upstream、不替你创建远端分支、不写任何配置文件。\r\n"
     L"branch.<分支>.pushRemote / remote.pushDefault / 独立 push URL / url.*.insteadOf 让实际发布"
     L"地点与抓取的那一侧不同时，会被解析出来明确展示并要求你明确点头。\r\n"
-    L"命令窗口报告结束后，还会向确认框上列出的那些**发布目标**发一次只读 ls-remote，核对那条引用"
-    L"到底停在哪：推送成功与否以那份实况为准，本地引用看起来一致不算数。";
+    L"命令窗口报告结束后，还会向确认框上列出的那些**发布目标**逐个发只读 ls-remote，核对那条引用"
+    L"到底停在哪：推送成功与否以那份实况为准，本地引用看起来一致不算数；命令报成功却没核上时，"
+    L"结论写「已推送但未核实」或「与预期不符」，不会自动重推。";
 constexpr std::wstring_view kTipUnstagedList =
     L"未暂存的更改来自只读的 git status（porcelain v2，机器可读格式）：\r\n"
     L"包含已跟踪文件的修改/删除/重命名、未跟踪文件（目录已展开为单个文件），以及待解决的冲突项。\r\n"
@@ -3187,8 +3190,9 @@ void MainWindow::LaunchPush(HWND window, const git::PushPlan& plan) {
   operation.displayName = plan.displayName;
   operation.gitExecutable = state_.Git().path;
   operation.repositoryDirectory = state_.Repo().detection.root;
-  // 参数按数组提交，不进任何 shell 字符串：目标远端只认名字，URL 由 Git 自己按配置解析，
-  // 因此界面与日志里都不会出现凭据。
+  // 参数按数组提交，不进任何 shell 字符串：命令源侧是复核确认过的完整提交 ID，目标远端只认名字，
+  // URL 不进命令行（由 Git 自己按配置解析，界面展示与核实用的那份是 get-url --push --all 的展开
+  // 回答），因此这条链路上都不会出现凭据。
   operation.arguments = plan.arguments;
 
   CommandLaunchOptions options;
