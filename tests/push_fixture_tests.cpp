@@ -17,10 +17,17 @@
 //     夹具那份「用户层」配置档案依旧为空；游离 HEAD 同样拒绝；
 //   * 发布目标另有去处：独立 pushurl 时东西真的落在 pushurl 那个 bare，抓取那一侧的 bare
 //     拿不到；url.*.insteadOf 改写时同样按改写后的地址为准展示与核实；多个 pushurl 会每个都收到；
+//     两个无 pushurl 的地址各被 pushInsteadOf 改写时，逐条展开的顺序与各自落点都对得上；
+//   * 源侧钉死完整提交 ID：预检之后外部把分支再推进，命令送出去的仍是被确认的那一份；
+//     该形态下 pre-push hook 照常执行、钩子看到的仍是目标引用与那份提交，跟踪引用前移
+//     以 Git 的回答为准钉住（这三条是「改用对象 ID 不牺牲别的承诺」的凭据）；
+//   * 省略取值的布尔裸键（配置里不写 `= ` 的 mirror）：整份配置照读（旧实现会因这条记录
+//     把整个预检判死），并按真值中和；
 //   * 无效本地目标：远端 URL 指向一个根本没建出来的目录时，命令失败，核实环节只说「没能问到」，
 //     绝不把「窗口已打开」或本地引用看起来一致当成推送成功。
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -209,9 +216,12 @@ GC_TEST(push_ahead_command_lands_on_the_bare_and_updates_the_tracking_ref) {
   GC_CHECK(!plan.requiresForce);
   GC_CHECK(plan.pushedObjectId == fixture.HeadSha());
   GC_CHECK_MESSAGE(plan.arguments ==
-                       gc::git::BuildPushCommandArguments(L"origin", L"refs/heads/main",
+                       gc::git::BuildPushCommandArguments(L"origin", plan.pushedObjectId,
                                                           L"refs/heads/main", false, false),
                    "实际发出的参数与参数构造器的结果不一致");
+  // 源侧钉死为完整提交 ID：命令里出现的不是分支名，是「这一份提交」。
+  GC_CHECK_MESSAGE(plan.arguments.back() == plan.pushedObjectId + L":refs/heads/main",
+                   "命令源侧没有钉在完整提交 ID 上：" + ToUtf8(plan.arguments.back()));
 
   const std::wstring beforeOnRemote = RemoteRef(fixture, originUrl, L"refs/heads/main");
   const GitRun pushed = ExecutePlan(fixture, plan);
@@ -567,6 +577,191 @@ GC_TEST(push_reaches_every_one_of_multiple_push_urls) {
   ExpectNoGlobalConfig(fixture);
 }
 
+// ---- 两个目标各被 pushInsteadOf 改写：展开、推送、核实三者必须是同一批地址 ----
+
+GC_TEST(push_resolves_two_urls_rewritten_by_push_instead_of) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+  const std::wstring originUrl = rig.OriginUrl();
+  // 两个真实存在的 bare 当「改写后落点」；两个「写进配置」的地址里第一个就是抓取的 bare，
+  // 第二条只是一个从没建出来的路径——push 方向若真的逐条改写，命令才能成功。
+  fixture.InitBareRepository(L"landed-one.git");
+  fixture.InitBareRepository(L"landed-two.git");
+  const std::wstring landedOne = fixture.PathInRoot(L"landed-one.git");
+  const std::wstring landedTwo = fixture.PathInRoot(L"landed-two.git");
+  rig.UseA();
+  const std::wstring writtenTwo = fixture.PathInRoot(L"written-two.git");
+
+  fixture.WriteFile(L"rewritten-multi.txt", "两个都被改写\n");
+  fixture.StageAll();
+  fixture.Commit(L"两个发布目标都过 pushInsteadOf 的那一条");
+  // 没有 pushurl：推送目标落回 url 清单（本机实测：`--push --all` 会把 pushInsteadOf
+  // 逐条叠在落回 url 的场合，抓取方向不受 pushInsteadOf 影响）。
+  fixture.RunCheckedInRepo({L"config", L"--add", L"remote.origin.url", writtenTwo});
+  fixture.RunCheckedInRepo({L"config", L"url." + landedOne + L".pushInsteadOf", originUrl});
+  fixture.RunCheckedInRepo({L"config", L"url." + landedTwo + L".pushInsteadOf", writtenTwo});
+
+  const PushPreflightFacts facts = Probe(fixture);
+  GC_REQUIRE_MESSAGE(facts.queryOk, ToUtf8(facts.queryFailure));
+  GC_CHECK_MESSAGE(facts.pushUrls.size() == 2,
+                   "两个发布地址都要逐条展开：" + ToUtf8(gc::git::FormatPushUrlList(facts.pushUrls)));
+  GC_CHECK(facts.pushUrlRewritten);
+  GC_CHECK_MESSAGE(facts.pushUrls.size() == 2 && facts.pushUrls[0] == landedOne &&
+                       facts.pushUrls[1] == landedTwo,
+                   "展开结果的顺序或内容不对：" + ToUtf8(gc::git::FormatPushUrlList(facts.pushUrls)));
+  GC_CHECK(!facts.pushTargetIsFetchTarget);
+  const PushPlan plan = gc::git::BuildPushPlan(facts, fixture.RepoDir());
+  GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(plan.requiresForce);  // 多目标 + 与抓取那侧不同处
+
+  const GitRun pushed = ExecutePlan(fixture, plan);
+  GC_CHECK_MESSAGE(pushed.Success(), ToUtf8(pushed.err));
+  // 推送真正落到的，必须就是界面上展开、事后要核实的那一批地址；其中一个原样地址（抓取的 bare）
+  // 反而不该收到——这同时钉住「push 方向按 pushInsteadOf 改写、展示与核实跟着改写后的走」。
+  for (const std::wstring& url : plan.pushUrls) {
+    GC_CHECK_MESSAGE(BareLocalRef(fixture, url, L"refs/heads/main") == plan.pushedObjectId,
+                     "展开列出的目标没有收到：" + ToUtf8(url));
+  }
+  GC_CHECK(BareLocalRef(fixture, writtenTwo, L"refs/heads/main").empty());  // 那地址根本不存在
+  const PushVerificationReport report = Verify(fixture, plan, true, L"执行成功");
+  GC_CHECK_MESSAGE(report.verdict == PushVerificationVerdict::confirmed, ToUtf8(report.headline));
+  GC_CHECK_MESSAGE(report.lines.size() == 2, "逐目标各有一条结论");
+  ExpectNoGlobalConfig(fixture);
+}
+
+// ---- 源侧钉死：确认之后分支被外部推进，送出去的仍是那一份 ----
+
+GC_TEST(push_sends_the_pinned_object_id_even_if_the_branch_advances_afterward) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+  const std::wstring originUrl = rig.OriginUrl();
+
+  fixture.WriteFile(L"pinned-first.txt", "1\n");
+  fixture.StageAll();
+  fixture.Commit(L"预检时确认的那一条");
+  const PushPreflightFacts facts = Probe(fixture);
+  GC_REQUIRE_MESSAGE(facts.queryOk, ToUtf8(facts.queryFailure));
+  const PushPlan plan = gc::git::BuildPushPlan(facts, fixture.RepoDir());
+  GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, ToUtf8(plan.explanation));
+  const std::wstring pinned = plan.pushedObjectId;
+
+  // 外部（另一个终端）在点头之后又把分支推进了一条。界面层会在执行前复核时作废旧方案；
+  // 这条用例钉的是**最后一道防线**：即便极端竞态越过复核，命令源侧写死的是 pinned，
+  // Git 送出去的也只能是它——新那一条留在本地，远端不会替用户做决定。
+  fixture.WriteFile(L"pinned-second.txt", "2\n");
+  fixture.StageAll();
+  fixture.Commit(L"预检之后外部推进的那一条");
+  GC_CHECK_MESSAGE(fixture.HeadSha() != pinned, "夹具没能让分支真的前进");
+
+  const GitRun pushed = ExecutePlan(fixture, plan);
+  GC_CHECK_MESSAGE(pushed.Success(), ToUtf8(pushed.err));
+  GC_CHECK(RemoteRef(fixture, originUrl, L"refs/heads/main") == pinned);
+  // 核实按「被确认的那一份」对照：已核实，而不是把新 HEAD 混进来。
+  const PushVerificationReport report = Verify(fixture, plan, true, L"执行成功");
+  GC_CHECK_MESSAGE(report.verdict == PushVerificationVerdict::confirmed, ToUtf8(report.headline));
+  ExpectNoGlobalConfig(fixture);
+}
+
+// ---- 对象 ID 源形态不牺牲别的承诺：pre-push 照常执行、钩子看得见目标与那一份提交 ----
+
+GC_TEST(push_object_id_source_still_runs_pre_push_hook_with_the_same_facts) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+  const std::wstring originUrl = rig.OriginUrl();
+
+  // 记录型 pre-push hook：不拦截，只把 argv 与 stdin 的逐行内容落到仓库根的文件里，
+  // 用例直接读那份文件——「没有 --no-verify，钩子照常生效」从口径变成可核对的证据。
+  fixture.WriteFile(L".git/hooks/pre-push",
+                    "#!/bin/sh\n"
+                    "echo \"args $1 $2\" >> pre-push-input.txt\n"
+                    "cat >> pre-push-input.txt\n"
+                    "exit 0\n");
+  fixture.RunCheckedInRepo({L"config", L"core.hooksPath", L".git/hooks"});
+
+  fixture.WriteFile(L"hooked.txt", "钩子要看的那一条\n");
+  fixture.StageAll();
+  fixture.Commit(L"钩子现场的那一条");
+  const PushPlan plan = gc::git::BuildPushPlan(Probe(fixture), fixture.RepoDir());
+  GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, ToUtf8(plan.explanation));
+  for (const std::wstring& argument : plan.arguments) {
+    GC_CHECK(!Contains(argument, L"--no-verify"));
+  }
+
+  const GitRun pushed = ExecutePlan(fixture, plan);
+  GC_CHECK_MESSAGE(pushed.Success(), ToUtf8(pushed.err));
+  std::ifstream input(ToUtf8(fixture.RepoDir()) + "\\pre-push-input.txt", std::ios::binary);
+  const std::string capturedBytes((std::istreambuf_iterator<char>(input)),
+                                  std::istreambuf_iterator<char>());
+  const std::wstring captured = gc::platform::Utf8ToUtf16(capturedBytes);
+  GC_CHECK_MESSAGE(!captured.empty(), "对象 ID 作源侧时 pre-push 没有执行——钩子承诺失效了");
+  // 钩子必须看得见：目标远端名、目标引用、以及「推的就是被钉住的那份提交」。
+  GC_CHECK(Contains(captured, L"origin"));
+  GC_CHECK(Contains(captured, plan.remoteBranchRef));
+  GC_CHECK_MESSAGE(Contains(captured, plan.pushedObjectId),
+                   "钩子的输入里没有那份提交 ID：" + ToUtf8(captured));
+  // 落点与跟踪引用：对端确实到了那一份；本地跟踪引用是否随推送前移由 Git 回答，
+  // 这里的断言把「用对象 ID 不削弱跟踪引用更新」钉住（若 Git 在该形态下不前移，本条会红，
+  // 需要改的是承诺口径而不是悄悄放行——见 PROGRESS 的剩余风险）。
+  GC_CHECK(RemoteRef(fixture, originUrl, L"refs/heads/main") == plan.pushedObjectId);
+  GC_CHECK(fixture.RevParseVerified(L"refs/remotes/origin/main") == plan.pushedObjectId);
+  ExpectNoGlobalConfig(fixture);
+}
+
+// ---- 省略取值的布尔裸键：整份配置照读、按真值中和（旧实现会把预检整体判死） ----
+
+GC_TEST(push_valueless_boolean_mirror_config_is_understood_and_neutralized) {
+  RemoteRig rig;
+  std::string reason;
+  GC_REQUIRE_MESSAGE(rig.Prepare(reason), reason);
+  GitFixture& fixture = rig.fixture();
+  const std::wstring originUrl = rig.OriginUrl();
+
+  fixture.WriteFile(L"bare-bool.txt", "裸键 mirror\n");
+  fixture.StageAll();
+  fixture.Commit(L"带布尔裸键配置的那一条");
+
+  // 配置里 `mirror` 不写 `= `——Git 存储与 `--list --null` 输出的就是 `remote.origin.mirror\0`
+  // 这种省略取值的记录（本机实测）。`git config` 的命令行没法治出这种形态，直接在夹具
+  // 自有的 .git/config 里插那一行（只动这个测试自己认领的目录）。
+  const std::string configPath = ToUtf8(fixture.RepoDir()) + "\\.git\\config";
+  {
+    std::ifstream file(configPath, std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const std::string marker = "[remote \"origin\"]";
+    const size_t at = contents.find(marker);
+    GC_REQUIRE_MESSAGE(at != std::string::npos, "夹具配置里没有 [remote \"origin\"] 段");
+    contents.insert(at + marker.size(), "\n\tmirror");
+    std::ofstream out(configPath, std::ios::binary | std::ios::trunc);
+    out << contents;
+  }
+
+  const PushPreflightFacts facts = Probe(fixture);
+  GC_REQUIRE_MESSAGE(facts.queryOk, ToUtf8(facts.queryFailure));
+  GC_REQUIRE_MESSAGE(facts.configOk, ToUtf8(facts.config.readFailure));
+  GC_CHECK_MESSAGE(facts.mirrorConfigured,
+                   "省略取值的 remote.origin.mirror 没被读成真值（旧缺陷回归钉）");
+
+  // 先证明这条裸键设置确实生效：不带中和的同一形态会被 Git 按 mirror 规则拒绝。
+  const GitRun raw = fixture.Run({L"push", L"--recurse-submodules=no", L"origin",
+                                  L"refs/heads/main:refs/heads/main"}, fixture.RepoDir());
+  GC_CHECK_MESSAGE(!raw.Success(), "mirror 裸键没生效？该场合裸 push 本该失败");
+
+  const PushPlan plan = gc::git::BuildPushPlan(facts, fixture.RepoDir());
+  GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, ToUtf8(plan.explanation));
+  GC_CHECK(std::find(plan.arguments.begin(), plan.arguments.end(),
+                    L"remote.origin.mirror=false") != plan.arguments.end());
+  const GitRun pushed = ExecutePlan(fixture, plan);
+  GC_CHECK_MESSAGE(pushed.Success(), ToUtf8(pushed.err));
+  GC_CHECK(RemoteRef(fixture, originUrl, L"refs/heads/main") == plan.pushedObjectId);
+  ExpectNoGlobalConfig(fixture);
+}
+
 // ---- 无效本地目标：命令失败，核实不谎报 ----
 
 GC_TEST(push_to_invalid_local_target_fails_and_verification_stays_honest) {
@@ -669,9 +864,10 @@ GC_TEST(push_carries_non_ascii_branch_names_unchanged) {
   GC_CHECK(facts.upstreamRemoteRef == branchRef);  // Git 答出来的远端引用也是同一个名字
   const PushPlan plan = gc::git::BuildPushPlan(facts, fixture.RepoDir());
   GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, ToUtf8(plan.explanation));
-  GC_CHECK_MESSAGE(plan.arguments.back() == branchRef + L":" + branchRef,
-                   "refspec 里的分支名被改写了：" + ToUtf8(plan.arguments.back()));
+  GC_CHECK_MESSAGE(plan.arguments.back() == plan.pushedObjectId + L":" + branchRef,
+                   "refspec 的目标侧（或钉住的提交 ID）被改写了：" + ToUtf8(plan.arguments.back()));
   GC_CHECK(Contains(plan.confirmationText, branchRef));
+  GC_CHECK(Contains(plan.commandLabel, plan.pushedObjectId));
 
   const GitRun pushed = ExecutePlan(fixture, plan);
   GC_CHECK_MESSAGE(pushed.Success(), ToUtf8(pushed.err));

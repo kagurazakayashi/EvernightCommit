@@ -20,7 +20,8 @@ namespace gc::git {
 //
 // 範圍口徑（本步驟的承諾，全部落在命令形態裡）：
 //   * 只推當前分支這一条引用：命令帶**完整顯式 refspec**
-//     `refs/heads/<本地分支>:refs/heads/<遠端分支>`，兩側都由 Git 自己給出的配置回答，
+//     `<本地分支現在的完整提交ID>:refs/heads/<遠端分支>`——源側釘在確認那一刻問回的
+//     完整物件 ID 上（不再寫會變的分支名），兩個位置都由 Git 自己給出的回答構成，
 //     本程式不改寫、不縮寫、不「就近取一個同名分支」；
 //   * 沒有 --force、--force-with-lease、--mirror、--all、--tags、--follow-tags，
 //     也不推標籤、不递归子模組（--recurse-submodules=no 寫死在命令里）；
@@ -38,10 +39,11 @@ namespace gc::git {
 //     `-c remote.<遠端>.mirror=false`（實測能把這條死路還原成「只推這一条」）；
 //   * 同一遠端配了多個 remote.<遠端>.pushurl 時，`git push <遠端>` 會**推給每一個**（實測兩個 bare
 //     都收到了同一份提交）。這不是本程式擴大範圍，是 Git 的既定行為：界面必須把每一個目標都列出來，
-//     並要求使用者明確點頭；
-//   * `git remote get-url --push <遠端>` 由 Git 自己算出「實際會去哪裡」（pushurl 優先於 url，
-//     而且 url.*.insteadOf / url.*.pushInsteadOf 的改寫已經疊好），本程式拿它當場證據展示，
-//     不自己 reimplement 改寫規則。多個 pushurl 時它只回答第一條，其餘按原樣陳列並說明这一点。
+//     並要求使用者明確點頭；多個目標合在一條命令裡，退出碼是各目標的合計，因此逐目標的
+//     「到底收到沒有」以推送後的逐目標核實為準；
+//   * `git remote get-url --push --all <遠端>` 由 Git 自己算出「實際會去哪裡」的**全部**地址
+//     （pushurl 優先於 url，`url.*.insteadOf`／落回 url 場合的 `pushInsteadOf` 改寫已經疊好，
+//     順序按配置原樣），本程式拿它當場證據展示與核實，不自己 reimplement 改寫規則。
 //
 // 「不猜」的界線：
 //   * 必須在分支上（游離 HEAD 沒有分支可推，本程式不替它挑一個）、分支必須有明確上游
@@ -50,36 +52,77 @@ namespace gc::git {
 //   * 分支還沒有任何提交（HEAD 不可解析）時拒絕：那種場合连「要推哪一份」都問不出來；
 //   * 實際發布目標與界面上的抓取目標不一致時（branch.<分支>.pushRemote／remote.pushDefault／
 //     獨立 pushurl／insteadOf 改寫）一律解析出來如實展示，並列為需明確點頭的風險；
-//     目標遠端根本不在倉庫的遠端清單裡、或問不出一個可用的發布 URL——拒絕，不湊合。
+//     目標遠端根本不在倉庫的遠端清單裡、或問不出一個可用的發布 URL——拒絕，不湊合，
+//     也**絕不退回配置裡未經解析的原樣位址**繼續發布。
+//
+// 發布 URL 的解析（本任務的關鍵修復，全部是本機 Git 2.53.0.windows.3 實測）：
+//   * 查詢形態是 `git remote get-url --push --all <遠端>`：不加 `--all` 時多個 pushurl 只回答
+//     第一條；加上之後 Git 把**每一個實際發布地址**都按配置順序答出來，`pushurl` 優先於 `url`、
+//     `url.*.insteadOf` 的改寫已疊在每條上。`--push` 對「落回 url 的場合」還會疊 pushInsteadOf
+//     （實測：無 pushurl 時 `--push` 答出 pushInsteadOf 改寫後的地址，而抓取方向的 get-url 不變）；
+//     對**顯式 pushurl 條目**它不疊 pushInsteadOf（實測），本程式把 get-url 的回答當作唯一依據。
+//   * 這條查詢失敗（非 0、啟動不成、輸出空、行數與配置清單裡的條目數對不上、答出的地址含
+//     控制字元這種沒法作為單個參數交出去的形態）就是「看不清要去哪裡」：整次推送拒絕，
+//     不拿未經解析的原樣 URL 頂替。
+//   * 核實（ls-remote）問的就是上面這一份已展開的 URL 清單——與確認框承諾的是同一批地點。
+//     已展開的地址再交回 Git 時仍可能被 url.*.insteadOf 命中而**再次改寫**（實測：空值的
+//     `-c url.<base>.insteadOf=` 並不能中和既有規則，所以本程式不做那種假中和）；核實因此
+//     如實陳述「問到哪裡算哪裡」，核不上就是核不上，不猜。
+//
+// 源的綁定（本任務的另一半）：命令的源側寫的是確認那一刻問回的**完整提交 ID**
+// （`<oid>:refs/heads/<遠端分支>`），不再寫會被人挪走的分支名——這樣「確認推哪一份」與
+// 「Git 真正送出哪一份」是同一件事，執行之前外部把分支推進了也不會把沒確認過的提交帶出去。
+// 目標側的完整 refspec、非強制（無 --force／--force-with-lease）、單引用範圍、不推標籤與
+// 子模組等承諾全部原樣保留。源側改成對象 ID 這一形态對 pre-push hook、本地跟蹤引用前移與
+// 多發布目標行為的影響，由 push_fixture_tests 在真實 Git 上逐條钉住（钩子仍被唤起、對端每條
+// 目標都收到、跟踪引用是否前移以 Git 的回答為準），界面上「推送成功與否以發布目標核實為準」的
+// 口径不依賴跟蹤引用，所以這一形態不會弱化任何既有安全承諾。
 //
 // 本地對遠端的了解只到上一次 fetch 為止：refs/remotes/<遠端>/<分支> 的位置不等於遠端現在的位置。
 // 因此「本地領先幾個」這句只用於說明與預警，絕不用來宣稱推送成功；推送之後本程式另向**發布目標**
 // （不是抓取的遠端）發一次只讀 ls-remote 核對那一条引用到底停在哪（PushVerification），
-// 核不上就是核不上，命令退出碼 0 也不算成功。
+// 核不上就是核不上，命令退出碼 0 也不算成功；「命令成功但一個目標都没核到」與「核到但不是
+// 那一份」是兩種結論，前者說「已推送但未核實」，後者說「與預期不符」。
 //
 // 各查詢全部帶 `--no-optional-locks`；symbolic-ref／rev-parse --verify 帶 `--quiet`
 // （「不在分支上」「引用不可解析」以退出碼 1 + 空輸出作答，是明確答案而不是錯誤）；
 // `git config --list --null` 一次問回這個倉庫此刻的全部生效配置（include 疊加、各層優先序都由
 // Git 自己算好），比逐條 `config --get` 少開十來個進程，而且多值鍵（remote.<x>.url／pushurl、
-// remote.<x>.push、url.*.insteadOf）的重複項原樣保留在順序裡。它的記錄形態是本機 Git 2.53 逐字節
-// 實測的 `key<換行>value<NUL>`：鍵裡沒有換行、值裡可能有，所以只在第一個換行處切；判讀函數同時
-// 認 `key=value<NUL>` 那一種寫法，兩種都不像的記錄就整份拒用（看不清實際發布目標就不推）。
+// remote.<x>.push、url.*.insteadOf）的重複項原樣保留在順序裡。它的記錄形態是本機 Git 2.53
+// od -c 逐字節實測的三種：`key<換行>value<NUL>`（普通條目；值裡可能有換行，所以只按**第一個**
+// 換行切）、`key<NUL>`（布爾鍵省略取值——配置文件裡不寫 `= `的那種寫法，語義就是 true）、
+// `key<換行><NUL>`（顯式空值，Git 布爾解析裡空串是 false，與上一種、與「根本沒有這個鍵」是三件
+// 不同的事）。判讀函數同時認 `key=value<NUL>` 那一種歷史寫法。除此之外認不出來的記錄
+// （空鍵、變量名段含非法字符）就整份拒用（看不清實際發布目標就不推）。
 
 // ---- 生效配置清單（`git config --list --null` 的判讀結果） ----
 
+// 一條生效配置。Git 明確分得開三件事，這裡必須原樣帶過去：
+//   * 「根本沒有這個鍵」——entries 裡查不到；
+//   * 「設成了空值」（`key =` 這種寫法，輸出是 `key<換行><NUL>`）——valueOmitted=false、value 為空；
+//   * 「布爾鍵省略取值」（配置檔裡只寫鍵名、不寫 `= `，輸出是 `key<NUL>`）——valueOmitted=true。
+//     省略取值在 Git 的布爾讀取裡就是 true；顯式空值經 `git_parse_maybe_bool` 是 false。
+//     這兩者都跟「沒設」不同，混起來判讀就會把「用户没开 mirror」讀成「开了」或反之。
+struct PushConfigEntry {
+  std::wstring key;    // 段/變數名已由 Git 小寫化；subsection（遠端名、分支名）原樣保留大小寫
+  std::wstring value;  // valueOmitted 為 true 時是空串
+  bool valueOmitted = false;
+};
+
 // 一次問回的「這個倉庫此刻真正生效」的配置條目，按 Git 給出的順序原樣保留。
-// 同一個鍵多次出現就是多值鍵：單值語義取最後一條（與 `config --get` 一致），多值語義取全部。
+// 同一個鍵多次出現就是多值鍵：單值語義取最後一條（與 `git config --get` 一致），多值語義取全部。
 struct PushConfigListing {
   bool readOk = false;
   std::wstring readFailure;
-  std::vector<std::pair<std::wstring, std::wstring>> entries;  // key（段/變數名已由 Git 小寫化）= value
+  std::vector<PushConfigEntry> entries;
 
-  // 單值查詢：沒有這一項時返回空字串。Git 明確區分「沒設」與「設成空值」，
-  // 後者會以 value 為空的條目出現在 entries 裡，本函數據實返回空字串——需要區分兩者的調用方
-  // 用 HasKey() 再看值。
+  // 單值查詢：沒有這一項時返回空字串。需要區分「沒設／設成空值／省略取值」的調用方
+  // 用 LastEntry()（找不到返回 nullptr），HasKey() 只回答存不存在。
   [[nodiscard]] std::wstring Value(std::wstring_view key) const;
   [[nodiscard]] std::vector<std::wstring> Values(std::wstring_view key) const;
   [[nodiscard]] bool HasKey(std::wstring_view key) const;
+  // 該鍵最後一次出現的那條（Git 的單值讀取同樣取最後一條）。沒有這個鍵時返回 nullptr。
+  [[nodiscard]] const PushConfigEntry* LastEntry(std::wstring_view key) const;
   // `remote.<名字>.<變數>` 形式的鍵：subsection 為遠端名（Git 原樣保留大小寫）。
   [[nodiscard]] std::vector<std::wstring> RemoteValues(std::wstring_view remoteName,
                                                        std::wstring_view variable) const;
@@ -95,6 +138,11 @@ struct PushConfigListing {
 // 無 userinfo 的 URL（含本機絕對路徑、scp 形態但無 @ 的寫法）原樣返回。
 [[nodiscard]] std::wstring MaskPushUrlCredentials(std::wstring_view url);
 
+// 對一段自由文字（Git 的錯誤轉述、查詢失敗原因、诊断摘要）裡**每一處** `scheme://…@…`
+// 形態的 URL 套用同一個掩碼。發布鏈路上凡要把 Git 原文帶進界面的地方都先過這一道，
+// 免得 `fatal: … 'https://user:token@host'` 這種回答把口令攤到螢幕上。
+[[nodiscard]] std::wstring MaskPushUrlCredentialsInText(std::wstring_view text);
+
 // 多個目標 URL 折成一行展示文字（逐條編號，全部已做憑據掩碼）。
 [[nodiscard]] std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls);
 
@@ -103,17 +151,19 @@ struct PushConfigListing {
 // 一次問回全部生效配置。--null：條目以 NUL 分隔，值裡的換行不會被誤當成條目邊界。
 [[nodiscard]] std::vector<std::wstring> BuildPushConfigListingArguments(
     std::wstring_view repositoryDirectory);
-// 由 Git 自己算「推這個遠端時實際去哪裡」（pushurl 優先，insteadOf 改寫已疊加）。
+// 由 Git 自己算「推這個遠端時實際去哪裡」的**全部**地址（--push --all：pushurl 優先於 url，
+// insteadOf／落回 url 場合的 pushInsteadOf 改寫已疊好，按配置順序逐條回答）。
 // remoteName 為空時返回空數組：連目標名字都沒定下來，就沒有可問的 URL。
 [[nodiscard]] std::vector<std::wstring> BuildPushRemoteUrlArguments(std::wstring_view repositoryDirectory,
                                                                     std::wstring_view remoteName);
-// 點擊「推送」之後在命令窗口裡發出的那條 push。三個位置參數任一不合格（空、含引號/控制字元、
-// 本地側不是 refs/heads/ 開頭、遠端側不是 refs/ 開頭）時返回空數組：調用方據此拒絕，
-// 本函數絕不「湊一個能跑的」出來。
+// 點擊「推送」之後在命令窗口裡發出的那條 push。源側是確認那一刻問回的**完整提交 ID**
+// （不是會被人挪走的分支名）：sourceObjectId 必須通過 LooksLikeFullObjectId，remoteBranchRef
+// 必須是 `refs/` 開頭的完整引用，remoteName 形態合格；任一不合格（空、含 `:`、引號、控制字元）
+// 返回空數組：調用方據此拒絕，本函數絕不「湊一個能跑的」出來。
 // 兩個 neutralize 標記決定要不要為這一個子進程補 `-c` 覆蓋（倉庫裡確實有那條設定時才傳 true，
 // 實測見文件頭：mirror 会让整條命令以 128 失敗，tagOpt/--tags 則是可能把標籤一起帶走的設定）。
 [[nodiscard]] std::vector<std::wstring> BuildPushCommandArguments(std::wstring_view remoteName,
-                                                                 std::wstring_view localBranchRef,
+                                                                 std::wstring_view sourceObjectId,
                                                                  std::wstring_view remoteBranchRef,
                                                                  bool neutralizeMirror,
                                                                  bool neutralizeTagOpt);
@@ -164,10 +214,11 @@ struct PushPreflightFacts {
   std::wstring pushRemoteName;        // 實際要推的那個遠端名
   std::wstring pushRemoteSource;      // 這個遠端名是哪條配置定的（展示用原文）
   bool pushRemoteExists = false;      // 它在倉庫的遠端清單裡
-  std::vector<std::wstring> pushUrls;  // Git 自己算出的生效發布 URL（未掩碼，展示前才掩碼）
-  std::vector<std::wstring> rawPushUrls;  // 配置裡的原樣 pushurl／url 清單（用於辨認 insteadOf 改寫）
-  bool pushUrlRewritten = false;      // get-url 的回答與配置原樣不同：url.*.insteadOf 生效過
-  std::wstring pushUrlNote;           // 關於發布 URL 還得說一句的話（多條時只能核出第一條的改寫）
+  std::vector<std::wstring> pushUrls;  // `get-url --push --all` 答出的生效發布 URL（未掩碼，
+                                       // 展示前才掩碼）；解析不成時為空，絕不塞原樣地址頂替
+  std::vector<std::wstring> rawPushUrls;  // 配置裡的原樣 pushurl／url 清單（用於辨認改寫與條數核對）
+  bool pushUrlRewritten = false;      // get-url 的回答與配置原樣清單不完全一致：改寫規則生效過
+  std::wstring pushUrlNote;           // 關於發布 URL 還得說一句的話（多目標與二次改寫的邊界）
   bool pushTargetIsFetchTarget = false;  // 發布目標與上游所在的抓取目標是同一個地方
   std::wstring pushUrlFailure;        // 問不出發布 URL 時的具體說明
 
@@ -216,7 +267,7 @@ struct PushPreflightQueries {
   GitQueryResult trackingObject;
   bool trackingRan = false;
   GitQueryResult configListing;
-  GitQueryResult remoteUrl;      // `git remote get-url --push <遠端>`
+  GitQueryResult remoteUrl;      // `git remote get-url --push --all <遠端>`
   bool remoteUrlRan = false;
   GitQueryResult aheadBehind;
   bool aheadBehindRan = false;
@@ -241,10 +292,10 @@ struct PushPlan {
   std::wstring localBranchRef;   // refs/heads/main
   std::wstring remoteBranchRef;  // refs/heads/main（遠端那邊）
   std::wstring remoteName;       // 目標遠端
-  std::wstring remoteUrlDisplay;  // 發布目標（已掩碼，可能多條）
+  std::wstring remoteUrlDisplay;  // 發布目標（已掩碼，逐條列出 get-url --push --all 的全部回答）
   std::wstring remoteNameSource;  // 這個遠端名是誰定的
-  std::wstring pushedObjectId;    // 這次要送出去的那一份提交（完整 ID）
-  std::vector<std::wstring> pushUrls;  // 核實用：與界面展示的發布目標同一批位址
+  std::wstring pushedObjectId;    // 這次要送出去的那一份提交（完整 ID；命令源側釘的就是它）
+  std::vector<std::wstring> pushUrls;  // 核實用：與界面展示、命令發布目標同一批已展開位址
 
   bool requiresForce = false;   // 有風險條目：必須點「仍要推送」
   std::vector<std::wstring> risks;
@@ -309,7 +360,11 @@ struct PushVerificationReport {
 // 把「命令窗口的結果」與「向發布目標核到的實況」合成一份結論。
 // 兩者哪個都不能少：退出碼 0 只說明 Git 自己認為推成功了，核對才說明對端現在到底是什麼。
 // commandSucceeded=false 時本函數絕不寫「推送成功」；commandSucceeded=true 而核對不上時
-// 也絕不寫「已核實」。
+// 也絕不寫「已核實」。三種口径必須分得開：
+//   * 命令成功、某目標核到同一份提交 —— 該目標「已核實」；
+//   * 命令成功、某目標核到別的位置（對端又被人推進過、地址根本不對）——「與預期不符」；
+//   * 命令成功、某目標根本沒問到（認證、權限、網路、核實被二次改寫）——「已推送但未核實」，
+//     這既不是成功也不是失敗，報告逐目標原樣保留，界面據此決定彈不彈窗，全程不自動重推。
 [[nodiscard]] PushVerificationReport ComposePushVerification(
     const std::vector<PushTargetCheck>& checks, std::wstring_view expectedObjectId,
     std::wstring_view remoteBranchRef, bool commandSucceeded, std::wstring_view commandConclusion);

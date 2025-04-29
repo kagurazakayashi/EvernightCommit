@@ -56,6 +56,21 @@ bool IsUsableRemoteName(std::wstring_view name) {
   return !name.empty() && name.front() != L'-' && !HasIllegalCharacter(name);
 }
 
+// URL 不会进命令行的引用区（命令里出现的是远端名字），这里只挡「根本没法作为单个参数
+// 交出去」的形态：控制字符。双引号、冒号、斜杠都是 URL（或本机路径）里可能合法出现的字符，
+// 挡掉它们就等于把一次合法的推送拒在门外。
+bool HasIllegalUrlCharacter(std::wstring_view text) {
+  if (text.empty()) {
+    return true;
+  }
+  for (const wchar_t c : text) {
+    if (c < 0x20 || c == 0x7F) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::wstring LowerAscii(std::wstring_view text) {
   std::wstring result(text);
   for (wchar_t& c : result) {
@@ -97,8 +112,10 @@ std::vector<std::wstring> SplitNulList(const std::wstring& text) {
   return items;
 }
 
+// 拒绝说明里出现的 Git 原文（转述、诊断片段）先过一遍文本级掩码：发布链路上的失败原因
+// 常带远端地址，`fatal: … 'https://user:token@host'` 那种回答不掩就是把口令摊进界面。
 std::wstring RefusalWith(const UndoQueryRead& read, std::wstring_view fallback) {
-  return read.detail.empty() ? std::wstring(fallback) : read.detail;
+  return read.detail.empty() ? std::wstring(fallback) : MaskPushUrlCredentialsInText(read.detail);
 }
 
 // `remote.<名字>.<變數>` 的查表鍵。
@@ -110,13 +127,25 @@ std::wstring BranchKey(std::wstring_view branchName, std::wstring_view variable)
   return L"branch." + std::wstring(branchName) + L"." + std::wstring(variable);
 }
 
-// 「这条设置到底会不会生效」：设成了明确的假值就算没设，其余（包括 Git 不认的取值）都按会生效对待，
-// 因为那种取值本来就会让整条命令失败，中和它正是把这条路还给用户。
+// 「这条设置到底会不会生效」，按 Git 自己的三态读法（本机 2.53 实测的记录形态）：
+//   * 键不存在 ⇒ 不生效（走 Git 的默认）；
+//   * 省略取值（配置里裸写键名，`key<NUL>` 那种记录）⇒ 布尔语义就是真；
+//   * 显式空值（`key = `，`key<换行><NUL>`）⇒ `git_parse_maybe_bool` 把空串判为假（与 pull 侧
+//     实测同源），也就是「设了、设成了假」——它跟「没设」在展示上要分开，但在会不会生效上同归否；
+//   * 其余认不出来的取值都按会生效对待：那种取值本来就会让整条命令失败，中和它正是把这条路
+//     还给用户。
 bool ConfigTakesEffect(const PushConfigListing& config, std::wstring_view key) {
-  if (!config.HasKey(key)) {
+  const PushConfigEntry* entry = config.LastEntry(key);
+  if (entry == nullptr) {
     return false;
   }
-  return ParseConfigBool(config.Value(key)).value_or(true);
+  if (entry->valueOmitted) {
+    return true;
+  }
+  if (entry->value.empty()) {
+    return false;
+  }
+  return ParseConfigBool(entry->value).value_or(true);
 }
 
 std::wstring DescribeRemoteSet(std::wstring_view url) {
@@ -154,7 +183,8 @@ std::wstring RelationshipSentence(const PushPreflightFacts& facts) {
 std::wstring PushTargetSentence(const PushPreflightFacts& facts) {
   std::wstring text = L" · 目标远端：" + facts.pushRemoteName + L"（来历：" + facts.pushRemoteSource +
                       L"）\n";
-  text += L" · 发布 URL：" + FormatPushUrlList(facts.pushUrls) + L"\n";
+  text += L" · 发布 URL（`git remote get-url --push --all` 由 Git 展开的实际地址，逐条列出）：" +
+          FormatPushUrlList(facts.pushUrls) + L"\n";
   if (!facts.pushUrlNote.empty()) {
     text += L"　" + facts.pushUrlNote + L"\n";
   }
@@ -201,9 +231,12 @@ std::wstring QuotedArguments(const std::vector<std::wstring>& arguments) {
 
 std::wstring PushConfigListing::Value(std::wstring_view key) const {
   std::wstring found;
-  for (const auto& entry : entries) {
-    if (entry.first == key) {
-      found = entry.second;  // 後出現的覆蓋先出現的：與 `git config --get` 一致。
+  for (const PushConfigEntry& entry : entries) {
+    if (entry.key == key) {
+      found = entry.value;  // 後出現的覆蓋先出現的：與 `git config --get` 一致。
+                            // 省略取值的布爾條目在這裡落到空串——與 `--get` 對它的回答同形
+                            // （實測：裸鍵的 `--get` 也是退出碼 0 + 一行空）；要分「裸鍵／空值／
+                            // 沒設」三態的調用方一律走 LastEntry()。
     }
   }
   return found;
@@ -211,21 +244,31 @@ std::wstring PushConfigListing::Value(std::wstring_view key) const {
 
 std::vector<std::wstring> PushConfigListing::Values(std::wstring_view key) const {
   std::vector<std::wstring> found;
-  for (const auto& entry : entries) {
-    if (entry.first == key) {
-      found.push_back(entry.second);
+  for (const PushConfigEntry& entry : entries) {
+    if (entry.key == key) {
+      found.push_back(entry.value);
     }
   }
   return found;
 }
 
 bool PushConfigListing::HasKey(std::wstring_view key) const {
-  for (const auto& entry : entries) {
-    if (entry.first == key) {
+  for (const PushConfigEntry& entry : entries) {
+    if (entry.key == key) {
       return true;
     }
   }
   return false;
+}
+
+const PushConfigEntry* PushConfigListing::LastEntry(std::wstring_view key) const {
+  const PushConfigEntry* found = nullptr;
+  for (const PushConfigEntry& entry : entries) {
+    if (entry.key == key) {
+      found = &entry;
+    }
+  }
+  return found;
 }
 
 std::vector<std::wstring> PushConfigListing::RemoteValues(std::wstring_view remoteName,
@@ -235,8 +278,8 @@ std::vector<std::wstring> PushConfigListing::RemoteValues(std::wstring_view remo
 
 std::vector<std::wstring> PushConfigListing::RemoteNames() const {
   std::vector<std::wstring> names;
-  for (const auto& entry : entries) {
-    const std::wstring& key = entry.first;
+  for (const PushConfigEntry& entry : entries) {
+    const std::wstring& key = entry.key;
     if (!StartsWith(key, kKeyRemotePrefix)) {
       continue;
     }
@@ -282,6 +325,25 @@ namespace {
   return text;
 }
 
+// 配置键的形态底线：Git 输出的键一律是 `段[.子段].变量名`，变量名（最后一个点之后的段）
+// 只可能是字母、数字与连字符。省略取值（裸键）的记录要靠这一点分出「这是合法的布尔裸键」
+// 还是「一条根本不像配置的输出」——后者必须整份拒用，不能猜它想说什么。
+bool HasValidVariableSegment(std::wstring_view key) {
+  const size_t lastDot = key.rfind(L'.');
+  if (lastDot == std::wstring_view::npos || lastDot + 1 >= key.size()) {
+    return false;
+  }
+  for (size_t index = lastDot + 1; index < key.size(); ++index) {
+    const wchar_t c = key[index];
+    const bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+                    (c >= L'0' && c <= L'9') || c == L'-';
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 PushConfigListing ParsePushConfigListing(const GitQueryResult& listing) {
@@ -299,10 +361,14 @@ PushConfigListing ParsePushConfigListing(const GitQueryResult& listing) {
                          L"。本程序不在看不清实际发布地点的前提下推送。";
     return result;
   }
-  // --null 的记录形态（本机 Git 2.53 实测，od -c 逐字节看过）：`key<换行>value<NUL>`。
-  // 键里不会有换行，值里可能有（多行值），所以只按**第一个**换行切；切出来的键若还含 `=`，
-  // 说明这个版本用的是 `key=value<NUL>` 那种写法，退回按第一个 `=` 切。
-  // 两种都认不是「为不可能的场合兜底」：这是 Git 自己跨版本的输出形态，认不出来的记录才是真认不出。
+  // --null 的记录形态（本机 Git 2.53 od -c 逐字节实测）有三种合法的：
+  //   `key<换行>value`  —— 普通条目。键里不会有换行，值里可能有（多行值），所以只按**第一个**换行切；
+  //   `key<换行>`        —— 显式空值（配置里写了 `key =`）：存在、且值是空的。
+  //   `key`（不带换行也不带 `=`）—— 省略取值的布尔裸键：配置文件里不写 `=` 的那种形态，布尔语义就是真。
+  // 键若还含 `=` 且换行在其后，说明这个版本用的是 `key=value` 那种写法，退回按第一个 `=` 切
+  // （两种都认不是「为不可能的场合兜底」：这是 Git 自己跨版本的输出形态）。
+  // 剩下「既没有分隔符、又不是合法裸键形态」的记录（空键、变量名段带非法字符）就是真的认不出：
+  // 整份拒用，不带着猜上线——看不清实际发布地点与生效设置就不能推。
   for (const std::wstring& entry : SplitNulList(listing.utf16Output)) {
     const size_t newline = entry.find(L'\n');
     const size_t equals = entry.find(L'=');
@@ -313,14 +379,30 @@ PushConfigListing ParsePushConfigListing(const GitQueryResult& listing) {
       separator = equals;
     }
     if (separator == std::wstring::npos) {
+      // 没有分隔符：只有「省略取值的布尔裸键」这一种解释会被接受。
+      if (!HasValidVariableSegment(entry)) {
+        result.entries.clear();
+        result.readFailure =
+            L"git config --list 的回答里有一条既没有键/值分隔符、又不是合法的省略取值键"
+            L"（那一条的开头是：" +
+            ConfigRecordSampleForUi(entry) +
+            L"）。本程序不在看不清实际发布地点的前提下推送。";
+        return result;
+      }
+      result.entries.push_back(PushConfigEntry{entry, std::wstring(), true});
+      continue;
+    }
+    const std::wstring key = entry.substr(0, separator);
+    if (key.empty() || !HasValidVariableSegment(key)) {
       result.entries.clear();
       result.readFailure =
-          L"git config --list 的回答里有一条既不含换行也不含 `=`，这份配置清单没法照原样采信（那一条的开头是：" +
+          L"git config --list 的回答里有一条的键位形态不像任何配置键（空键，或最后一个点之后的"
+          L"变量名段含非法字符；那一条的开头是：" +
           ConfigRecordSampleForUi(entry) +
           L"）。本程序不在看不清实际发布地点的前提下推送。";
       return result;
     }
-    result.entries.emplace_back(entry.substr(0, separator), entry.substr(separator + 1));
+    result.entries.push_back(PushConfigEntry{key, entry.substr(separator + 1), false});
   }
   result.readOk = true;  // 一条配置也没有也是明确答案（全新隔离仓库就是这个形态）。
   return result;
@@ -346,6 +428,49 @@ std::wstring MaskPushUrlCredentials(std::wstring_view url) {
   }
   return std::wstring(url.substr(0, schemeEnd + 3)) + L"***@" +
          std::wstring(url.substr(at + 1));
+}
+
+std::wstring MaskPushUrlCredentialsInText(std::wstring_view text) {
+  // 逐处扫描 `scheme://`：一段 Git 的错误转述里可能出现零个、一个或多个地址，每一处都单独掩。
+  std::wstring result(text);
+  size_t searchFrom = 0;
+  for (;;) {
+    const size_t schemeEnd = result.find(L"://", searchFrom);
+    if (schemeEnd == std::wstring::npos) {
+      break;
+    }
+    // authority 段到第一个 `/`、`\` 或 `?` 为止；文本里还可能是句读收尾，一并截住。
+    size_t authorityEnd = result.size();
+    for (size_t index = schemeEnd + 3; index < result.size(); ++index) {
+      const wchar_t c = result[index];
+      if (c == L'/' || c == L'\\' || c == L'?' || c == L'\'' || c == L'"' || c == L' ' ||
+          c == L'\r' || c == L'\n') {
+        authorityEnd = index;
+        break;
+      }
+    }
+    const size_t at = result.find_last_of(L'@', authorityEnd - 1);
+    // userinfo 的起点：这个 `://` 往前最近的、不属于另一段的空白/引号/括号之后。
+    size_t authorityStart = schemeEnd;
+    while (authorityStart > 0) {
+      const wchar_t c = result[authorityStart - 1];
+      if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'\'' || c == L'"' ||
+          c == L'(' || c == L'<' || c == L'[') {
+        break;
+      }
+      --authorityStart;
+    }
+    if (at != std::wstring::npos && at >= schemeEnd + 3 && at < authorityEnd &&
+        at > authorityStart) {
+      result = result.substr(0, authorityStart) +
+               std::wstring(result.substr(authorityStart, schemeEnd - authorityStart)) +
+               L"://***@" + result.substr(at + 1);
+      searchFrom = schemeEnd + 7;  // 跳过 `://***@`，继续找下一处。
+    } else {
+      searchFrom = authorityEnd;
+    }
+  }
+  return result;
 }
 
 std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls) {
@@ -374,15 +499,21 @@ std::vector<std::wstring> BuildPushRemoteUrlArguments(std::wstring_view reposito
   if (!IsUsableRemoteName(remoteName)) {
     return {};
   }
+  // --all：多個 pushurl 時 Git 把**每一條**實際發布地址按配置順序答出來
+  // （不加 --all 只答第一條，其餘就永遠核不到了）。
   return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
-                                   L"remote", L"get-url", L"--push", std::wstring(remoteName)};
+                                   L"remote", L"get-url", L"--push", L"--all",
+                                   std::wstring(remoteName)};
 }
 
 std::vector<std::wstring> BuildPushCommandArguments(std::wstring_view remoteName,
-                                                   std::wstring_view localBranchRef,
+                                                   std::wstring_view sourceObjectId,
                                                    std::wstring_view remoteBranchRef,
                                                    bool neutralizeMirror, bool neutralizeTagOpt) {
-  if (!IsUsableRemoteName(remoteName) || !IsUsableLocalBranchRef(localBranchRef) ||
+  // 源側只收「完整对象 ID」：LooksLikeFullObjectId 之外的一切（分支名、HEAD、缩写、残段）
+  // 都构造不出命令——把可变的分支名写进源侧，等于让「点头之后、Git 读 ref 之前」那段谁都
+  // 锁不住的时间替本程序决定「推的是哪一份」。
+  if (!IsUsableRemoteName(remoteName) || !LooksLikeFullObjectId(sourceObjectId) ||
       !IsUsableRemoteRef(remoteBranchRef)) {
     return {};
   }
@@ -401,8 +532,9 @@ std::vector<std::wstring> BuildPushCommandArguments(std::wstring_view remoteName
   arguments.push_back(L"push");
   arguments.push_back(L"--recurse-submodules=no");
   arguments.push_back(std::wstring(remoteName));
-  // 完整两侧的显式 refspec：不写 `main`、不写 `HEAD`，也不留任何「由 push.default 决定」的余地。
-  arguments.push_back(std::wstring(localBranchRef) + L":" + std::wstring(remoteBranchRef));
+  // 目标侧仍是完整引用、完整两侧形态：不写 `main`、不写 `HEAD`，也不留任何「由 push.default
+  // 决定」的余地。只是源侧从「分支名」换成了「那份提交自己」——范围承诺一条不少，钉死的东西多了一条。
+  arguments.push_back(std::wstring(sourceObjectId) + L":" + std::wstring(remoteBranchRef));
   return arguments;
 }
 
@@ -429,7 +561,13 @@ PushRemoteChoice ResolvePushRemote(const PushConfigListing& config, std::wstring
   // 临时量在语句结束就析构，视图当场悬空（fetch_plan 曾因同样的写法把整份远端清单读成空）。
   const std::wstring branchKey = BranchKey(branchName, L"pushremote");
   if (!branchName.empty() && config.HasKey(branchKey)) {
-    const std::wstring value = config.Value(branchKey);
+    const PushConfigEntry* entry = config.LastEntry(branchKey);
+    if (entry != nullptr && entry->valueOmitted) {
+      // 裸键形态（省略取值）对「远端名」这种设置没有任何可表达的内容：那不是一个能推过去的名字。
+      return {std::wstring(), L"branch." + std::wstring(branchName) +
+                                  L".pushRemote 以省略取值的形式写出（布尔裸键的形态），定不出远端名"};
+    }
+    const std::wstring value = entry == nullptr ? std::wstring() : entry->value;
     if (value.empty()) {
       return {std::wstring(), L"branch." + std::wstring(branchName) +
                                   L".pushRemote 被设成了空值（Git 在这种情况下也没有可推的远端）"};
@@ -437,7 +575,11 @@ PushRemoteChoice ResolvePushRemote(const PushConfigListing& config, std::wstring
     return {value, L"branch." + std::wstring(branchName) + L".pushRemote = " + value};
   }
   if (config.HasKey(L"remote.pushdefault")) {
-    const std::wstring value = config.Value(L"remote.pushdefault");
+    const PushConfigEntry* entry = config.LastEntry(L"remote.pushdefault");
+    if (entry != nullptr && entry->valueOmitted) {
+      return {std::wstring(), L"remote.pushDefault 以省略取值的形式写出（布尔裸键的形态），定不出远端名"};
+    }
+    const std::wstring value = entry == nullptr ? std::wstring() : entry->value;
     if (value.empty()) {
       return {std::wstring(), L"remote.pushDefault 被设成了空值"};
     }
@@ -555,41 +697,71 @@ PushPreflightFacts InterpretPushPreflight(const PushPreflightQueries& queries) {
   if (IsUsableRemoteName(facts.pushRemoteName)) {
     facts.pushRemoteExists = !facts.config.RemoteValues(facts.pushRemoteName, L"url").empty() ||
                              !facts.config.RemoteValues(facts.pushRemoteName, L"pushurl").empty();
-    const std::vector<std::wstring> pushUrls =
+    const std::vector<std::wstring> configuredPushUrls =
         facts.config.RemoteValues(facts.pushRemoteName, L"pushurl");
-    facts.rawPushUrls =
-        pushUrls.empty() ? facts.config.RemoteValues(facts.pushRemoteName, L"url") : pushUrls;
-    // get-url 的回答是 Git 自己算的「实际会去哪里」：pushurl 优先于 url，而且 url.*.insteadOf /
-    // url.*.pushInsteadOf 的改写已经叠在里面。多个 pushurl 时它只回答第一条，其余按配置原样列出。
-    std::wstring effective;
+    facts.rawPushUrls = configuredPushUrls.empty()
+                            ? facts.config.RemoteValues(facts.pushRemoteName, L"url")
+                            : configuredPushUrls;
+    // 发布 URL 只认 `git remote get-url --push --all` 的回答：Git 自己按「pushurl 优先于 url、
+    // 逐条叠加 insteadOf（落回 url 的场合还叠 pushInsteadOf）」算出的**全部**实际地址，按配置顺序。
+    // 这条查询问不成（非 0、启动不成、一行地址都没有、地址里有控制字符、条数与配置清单对不上——
+    // 最后一种意味着某个值里带换行被按行拆开了，那是没法作为单个参数交出去的地址），就只能拒绝：
+    // 把配置里未经解析的原样 URL 塞回来继续发布，等于嘴上念 A、手上寄往一个「大概等于 A」的地方。
+    std::vector<std::wstring> resolved;
+    std::wstring urlFailure;
     if (queries.remoteUrlRan) {
       const UndoQueryRead urlRead = ReadUndoQuery(queries.remoteUrl);
       if (urlRead.outcome == UndoQueryOutcome::answered) {
-        effective = urlRead.firstLine;
+        if (urlRead.lines.empty()) {
+          urlFailure = L"git remote get-url --push --all 成功返回，却没有答出任何一个地址"
+                       L"（这个远端实际没有可推送的目标）";
+        } else {
+          bool usable = true;
+          for (const std::wstring& candidate : urlRead.lines) {
+            if (HasIllegalUrlCharacter(candidate)) {
+              urlFailure = L"Git 答出的发布地址里有没法作为单个参数交出去的字符（控制字符）：" +
+                           ConfigRecordSampleForUi(candidate);
+              usable = false;
+              break;
+            }
+          }
+          if (!usable) {
+            // 上面已带原因。
+          } else if (urlRead.lines.size() != facts.rawPushUrls.size()) {
+            urlFailure = L"Git 答出的地址条数（" + std::to_wstring(urlRead.lines.size()) +
+                         L"）与生效配置清单里这个远端的地址条目（" +
+                         std::to_wstring(facts.rawPushUrls.size()) +
+                         L"）对不上——某个地址值里带着换行被按行拆开时就是这样，"
+                         L"本程序不猜哪几条是完整地址";
+          } else {
+            resolved = urlRead.lines;
+          }
+        }
       } else if (urlRead.outcome == UndoQueryOutcome::failed) {
-        facts.pushUrlFailure = RefusalWith(urlRead, L"git remote get-url 未成功");
+        urlFailure = RefusalWith(urlRead, L"git remote get-url --push --all 未成功");
+      } else {
+        urlFailure = L"git remote get-url --push --all 没有给出可解析的回答";
       }
-    }
-    if (!effective.empty()) {
-      // 「改写」只在其一目标时说得准：拿 get-url 的回答与配置里那一条比。
-      facts.pushUrlRewritten = !facts.rawPushUrls.empty() && effective != facts.rawPushUrls.front();
-      facts.pushUrls =
-          facts.rawPushUrls.size() > 1 ? facts.rawPushUrls : std::vector<std::wstring>{effective};
     } else {
-      facts.pushUrls = facts.rawPushUrls;
+      urlFailure = L"这条查询压根没发出去（远端名字的形态先不合格）";
     }
-    if (facts.rawPushUrls.size() > 1) {
+    facts.pushUrlFailure = urlFailure;
+    facts.pushUrls = resolved;  // 解析不成时保持为空——绝不塞原样地址顶替。
+    facts.pushUrlRewritten = !resolved.empty() && resolved != facts.rawPushUrls;
+    if (resolved.size() > 1) {
       facts.pushUrlNote =
-          L"这个远端配了 " + std::to_wstring(facts.rawPushUrls.size()) +
-          L" 个 push URL：实测 `git push <远端>` 会推给每一个。`git remote get-url --push` 只能"
-          L"回答第一个的改写结果，因此上面按配置原样列出全部；如果其中有的配了 url.*.insteadOf，"
-          L"Git 推送时仍会逐条改写——那一处本程序核不出来，推送后会逐个目标去问实际位置。";
+          L"这个远端配了 " + std::to_wstring(resolved.size()) +
+          L" 个发布地址：实测 `git push <远端>` 会推给每一个，上面每一条都是 Git 自己"
+          L"（get-url --push --all）答出来的已展开地址。那条 push 命令的退出码是**各目标合计**的："
+          L"整体成功不代表每个都送到位。推送后本程序会把上面每一个地址逐个再问一次 ls-remote，"
+          L"每个目标的核实结果各记各的。注意：把这些已展开的地址再交回 Git 时，它们仍可能命中"
+          L" url.*.insteadOf 被**再次改写**（实测空值的 `-c url.<base>.insteadOf=` 并不能取消既有"
+          L"规则，本程序不假装能关掉它）——核实问到的地方若因此变了，结论会如实落到「与预期不符/"
+          L"没能核实」，本程序不猜、不硬说成成功。";
     } else if (facts.pushUrlRewritten && !facts.rawPushUrls.empty()) {
       facts.pushUrlNote = L"这个地址是 Git 按 url.*.insteadOf / pushInsteadOf 改写之后的结果"
                           L"（配置里写的是 " + MaskPushUrlCredentials(facts.rawPushUrls.front()) + L"）。";
     }
-    const std::vector<std::wstring> configuredPushUrls =
-        facts.config.RemoteValues(facts.pushRemoteName, L"pushurl");
     facts.pushTargetIsFetchTarget =
         facts.pushRemoteName == facts.upstreamRemote && configuredPushUrls.empty() &&
         !facts.pushUrlRewritten;
@@ -700,10 +872,13 @@ std::wstring PushPrerequisiteRefusal(const PushPreflightFacts& facts,
     return text;
   }
   if (facts.pushUrls.empty()) {
-    return L"远端「" + facts.pushRemoteName + L"」在清单里，却问不出了一个可用的发布 URL（" +
-           (facts.pushUrlFailure.empty() ? std::wstring(L"git remote get-url --push 没有给出地址")
-                                         : facts.pushUrlFailure) +
-           L"）。看不见要去哪里就不推：本程序不在猜出来的地址上动远端。";
+    return L"远端「" + facts.pushRemoteName +
+           L"」在清单里，但 Git 没能答出这次实际会去的发布地址（" +
+           (facts.pushUrlFailure.empty()
+                ? std::wstring(L"git remote get-url --push --all 没有给出地址")
+                : facts.pushUrlFailure) +
+           L"）。看不见要去哪里就不推：本程序不会拿配置里未经解析的原样地址顶替它继续发布，"
+           L"也不改你的远端配置。";
   }
   return std::wstring();
 }
@@ -726,11 +901,11 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
   }
 
   const std::vector<std::wstring> arguments =
-      BuildPushCommandArguments(facts.pushRemoteName, facts.branchRef, facts.upstreamRemoteRef,
+      BuildPushCommandArguments(facts.pushRemoteName, facts.headObjectId, facts.upstreamRemoteRef,
                                facts.mirrorConfigured, facts.tagOptConfigured);
   if (arguments.empty()) {
-    return block(L"推送命令的参数没有通过构造期的形态检查（引用名或远端名里有 Git 命令行无法安全"
-                 L"表达的写法）。没有发出任何命令。");
+    return block(L"推送命令的参数没有通过构造期的形态检查（远端名、要钉住的完整提交 ID 或目标引用"
+                 L"里有 Git 命令行无法安全表达的写法）。没有发出任何命令。");
   }
 
   PushPlan plan;
@@ -803,8 +978,9 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
   std::vector<std::wstring> notes;
   const std::wstring pushDefaultDisplay =
       facts.pushDefault.empty() ? std::wstring(L"没设，Git 的默认是 simple") : facts.pushDefault;
-  notes.push_back(L"命令里写的是完整两侧的 refspec " + plan.localBranchRef + L":" +
-                  plan.remoteBranchRef + L"：推的就是这一个引用。push.default（现在是 " +
+  notes.push_back(L"命令里写的是完整两侧的显式 refspec " + plan.pushedObjectId + L":" +
+                  plan.remoteBranchRef + L"：源侧钉死在你确认的这份提交上（不再写分支名），"
+                  L"目标侧就是这一个引用。push.default（现在是 " +
                   pushDefaultDisplay +
                   L"）与 remote.<远端>.push 都不参与，也不会顺带推标签或所有分支。");
   if (facts.extraPushRefspecsConfigured) {
@@ -823,15 +999,19 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
   plan.notes = std::move(notes);
 
   plan.notice =
-      L"推送范围：只把 " + plan.localBranchRef + L" 送到远端「" + plan.remoteName + L"」的 " +
+      L"推送范围：只把 " + plan.localBranchRef + L" 现在这份提交（完整 ID " + plan.pushedObjectId +
+      L"，命令源侧写死它）送到远端「" + plan.remoteName + L"」的 " +
       plan.remoteBranchRef + L"（发布目标：" + plan.remoteUrlDisplay +
       L"）。不带 --force / --force-with-lease / --mirror / --all / --tags，不递归子模块，"
       L"不推标签，不动本地分支、索引与工作区，也不写任何配置文件。";
 
   std::wstring text;
-  text += L"这次推送的三样东西：\n";
+  text += L"这次推送要钉死的几样东西：\n";
   text += L" · 源分支：" + plan.localBranchRef + L"（现在在 " + ShortObjectId(plan.pushedObjectId) +
           L"，完整 ID " + plan.pushedObjectId + L"）\n";
+  text += L" · 要推送的那一份：命令的源侧写的是上面这个完整提交 ID，不写分支名——点头之后\n"
+          L"   哪怕有人把这条分支又推进了，这次送出去的也仍是你确认的这一份（复核发现分支挪了\n"
+          L"   会先作废旧方案；把 ID 写进命令是第二道防线，见文末的边界说明）。\n";
   text += L" · 目标远端：" + plan.remoteName + L"（来历：" + plan.remoteNameSource + L"）\n";
   text += L" · 目标分支：" + plan.remoteBranchRef + L"\n";
   text += PushTargetSentence(facts);
@@ -864,12 +1044,17 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
       text += L" · " + note + L"\n";
     }
   }
-  text += L"\n预检不是保证：点头之后到 Git 真正跑完之间，远端可能又被别人推进（那正是 non-fast-forward"
-          L" 的来源）、hooks 可能拒绝、认证可能失败。失败时命令窗口里留着 Git 的真实输出，"
-          L"本程序不重试、不减弱、不撤销。\n";
-  text += L"命令窗口报告结束后，本程序还会向**上面列出的发布目标**发一次只读 ls-remote，"
+  text += L"\n预检不是保证。点头之后、执行之前，本程序会把上面这套只读查询**原样重发一遍**"
+          L"（分支、这份提交、上游、发布远端与逐条展开的发布 URL、会被中和的设置），对不上就"
+          L"作废、不发命令。对上了也仍有一个挡不住的窗口：复核通过到 Git 自己启动并读取配置之间，"
+          L"外部进程仍可能改动 remote 指向、远端也可能又被别人推进（那正是 non-fast-forward 的"
+          L"来源，Git 会拒绝，本程序不重试也不加码）——本程序不持有（也不该持有）Git 的锁，配置层"
+          L"没法原子钉死，这是真实的边界；源侧因为写死了完整提交 ID，改动**送哪一份**已经不在那个"
+          L"窗口里，剩下的只有**送去哪里**，而那由下面这一步兜底。\n";
+  text += L"命令窗口报告结束后，本程序还会向**上面列出的发布目标**逐个发只读 ls-remote，"
           L"核对那条引用到底停在哪——推送成功与否以那一份实况为准，不是以本地某个引用看起来一致为准。"
-          L"取消这一步：不打开命令窗口、不接触远端、不改动仓库。";
+          L"命令报了成功却没核上时，结论会写成「已推送但未核实」或「与预期不符」，不会替你决定"
+          L"要不要重推。取消这一步：不打开命令窗口、不接触远端、不改动仓库。";
   plan.confirmationText = std::move(text);
   plan.explanation = L"推送目标：" + plan.localBranchRef + L" → 远端「" + plan.remoteName + L"」的 " +
                      plan.remoteBranchRef + L"（" + plan.remoteUrlDisplay + L"）";
@@ -986,7 +1171,7 @@ PushTargetCheck InterpretPushTargetCheck(std::wstring_view url, const GitQueryRe
     }
     const std::wstring objectId = TrimWide(std::wstring_view(line).substr(0, tab));
     if (!LooksLikeFullObjectId(objectId)) {
-      check.failure = L"对端给出的对象 ID 形态不合格：" + objectId;
+      check.failure = L"对端给出的对象 ID 形态不合格：" + ConfigRecordSampleForUi(objectId);
       return check;
     }
     check.refPresent = true;
@@ -1030,11 +1215,20 @@ PushVerificationReport ComposePushVerification(const std::vector<PushTargetCheck
                         L"：";
     if (!check.queried) {
       ++unanswered;
-      line += L"没能问（" + (check.failure.empty() ? std::wstring(L"核对没有执行") : check.failure) +
-              L"）";
+      line += commandSucceeded
+                   ? std::wstring(L"已推送但这一处没被核对（") +
+                         (check.failure.empty() ? std::wstring(L"核对没有执行") : check.failure) +
+                         L"）"
+                   : std::wstring(L"没能问（") +
+                         (check.failure.empty() ? std::wstring(L"核对没有执行") : check.failure) +
+                         L"）";
     } else if (!check.ok) {
       ++unanswered;
-      line += L"没能问到（" + (check.failure.empty() ? std::wstring(L"原因未知") : check.failure) + L"）";
+      line += commandSucceeded
+                   ? std::wstring(L"已推送但这一处没能核实（") +
+                         (check.failure.empty() ? std::wstring(L"原因未知") : check.failure) + L"）"
+                   : std::wstring(L"没能问到（") +
+                         (check.failure.empty() ? std::wstring(L"原因未知") : check.failure) + L"）";
     } else if (!check.refPresent) {
       ++mismatched;
       line += L"对端没有这条引用";
@@ -1055,7 +1249,8 @@ PushVerificationReport ComposePushVerification(const std::vector<PushTargetCheck
     report.headline =
         L"没有向发布目标发出核对" +
         (commandSucceeded
-             ? std::wstring(L"：这次推送的结论只能以命令窗口里 Git 的输出为准，本程序不替它背书。")
+             ? std::wstring(L"：命令窗口那头的结论只能转述，不能替它背书——若那头的结论是成功，"
+                            L"这份结果属于「已推送但未核实」。")
              : std::wstring(L"。") + std::wstring(commandConclusion));
     return report;
   }
@@ -1093,20 +1288,30 @@ PushVerificationReport ComposePushVerification(const std::vector<PushTargetCheck
                     std::wstring(commandConclusion) + L"」，向发布目标核对的实况如下。";
       break;
     case PushVerificationVerdict::mixed:
-      report.headline = std::wstring(L"推送结果（") + std::wstring(verdictLabel) +
-                        L"）：" + std::to_wstring(confirmed) +
-                        L" 个发布目标已核上，另有 " + std::to_wstring(unanswered) +
-                        L" 个没能问到（认证、网络或对端设置都可能是原因）。"
-                        L"命令窗口那头的结论是「" +
-                        std::wstring(commandConclusion) + L"」。逐目标见下面每一行。";
+      report.headline =
+          std::wstring(L"推送结果（") + std::wstring(verdictLabel) +
+          L"）：" + std::to_wstring(confirmed) +
+          L" 个发布目标已核上，另有 " + std::to_wstring(unanswered) +
+          L" 个没能问到（认证、网络或对端设置都可能是原因）。"
+          L"命令窗口那头的结论是「" +
+          std::wstring(commandConclusion) + L"」。" +
+          (commandSucceeded
+               ? std::wstring(L"没问到的那些目标按「已推送但未核实」记录：既不替你断言它们收到，"
+                              L"也不据此断言这次推送失败，更不会自动重推。")
+               : std::wstring()) +
+          L"逐目标见下面每一行。";
       break;
     case PushVerificationVerdict::nothingChecked:
     default:
-      report.headline = std::wstring(L"推送结果（") + std::wstring(verdictLabel) +
-                        L"）：向发布目标的核对一次也没成功，因此这条引用到底送没送到，"
-                        L"只能以命令窗口里 Git 的真实输出为准（那头的结论是「" +
-                        std::wstring(commandConclusion) + L"」）。本程序不拿「窗口已打开」"
-                        L"或本地跟踪引用的位置当作推送成功。";
+      report.headline =
+          std::wstring(L"推送结果（") + std::wstring(verdictLabel) +
+          L"）：向发布目标的核对一次也没成功，因此这条引用到底送没送到，"
+          L"只能以命令窗口里 Git 的真实输出为准（那头的结论是「" +
+          std::wstring(commandConclusion) + L"」）。" +
+          (commandSucceeded
+               ? std::wstring(L"这正是「已推送但未核实」的场合：本程序不把它写成「推送成功」，"
+                              L"也不据此判定失败，绝不自动重推。")
+               : std::wstring(L"本程序不拿「窗口已打开」或本地跟踪引用的位置当作推送成功。"));
       break;
   }
   return report;
