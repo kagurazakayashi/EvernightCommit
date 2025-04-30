@@ -15,6 +15,7 @@
 #include "git/diff_view.h"
 #include "git/staging_plan.h"
 #include "git/workspace_model.h"
+#include "app/operation_conclusions.h"
 #include "platform/windows/commit_message_file.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/identity_prompt.h"
@@ -845,7 +846,7 @@ void MainWindow::RequestRepoDetection(HWND window, const std::wstring& normalize
     // 换仓库（或换 Git 程序）等于取消那次「还在核对」的创建提交：
     // 确认框要核对的是这个仓库的现状，仓库都换了，点下的那一次提交自然作废，
     // 那时候写下的提交信息文件也没有 Git 会去读，一并回收。
-    ReleaseCommitAttempt(true);
+    commitFlow_.ReleaseAttempt(true);
     // 上一个仓库读来的身份默认值同样要作废：新仓库的配置可能完全不同，
     // 留着旧值会让界面把「旧仓库的默认作者」显示成新仓库的。
     state_.SetAuthor(app::AuthorState{});
@@ -888,7 +889,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   state_.SetRepo(std::move(repo));
   // 没有可用的工作区身份，就没有任何安全的查询落点：在途结果一律作废，列表清空。
   tasks_.UnbindRepository();
-  ReleaseCommitAttempt(true);  // 同样也没有地方可提交了：那次还在核对的创建提交作废。
+  commitFlow_.ReleaseAttempt(true);  // 同样也没有地方可提交了：那次还在核对的创建提交作废。
   refreshCycleActive_ = false;
   ClearWorkspace();
   state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
@@ -920,7 +921,7 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
     refreshCycleActive_ = false;
     // 这一趟刷新本来就是「创建提交」点出来的：仓库现在没有可用工作区，那次尝试既等不到
     // 工作区读取的结果，也没有地方再发查询，就地作废（不然阶段标记会一直挡着别的写操作）。
-    ReleaseCommitAttempt(true);
+    commitFlow_.ReleaseAttempt(true);
     ClearWorkspace();
     state_.SetAuthor(app::AuthorState{});
     UpdateCommandAvailability();
@@ -970,7 +971,7 @@ void MainWindow::RunRefreshCycle(HWND window) {
     refreshCycleActive_ = false;
     // 这一轮根本不会发起读取：还在核对仓库现状的那次创建提交必须一并取消，
     // 否则那个阶段标记会一直挂着，将来某次无关的读取完成时凭空弹出确认框。
-    ReleaseCommitAttempt(true);
+    commitFlow_.ReleaseAttempt(true);
     return;
   }
   // 一次刷新同时覆盖顶部摘要与两个列表：在外部终端里切分支、提交、拉取之后，
@@ -1031,17 +1032,11 @@ void MainWindow::OnWorkspaceLoadCompleted(HWND window, uint64_t completionSerial
   ApplyWorkspaceLists();
   UpdateCommandAvailability();
   RefreshTexts(window);
-  if (pendingCommit_.stage == CommitStage::preConfirmRead) {
-    // 这一次读取是「创建提交」点下去之后的第一步核对：列表读回来了，才轮到身份预检出场。
-    if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
-      AbandonCommitAttempt(
-          window,
-          L"提交前核对仓库现状时没能读到 git status：" + state_.Workspace().message +
-              L" 因此没有打开命令窗口，也没有对仓库做任何改动。请改正后再点一次“创建提交”。");
-      return;
-    }
-    RequestCommitPreflightProbe(window);
-    if (tasks_.RefreshStillQueued()) {
+  // 「创建提交」点下去之后的第一步核对认领这一次读取：列表读回来了，才轮到身份预检出场；
+  // 读不回来则那次尝试就地作废（控制器经 CommitOperationHost 说明原因，表单一个字不动）。
+  const bool loadSucceeded = state_.Workspace().status == git::WorkspaceLoadStatus::loaded;
+  if (commitFlow_.OnWorkspaceLoaded(*this, CaptureOperationContext(), loadSucceeded)) {
+    if (loadSucceeded && tasks_.RefreshStillQueued()) {
       // 核对期间又有人点过刷新：这一次不能因为弹了确认框就被吞掉。
       ScheduleRefresh(window);
     }
@@ -1148,30 +1143,62 @@ void MainWindow::LaunchStatusOperation(HWND window) {
 }
 
 bool MainWindow::RequireWritePrerequisites(HWND window, std::wstring_view actionLabel) {
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-
-  if (!state_.GitUsable() || !state_.RepoUsable()) {
-    refuse(L"Git 或仓库当前不可用，无法" + std::wstring(actionLabel) + L"。请先确认路径并点“刷新”。");
-    return false;
-  }
-  if (tasks_.OperationInFlight()) {
-    // 命令窗口操作是单槽的：并发两次写操作会互相抢 index.lock，
-    // 也会让“哪个窗口对应哪一次改动”变得含糊。
-    refuse(L"已有一个命令窗口操作在进行，请等它结束后再" + std::wstring(actionLabel) + L"。");
-    return false;
-  }
+  // 判定与文案收在 app/operation_gate：暂存/查看类只走共同前提这一层
+  // （它们不与被编排的五个操作互斥——这是既有行为的原样保留）。
+  app::WritePrerequisites prereq;
+  prereq.gitUsable = state_.GitUsable();
+  prereq.repoUsable = state_.RepoUsable();
+  prereq.commandWindowBusy = tasks_.OperationInFlight();
   const std::wstring repositoryRoot = state_.Repo().detection.root;
-  if (repositoryRoot.empty() ||
-      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
-    // 列表里的路径是“那一个工作区”的相对路径：根目录与协调器身份一旦不一致，
-    // 这些路径就可能属于上一个仓库，绝不能拿去对新仓库执行写操作。
-    refuse(L"仓库工作区已改变，请先点“刷新”再" + std::wstring(actionLabel) + L"。");
+  prereq.workspaceStillBound = !repositoryRoot.empty() &&
+                               git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot);
+  const std::wstring refusal = app::DescribeWritePrerequisiteRefusal(prereq, actionLabel);
+  if (!refusal.empty()) {
+    state_.SetStatusNote(refusal);
+    RefreshTexts(window);
     return false;
   }
   return true;
+}
+
+bool MainWindow::AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_view actionLabel) {
+  // AdmitWriteFlow 自带共同前提裁决（与 RequireWritePrerequisites 同一份实现），这里不再叠一遍。
+  // 五个被编排的操作各自还占着「预检/复核/核实」这类不碰命令窗口槽位的中间阶段；
+  // 谁拦谁、怎么解释，全在 app/operation_gate（有纯逻辑测试钉住）。
+  const app::GitFlowActivity activity{
+      /*commit=*/commitFlow_.Active(),
+      /*undo=*/undoFlow_.Active(),
+      /*fetch=*/fetchFlow_.Active(),
+      /*pull=*/pullFlow_.Active(),
+      /*push=*/pushFlow_.Active(),
+  };
+  app::WritePrerequisites prereq;
+  prereq.gitUsable = state_.GitUsable();
+  prereq.repoUsable = state_.RepoUsable();
+  prereq.commandWindowBusy = tasks_.OperationInFlight();
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  prereq.workspaceStillBound = !repositoryRoot.empty() &&
+                               git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot);
+  const std::wstring refusal = app::AdmitWriteFlow(requested, activity, prereq, actionLabel);
+  if (!refusal.empty()) {
+    state_.SetStatusNote(refusal);
+    RefreshTexts(window);
+    return false;
+  }
+  return true;
+}
+
+OperationContext MainWindow::CaptureOperationContext() const {
+  OperationContext ctx;
+  ctx.notifyWindow = window_.get();
+  ctx.gitExecutable = state_.Git().path;
+  ctx.detection = state_.Repo().detection;
+  ctx.repoUsable = state_.RepoUsable();
+  ctx.committerState = state_.Author().config.CommitterState();
+  ctx.workspaceStatus = state_.Workspace().status;
+  ctx.workspaceMessage = state_.Workspace().message;
+  ctx.stagedItemCount = state_.WorkspaceModel().staged.size();
+  return ctx;
 }
 
 std::vector<git::ChangeItem> MainWindow::CaptureCheckedSelection(
@@ -1817,15 +1844,10 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (!outcome.recognised) {
     return;
   }
-  // 「创建提交」的收尾只认 Git 的退出码：成功才清已提交的正文，失败时表单一个字都不动，
-  // 用户可以直接改好再点一次（那种场合最不该丢的就是他刚写下来的东西）。
+  // 「创建提交」的收尾只认 Git 的退出码：成功才清已提交的正文（先逐栏比对再清），
+  // 失败时表单一个字都不动，用户可以直接改好再点一次（那种场合最不该丢的就是他刚写下来的东西）。
   if (commitOperation) {
-    if (outcome.succeeded) {
-      AfterCommitSucceeded(window, committedForm);
-    } else {
-      state_.SetFormNote(L"提交没有成功：标题、描述、作者与合作者一个字都没动，"
-                         L"改好之后再点一次“创建提交”。命令窗口里留着 Git 的完整输出。");
-    }
+    commitFlow_.OnCommandSettled(*this, outcome.succeeded, committedForm);
   }
   // 结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
   std::wstring conclusion = outcome.note;
@@ -1841,45 +1863,32 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (undoOperation && outcome.succeeded && !restoreHint.empty()) {
     conclusion += L"｜" + restoreHint;
   }
-  // fetch 的结论必须把范围说死：成功只是「远端跟踪引用按 Git 的回答更新了」，
-  // HEAD/本地分支/索引/工作区本来就不归它动；失败则明确「不自动重试、不改配置」，
-  // 具体原因看命令窗口里留下的真实输出。紧随其后的自动刷新会重读分支摘要，
-  // 下一次点「撤回最近提交」的发布状态判断用的就是这批新读回的引用。
+  // fetch / pull 两步 / 推送命令的终态措辞收在 app/operation_conclusions：每一句都对应
+  // 各自的长期承诺（范围、不自动重试、不改配置、成功与否以发布目标的核实为准）。
   if (fetchOperation) {
-    if (outcome.succeeded) {
-      conclusion += L"｜fetch 只按确认框上那份范围更新了远端跟踪引用（.git/FETCH_HEAD 与对象库随抓取变化，"
-                    L"这是 fetch 本身的行为）；HEAD、本地分支、索引与工作区不归它动。"
-                    L"分支摘要正按新状态重读。";
-    } else {
-      conclusion += L"｜fetch 未成功：远端跟踪引用是否变化以重读结果为准。本程序不自动重试，"
-                    L"也不会因此 prune、换远端或改写任何远端配置；原因看命令窗口里 Git 的真实输出。";
-    }
+    conclusion += app::DescribeFetchConclusion(outcome.succeeded);
   }
-  // pull 的两个阶段各自有各自的结论：获取成功只是「远端跟踪引用按承诺更新了」，
-  // 整合的结论才涉及分支/索引/工作区。两者都不把「窗口还开着」当成 Git 成功。
   if (pullFetchOperation) {
-    conclusion += outcome.succeeded
-                      ? L"｜pull 第一步（获取）完成：只按确认框上那份范围更新了远端跟踪引用"
-                        L"（FETCH_HEAD 与对象库随之变化）；正在重读现状并核对本地与远端的关系…"
-                      : L"｜pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
-                        L"本程序不自动重试，也不会因此 prune、换远端或改写任何远端配置。";
+    conclusion += app::DescribePullFetchConclusion(outcome.succeeded);
   }
   if (pullIntegrateOperation) {
-    conclusion += outcome.succeeded
-                      ? L"｜pull 整合完成：本地分支已按刚才预检的那一份提交整合过；"
-                        L"本程序没有 push、没有 reset、没有 stash，也没有改任何配置。"
-                        L"现在正在重读分支、列表与历史。"
-                      : ReportPullIntegrateFailure(window, result.completion, result.exitCode);
+    if (outcome.succeeded) {
+      conclusion += app::DescribePullIntegrateSuccessConclusion();
+    } else {
+      // 整合没跑成：那句结论要以「现场读回来的实况」为准。现场读取走后台任务
+      // （GUI 线程不再在终态之后同步等子进程），这条结论的补完、说明框与收尾重读
+      // 一并交给 pull 控制器；这里直接返回，槽位释放后不碰 Remember/ScheduleRefresh。
+      commandRunner_.ClearAllResults();
+      UpdateCommandAvailability();
+      pullFlow_.BeginIntegrationFailedReport(*this, CaptureOperationContext(), std::move(conclusion),
+                                             result.completion, result.exitCode,
+                                             result.environmentNotice);
+      RefreshTexts(window);
+      return;
+    }
   }
-  // 推送的结论在这里只写到「命令窗口那头说了什么」：Git 报告成功不等于远端收到了那一份提交
-  // （认证被拒、对端钩子拦下、窗口被提前关掉都可能让两者不一致）。
-  // 真正的「送到没送到」由紧随其后的核实给出，它回来后会另写一句结论。
   if (pushOperation) {
-    conclusion += outcome.succeeded
-                      ? std::wstring(L"｜命令窗口里 Git 报告推送成功（退出码 0）。")
-                      : std::wstring(L"｜推送没有成功：本程序不自动重试，也不会改用 --force 之类"
-                                     L"更激烈的参数。原因看命令窗口里 Git 的真实输出。");
-    conclusion += L"正在向确认框上列出的发布目标核实那条引用的实际位置…";
+    conclusion += app::DescribePushCommandConclusion(outcome.succeeded);
   }
   // 集中环境策略移除过继承的重定向变量时，结论必须把这句话说完：
   // 用户从终端启动本程序时要知道“那些变量被移除了、操作绑定的是界面上选中的仓库”。
@@ -1893,18 +1902,15 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   // pull 的第一步（获取）终态不是这次操作的终点：成功就接着做阶段二预检，失败就此为止。
   // 这一句必须排在槽位释放与可用性刷新之后——那一次预检是内部只读查询，不占命令窗口槽位。
   if (pullFetchOperation) {
-    OnPullFetchSettled(window, outcome.succeeded);
+    pullFlow_.OnFetchSettled(*this, CaptureOperationContext(), outcome.succeeded);
   } else if (pullIntegrateOperation) {
-    // 整合有了终态（含「结果未知」）就结案：这一次 pull 到此为止，要不要再来由用户重新点。
-    pendingPull_ = PendingPull{};
+    // 整合有了终态（成功；失败那条路已在上面转交控制器）就结案：这一次 pull 到此为止。
+    pullFlow_.AbandonFlow();
   }
   if (pushOperation) {
     // 这一次推送本身到此结案（计划里剩下的只有核实）。核实无论成败都要发：
     // 命令报成功时要拿它当证据，命令报失败时它正是「远端到底动没动」的唯一凭据。
-    const bool commandSucceeded = outcome.succeeded;
-    const std::wstring commandConclusion = conclusion;
-    pendingPush_.stage = PushStage::verifying;
-    RequestPushVerification(window, commandSucceeded, commandConclusion);
+    pushFlow_.BeginVerification(*this, CaptureOperationContext(), outcome.succeeded, conclusion);
   }
   // 无论成功还是失败都要重读一次：失败的操作同样可能已经改动仓库
   // （提交到一半、push 被拒、合并留下冲突），只有退出码决定要不要报成功。
@@ -1929,13 +1935,13 @@ void MainWindow::TickActiveOperations(HWND window) {
     // 就把这一次 pull 结案：界面不再停在「等待某一步」上，否则下一次点 pull 会被自己锁住。
     // 仓库究竟被改到什么程度只有重读知道，因此这里同样只重读、不替用户猜。
     if (pullStepInProgress) {
-      pendingPull_ = PendingPull{};
+      pullFlow_.AbandonFlow();
     }
     // 推送的那几步（预检/复核/命令窗口）同样靠终态通知往下走。通知丢了就把这一次推送结案，
     // 否则界面会永远停在「等那一次推送」上，把下一次点击锁死。核实本来就只在终态之后才发起，
     // 走到这里说明它没机会跑：结论只能以命令窗口那头的输出为准，如实这么说。
     if (pushStepInProgress) {
-      pendingPush_ = PendingPush{};
+      pushFlow_.AbandonFlow();
     }
     // 执行器已经不记得这个操作：按“结果未知”结案并释放槽位，
     // 否则一个再也等不到通知的操作会把后续写操作永久锁住。
@@ -1982,28 +1988,6 @@ void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
   DoLayout(window);
 }
 
-bool MainWindow::BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
-                                       std::wstring* refusal) const {
-  *out = git::CommitTimeChoice{};
-  const platform::LocalInstant instant = platform::ResolveLocalWallTime(wall);
-  if (!instant.valid) {
-    *refusal = instant.failureReason;
-    return false;
-  }
-  std::string gitDate;
-  std::wstring dateRefusal;
-  if (!git::FormatGitInternalDate(instant.utcEpochSeconds, instant.offsetMinutes, &gitDate,
-                                 &dateRefusal)) {
-    *refusal = dateRefusal;
-    return false;
-  }
-  out->gitDate = std::move(gitDate);
-  out->wall = wall;
-  out->offsetMinutes = instant.offsetMinutes;
-  out->displayText = git::FormatCommitTimeText(wall, instant.offsetMinutes);
-  return true;
-}
-
 void MainWindow::RefreshTimeControlsState(HWND window) {
   static_cast<void>(window);
   const bool sync = commitForm_.TimeSyncChecked();
@@ -2041,1002 +2025,97 @@ void MainWindow::ResetCommitTimesToNow(HWND window) {
   RefreshTexts(window);
 }
 
+// ---- 五个被编排操作的入口与控制器桥 ----
+// 入口只做三件事：准入裁决（app/operation_gate）→ 采集只读快照 → 把流程交给控制器；
+// 下面的 OperationHost/CommitOperationHost 实现则是控制器对界面的唯一接触面：
+// 每个方法只呈现给定的内容或对整界面做一次重画，不返回任何可变引用。
+
 void MainWindow::CreateCommit(HWND window) {
-  if (!RequireWritePrerequisites(window, L"创建提交")) {
+  if (!AdmitGitFlow(window, app::GitFlow::commit, L"创建提交")) {
     return;
   }
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-  if (CommitAttemptActive()) {
-    refuse(L"已经有一次“创建提交”正在核对仓库现状（或正在做执行前复核），请等它的确认框出现，"
-           L"或先取消那一次。");
-    return;
-  }
-  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
-    refuse(L"还没读到这个仓库的工作区状态（" + state_.Workspace().message +
-           L"），无法确定要提交什么。请先点“刷新”。");
-    return;
-  }
-
-  // 正文与身份的校验：规则在 git/commit_message 里，这里只把它的答案当执行前提。
-  const git::CommitFormData data = commitForm_.Capture();
-  const git::CommitFormValidity validity =
-      git::ValidateCommitForm(data, state_.Author().config.CommitterState());
-  if (!validity.Ok()) {
-    RunFormValidation(window);
-    refuse(L"表单还没通过校验，因此没有提交任何内容：" + validity.StatusText());
-    return;
-  }
-
-  // 「默认用提交时的当前时间」在这里落地：没人动过时间控件时，先把控件改成此刻，
-  // 让用户亲眼看到要用的到底是哪个时间；应用启动时那个时刻绝不代替它。
-  if (!commitForm_.TimesUserEdited()) {
-    const SYSTEMTIME now = platform::CurrentLocalTime();
-    commitForm_.SetTimes(now, now);
-    RefreshTimeControlsState(window);
-  }
-
-  git::CommitTimeChoice authorTime;
-  git::CommitTimeChoice committerTime;
-  std::wstring refusal;
-  if (!BuildCommitTimeChoice(commitForm_.AuthorWallTime(), &authorTime, &refusal)) {
-    refuse(L"作者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
-    return;
-  }
-  if (commitForm_.TimeSyncChecked()) {
-    committerTime = authorTime;  // 同步勾选：提交者时间以作者时间为准（界面也已一致显示）。
-  } else if (!BuildCommitTimeChoice(commitForm_.CommitterWallTime(), &committerTime, &refusal)) {
-    refuse(L"提交者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
-    return;
-  }
-
-  // 记下点击瞬间界面显示的那份摘要，然后发起一次只读重读：
-  // 确认框必须摆出「刚刚读回的仓库现状」，不能拿几分钟前的列表当真。
-  pendingCommit_.captured = git::CapturedSnapshot{};
-  pendingCommit_.captured.valid = true;
-  pendingCommit_.captured.shortSha = state_.Repo().detection.shortSha;
-  pendingCommit_.captured.hasHead = state_.Repo().detection.headResolved;
-  pendingCommit_.captured.stagedItems = state_.WorkspaceModel().staged.size();
-  pendingCommit_.stage = CommitStage::preConfirmRead;
-  ScheduleRefresh(window);
-  state_.SetStatusNote(L"创建提交前先在后台重读仓库现状（只读查询，不弹命令窗口、不改动仓库），"
-                       L"读回来后还要问齐这次提交要绑定的事实，然后给出确认框…");
+  commitFlow_.Start(*this, CaptureOperationContext(), state_.WorkspaceModel());
   RefreshTexts(window);
 }
-
-void MainWindow::ReleaseCommitAttempt(bool reclaimMessageFile) {
-  if (reclaimMessageFile && !pendingCommit_.messageFile.empty()) {
-    // 这份信息文件从没进过命令窗口，Git 不会来读它：随这次尝试一起回收。
-    platform::RemoveCommitMessageFile(pendingCommit_.messageFile);
-  }
-  pendingCommit_ = PendingCommit{};
-}
-
-void MainWindow::AbandonCommitAttempt(HWND window, std::wstring_view reason) {
-  ReleaseCommitAttempt(true);
-  state_.SetStatusNote(std::wstring(reason));
-  RefreshTexts(window);
-}
-
-void MainWindow::RequestCommitPreflightProbe(HWND window) {
-  pendingCommit_.stage = CommitStage::preConfirmProbe;
-  platform::CommitProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  commitWorker_.Request(window, kCommitProbeCompleted, std::move(request),
-                        [](const platform::CommitProbeRequest& pending) {
-                          return platform::RunCommitProbeLoad(pending);
-                        });
-  state_.SetStatusNote(L"创建提交前先在后台问齐这次提交要绑定的事实：工作区根与 Git 目录、完整分支引用、"
-                       L"HEAD 完整对象 ID、索引内容标识、Git 目录里的流程痕迹、有效配置里的提交者身份。"
-                       L"其中算索引内容用的 git write-tree 会把那棵树写进对象库、顺带刷新索引里过期的"
-                       L"文件状态（不产生提交、不移动分支、不碰工作区文件）；问回来后给出确认框…");
-  RefreshTexts(window);
-}
-
-void MainWindow::OnCommitProbeCompleted(HWND window, uint64_t completionSerial) {
-  platform::CommitProbeOutcome outcome;
-  if (!commitWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 后台控制器层：期间已发起更晚的一趟查询，这份结果不再有意义。
-  }
-  const CommitStage stage = pendingCommit_.stage;
-  if (stage != CommitStage::preConfirmProbe && stage != CommitStage::executionRecheck) {
-    return;  // 这一次尝试已经按「取消 / 换仓库 / 作废」结束，迟到的结果原样丢掉。
-  }
-  if (!state_.RepoUsable() ||
-      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
-    // 查询是在旧仓库上跑的：那份 HEAD/索引内容对当前界面显示的仓库毫无意义，
-    // 表单原样留着，用户对新仓库重新点一次即可。
-    AbandonCommitAttempt(window, L"预检完成时仓库已经换掉，这次提交没有发出任何命令，"
-                                 L"刚写的提交信息文件已删除。表单里的内容一个字都没动，"
-                                 L"请对现在的仓库重新点一次“创建提交”。");
-    return;
-  }
-  if (stage == CommitStage::preConfirmProbe) {
-    HandleCommitPreflightProbe(window, outcome);
-  } else {
-    HandleCommitRecheckProbe(window, outcome);
-  }
-}
-
-void MainWindow::HandleCommitPreflightProbe(HWND window, const platform::CommitProbeOutcome& outcome) {
-  const auto abandon = [&](std::wstring_view reason) { AbandonCommitAttempt(window, reason); };
-
-  const git::CommitFormData data = commitForm_.Capture();
-  const git::CommitFormValidity validity =
-      git::ValidateCommitForm(data, outcome.facts.committer);
-  if (!validity.Ok()) {
-    RunFormValidation(window);
-    abandon(L"预检回来之后表单校验没通过，因此没有提交任何内容：" + validity.StatusText());
-    return;
-  }
-  git::GitIdentity author;
-  std::wstring identityError;
-  if (!git::ParseGitIdentity(data.author, &author, &identityError, L"作者")) {
-    abandon(L"作者身份没能拆解成「姓名 <邮箱>」，因此没有提交任何内容：" + identityError);
-    return;
-  }
-
-  git::CommitTimeChoice authorTime;
-  git::CommitTimeChoice committerTime;
-  std::wstring refusal;
-  if (!BuildCommitTimeChoice(commitForm_.AuthorWallTime(), &authorTime, &refusal)) {
-    abandon(L"作者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
-    return;
-  }
-  if (commitForm_.TimeSyncChecked()) {
-    committerTime = authorTime;
-  } else if (!BuildCommitTimeChoice(commitForm_.CommitterWallTime(), &committerTime, &refusal)) {
-    abandon(L"提交者时间没能换算成 Git 的记录形态，因此没有提交任何内容：" + refusal);
-    return;
-  }
-
-  const git::ComposedCommitMessage composed = git::ComposeCommitMessage(data);
-  if (!composed.rejectedCoauthors.empty() || composed.message.empty()) {
-    // 校验已经过了才会走到这里，出现这种组合说明表单内容在校验之后又被改动了：
-    // 宁可不提交，也不按一份没核对过的内容写提交信息。
-    abandon(L"提交信息合成时出现了没能解析的合作者条目，因此没有提交任何内容。"
-            L"请检查“合作者”列表后重新点击“创建提交”。");
-    return;
-  }
-
-  const platform::CommitMessageFileWrite written =
-      platform::WriteCommitMessageFile(composed.message);
-  if (!written.written) {
-    abandon(L"没有打开命令窗口，也没有对仓库做任何改动。写提交信息文件失败：" +
-            written.failureReason);
-    return;
-  }
-  // 文件已经存在了，先登记保管人：下面任何一条拒绝路径都要顺手回收它。
-  pendingCommit_.messageFile = written.path;
-
-  git::CommitPlanInput input;
-  input.model = state_.WorkspaceModel();
-  input.detection = state_.Repo().detection;
-  // 提交者可得性、那串身份文字与流程痕迹一律取自这一趟预检，不再取界面早前存下的那一份：
-  // 确认框上写的、复核时比对的必须是同一次查询问回来的同一个东西。
-  input.identity = outcome.facts;
-  input.gitExecutable = state_.Git().path;
-  input.captured = pendingCommit_.captured;
-  pendingCommit_.captured = git::CapturedSnapshot{};
-  input.author = author;
-  input.message = composed.message;
-  input.messageUtf8Bytes = written.payloadBytes;
-  input.messageFilePath = written.path;
-  input.authorTime = authorTime;
-  input.committerTime = committerTime;
-  input.timesSynced = commitForm_.TimeSyncChecked();
-
-  const git::CommitPlan plan = git::BuildCommitPlan(input);
-  if (plan.blocked) {
-    // 方案层拒绝时这条命令根本不存在，信息文件也就没人会去读：随这次尝试一起回收。
-    AbandonCommitAttempt(window, L"没有打开命令窗口，也没有对仓库做任何改动。" + plan.blockedReason);
-    return;
-  }
-
-  pendingCommit_.preflight = outcome;
-  pendingCommit_.plan = plan;
-  pendingCommit_.confirmedForm = data;
-
-  const int answer = ::MessageBoxW(window, plan.previewText.c_str(), L"创建提交前请确认",
-                                   MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
-  if (answer != IDOK) {
-    AbandonCommitAttempt(window,
-                         L"已取消：没有打开命令窗口，也没有对仓库做任何改动。刚写的提交信息文件已删除，"
-                         L"表单里的内容一个字都没动。");
-    return;
-  }
-  RequestCommitExecutionRecheck(window);
-}
-
-void MainWindow::RequestCommitExecutionRecheck(HWND window) {
-  pendingCommit_.stage = CommitStage::executionRecheck;
-  platform::CommitProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  commitWorker_.Request(window, kCommitProbeCompleted, std::move(request),
-                        [](const platform::CommitProbeRequest& pending) {
-                          return platform::RunCommitProbeLoad(pending);
-                        });
-  state_.SetStatusNote(L"点头之后、发出命令之前，把预检那组只读查询原样重发一遍：工作区根与 Git 目录 / "
-                       L"完整分支引用 / HEAD 完整对象 ID / 索引内容标识 / 流程痕迹 / 提交者身份都对得上，"
-                       L"才启动那条 git commit…");
-  RefreshTexts(window);
-}
-
-void MainWindow::HandleCommitRecheckProbe(HWND window, const platform::CommitProbeOutcome& outcome) {
-  const std::wstring change =
-      git::DescribeCommitIdentityChange(pendingCommit_.plan.identity, outcome.facts);
-  if (!change.empty()) {
-    // 复核不过：作废的是「这一份现状」，不是用户写下的内容。表单原样留着，信息文件回收，
-    // 重读回来后由用户自己决定要不要对新现状再确认一次。
-    ::MessageBoxW(window, change.c_str(), L"执行前复核：仓库又变了", MB_OK | MB_ICONWARNING);
-    AbandonCommitAttempt(window,
-                         L"执行前复核发现现状与确认框上写的不一致，因此没有发出那条提交命令。"
-                         L"表单里的内容一个字都没动，仓库状态正在重读，"
-                         L"看清现状后如仍要提交请再点一次“创建提交”。");
-    ScheduleRefresh(window);
-    return;
-  }
-  // 方案取一份副本：启动流程要把它的内容搬进命令与选项，而这次尝试的记录在启动前就被清掉。
-  const git::CommitPlan plan = pendingCommit_.plan;
-  const git::CommitFormData committedForm = pendingCommit_.confirmedForm;
-  LaunchCommit(window, plan, committedForm);
-}
-
-void MainWindow::LaunchCommit(HWND window, const git::CommitPlan& plan,
-                              const git::CommitFormData& committedForm) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  // 启动参数一律取自这份「确认框上写的、并且刚刚复核过的」身份，不再回读界面此刻的状态：
-  // 命令属于那个仓库，就不能因为界面后来换了显示而跑到别的目录去。
-  operation.gitExecutable = plan.identity.gitExecutable;
-  operation.repositoryDirectory = plan.identity.repositoryDirectory;
-  operation.arguments = plan.arguments;
-  operation.environmentOverrides = plan.environmentOverrides;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
-                        plan.identity.repositoryDirectory + L"），本次提交 " +
-                        std::to_wstring(plan.stagedItems) + L" 项已暂存内容（索引内容标识 " +
-                        git::ShortObjectId(plan.identity.indexTreeOid) + L"），等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.messageFile = plan.identity.messageFilePath;
-  options.commitOperation = true;
-  options.committedForm = committedForm;
-  // 信息文件的所有权在这里转交给 ActiveOperation：只有拿到终态（或启动失败由执行路径回收）才删，
-  // 命令窗口里的 Git 可能还在读它。
-  ReleaseCommitAttempt(false);
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    // 启动失败时信息文件已由执行路径回收，这里只补一句表单没动的说明。
-    state_.SetStatusNote(L"这次提交没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。"
-                         L"表单里的内容一个字都没动。");
-    RefreshTexts(window);
-    return;
-  }
-  if (!plan.stateChangeNote.empty()) {
-    // 用户已经看过那句「以刚读回的为准」，这一句留在状态栏里，操作结束后还能对上号。
-    state_.SetStatusNote(L"已在命令窗口启动创建提交。" + plan.stateChangeNote);
-  }
-}
-
-namespace {
-
-// 「强制撤回（仅本地）」风险确认框：按钮文字必须是这两个明确的说法，
-// MessageBox 的按钮不可自定义，所以用 TaskDialog（Common Controls v6，app.manifest 已声明）。
-// 万一 TaskDialog 初始化失败（异常环境），退回是/否形态并在正文里点明哪个按钮是什么——
-// 无论哪种形态，「强制」都只是确认越过本程序的风险提示，命令本身一字不变。
-bool ShowForceUndoConfirm(HWND window, const std::wstring& preview) {
-  TASKDIALOGCONFIG config{};
-  config.cbSize = sizeof(config);
-  config.hwndParent = window;
-  config.hInstance = ::GetModuleHandleW(nullptr);
-  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-  config.pszWindowTitle = L"撤回最近提交：风险确认";
-  config.pszMainInstruction = L"这条撤回带有需要你自己核对的风险";
-  config.pszContent = preview.c_str();
-  config.pszMainIcon = TD_WARNING_ICON;
-  const TASKDIALOG_BUTTON buttons[] = {
-      {IDYES, L"强制撤回（仅本地）"},
-      {IDNO, L"取消"},
-  };
-  config.pButtons = buttons;
-  config.cButtons = ARRAYSIZE(buttons);
-  config.nDefaultButton = IDNO;
-  int button = IDNO;
-  const HRESULT hr = ::TaskDialogIndirect(&config, &button, nullptr, nullptr);
-  if (FAILED(hr)) {
-    const int answer =
-        ::MessageBoxW(window,
-                      (preview + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“强制撤回（仅本地）”，"
-                                L"点“否”取消。）")
-                          .c_str(),
-                      L"撤回最近提交：风险确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    return answer == IDYES;
-  }
-  return button == IDYES;
-}
-
-}  // namespace
 
 void MainWindow::UndoLastCommit(HWND window) {
-  if (!RequireWritePrerequisites(window, L"撤回最近提交")) {
+  if (!AdmitGitFlow(window, app::GitFlow::undo, L"撤回最近提交")) {
     return;
   }
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-  if (pendingUndo_.probing) {
-    refuse(L"已经有一次撤回预检在跑，请等确认框出现，或先取消那一次。");
-    return;
-  }
-  if (CommitAttemptActive()) {
-    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来撤回。");
-    return;
-  }
-
-  // 记下点击瞬间界面显示的那份摘要：预检回来后与它对比，不一致时确认框必须说明
-  // 「以下以刚读回的为准」（与创建提交同一套原则，不假装旧状态还成立）。
-  pendingUndo_.captured = git::CapturedSnapshot{};
-  pendingUndo_.captured.valid = true;
-  pendingUndo_.captured.shortSha = state_.Repo().detection.shortSha;
-  pendingUndo_.captured.hasHead = state_.Repo().detection.headResolved;
-  pendingUndo_.captured.stagedItems = state_.WorkspaceModel().staged.size();
-  pendingUndo_.probing = true;
-
-  platform::UndoProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.timeoutMilliseconds = kUndoProbeTimeoutMs;
-  undoWorker_.Request(window, kUndoProbeCompleted, std::move(request),
-                      [](const platform::UndoProbeRequest& pending) {
-                        return platform::RunUndoProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"撤回最近提交前先在后台重读分支、HEAD、父提交、远端跟踪引用与工作区状态"
-                       L"（只读查询，不弹命令窗口、不改动仓库），读回来后给出确认框…");
+  undoFlow_.Start(*this, CaptureOperationContext());
   RefreshTexts(window);
-}
-
-void MainWindow::AbandonUndoAttempt(HWND window, std::wstring_view reason) {
-  pendingUndo_.probing = false;
-  pendingUndo_.captured = git::CapturedSnapshot{};
-  state_.SetStatusNote(std::wstring(reason));
-  RefreshTexts(window);
-}
-
-void MainWindow::OnUndoProbeCompleted(HWND window, uint64_t completionSerial) {
-  platform::UndoProbeOutcome outcome;
-  if (!undoWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
-  }
-  if (!pendingUndo_.probing) {
-    return;  // 不是等中的那一次（例如已按“仓库切换”作废）。
-  }
-  pendingUndo_.probing = false;
-  if (!state_.RepoUsable() ||
-      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
-    // 预检是在旧仓库上跑的：那份 HEAD/父提交/远端事实对当前界面显示的仓库毫无意义。
-    AbandonUndoAttempt(window,
-                       L"预检完成时仓库已经换掉，本次没有执行任何撤回。请对现在的仓库重新点一次“撤回最近提交”。");
-    return;
-  }
-  ConfirmAndLaunchUndo(window, outcome.facts);
-}
-
-void MainWindow::ConfirmAndLaunchUndo(HWND window, const git::UndoPreflightFacts& facts) {
-  const auto abandon = [&](std::wstring_view reason) { AbandonUndoAttempt(window, reason); };
-
-  git::UndoCommitPlanInput input;
-  input.facts = facts;
-  input.workflow = platform::ProbeRepositoryWorkflowState(state_.Repo().detection.absoluteGitDir);
-  input.repositoryRoot = state_.Repo().detection.root;
-  input.captured = pendingUndo_.captured;
-  pendingUndo_.captured = git::CapturedSnapshot{};
-
-  const git::UndoCommitPlan plan = git::BuildUndoCommitPlan(input);
-  if (plan.blocked) {
-    const std::wstring message = L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason;
-    ::MessageBoxW(window, message.c_str(), L"无法撤回最近提交", MB_OK | MB_ICONINFORMATION);
-    abandon(L"未执行撤回：" + plan.blockedReason);
-    return;
-  }
-
-  const bool proceed =
-      plan.requiresForce
-          ? ShowForceUndoConfirm(window, plan.previewText)
-          : ::MessageBoxW(window, plan.previewText.c_str(), L"撤回最近提交前请确认",
-                          MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK;
-  if (!proceed) {
-    abandon(L"已取消：没有打开命令窗口，也没有对仓库做任何改动。");
-    return;
-  }
-
-  // 用户点头之后再同步核对一次 HEAD/分支：确认框是模态的，但期间外部终端照样可能动过仓库。
-  // 对不上就取消并刷新——绝不对着已经变了的目标执行旧方案。
-  const git::UndoHeadFacts recheck = platform::CaptureUndoHeadSnapshot(
-      state_.Git().path, state_.Repo().detection.root, kUndoRecheckTimeoutMs);
-  if (!recheck.queryOk) {
-    abandon(L"确认后复核 HEAD 没能完成（" +
-            (recheck.queryFailure.empty() ? std::wstring(L"原因未知") : recheck.queryFailure) +
-            L"），本次没有执行任何命令。仓库状态正在重读，请看清现状后再来。");
-    ScheduleRefresh(window);
-    return;
-  }
-  if (recheck.branchRef != facts.head.branchRef || recheck.headObjectId != facts.head.headObjectId) {
-    abandon(L"确认之后、执行之前，HEAD/分支又变了（分支：" +
-            (recheck.branchRef.empty() ? std::wstring(L"不在分支上") : recheck.branchRef) +
-            L"；HEAD：" +
-            (recheck.headObjectId.empty() ? std::wstring(L"尚无提交")
-                                          : git::ShortObjectId(recheck.headObjectId)) +
-            L"）。本次没有执行任何命令。仓库状态正在重读，看清现状后如仍要撤回请再点一次。");
-    ScheduleRefresh(window);
-    return;
-  }
-
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
-  operation.arguments = plan.arguments;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
-                        state_.Repo().detection.root + L"），撤回提交 " +
-                        git::ShortObjectId(facts.head.headObjectId) + L"，等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.undoOperation = true;
-  options.restoreHint = plan.restoreHint;
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    state_.SetStatusNote(L"这次撤回没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
-    RefreshTexts(window);
-    return;
-  }
-  if (!plan.stateChangeNote.empty()) {
-    // 用户已经看过那句「以刚读回的为准」，这一句留在状态栏里，操作结束后还能对上号。
-    state_.SetStatusNote(L"已在命令窗口启动撤回最近提交。" + plan.stateChangeNote);
-  }
 }
 
 void MainWindow::RequestFetch(HWND window) {
-  if (!RequireWritePrerequisites(window, L"fetch")) {
+  if (!AdmitGitFlow(window, app::GitFlow::fetch, L"fetch")) {
     return;
   }
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-  if (fetchProbing_) {
-    refuse(L"已经有一次 fetch 目标预检在跑，请等它的界面出现，再点不会排队。");
-    return;
-  }
-  if (pendingPush_.stage != PushStage::none) {
-    refuse(L"「推送」还在走它的预检、复核或核实，请先让那一步结束，再来 fetch。");
-    return;
-  }
-  if (pendingUndo_.probing) {
-    refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 fetch。");
-    return;
-  }
-  if (CommitAttemptActive()) {
-    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来 fetch。");
-    return;
-  }
-
-  fetchProbing_ = true;
-  platform::FetchProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.timeoutMilliseconds = kFetchProbeTimeoutMs;
-  fetchWorker_.Request(window, kFetchProbeCompleted, std::move(request),
-                       [](const platform::FetchProbeRequest& pending) {
-                         return platform::RunFetchProbeLoad(pending);
-                       });
-  state_.SetStatusNote(L"fetch 前先在后台只读询问：当前分支、这个分支配置的远端、仓库既有远端清单，"
-                       L"外加会影响抓取范围的配置（prune／pruneTags／标签跟随与这个远端的 fetch 映射）"
-                       L"——都是只读查询，不弹命令窗口、不接触任何远端；问回来后核对范围并给出抓取目标…");
-  RefreshTexts(window);
-}
-
-void MainWindow::OnFetchProbeCompleted(HWND window, uint64_t completionSerial) {
-  platform::FetchProbeOutcome outcome;
-  if (!fetchWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
-  }
-  if (!fetchProbing_) {
-    return;  // 不是等中的那一次（例如已按「仓库切换」作废）。
-  }
-  fetchProbing_ = false;
-  const auto settle = [&](std::wstring_view reason) {
-    state_.SetStatusNote(std::wstring(reason));
-    RefreshTexts(window);
-  };
-  if (!state_.RepoUsable() ||
-      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
-    // 预检是在旧仓库上跑的：那份远端清单对当前界面显示的仓库毫无意义。
-    settle(L"预检完成时仓库已经换掉，本次没有执行 fetch。请对现在的仓库重新点一次“fetch”。");
-    return;
-  }
-  const std::wstring repositoryRoot = state_.Repo().detection.root;
-  git::FetchPlan plan = git::BuildFetchPlan(outcome.facts, repositoryRoot);
-
-  if (plan.state == git::FetchPlanState::chooseRemote) {
-    // 分支配置定不下目标：把既有远端一个个摆出来，目标（名字与 URL）必须看得见才谈得上「不猜」。
-    platform::RemoteChoiceSpec spec;
-    spec.title = L"选择 fetch 的远端";
-    spec.label = plan.explanation;
-    for (const git::FetchRemoteEntry& entry : plan.candidates) {
-      spec.items.push_back({entry.name, entry.fetchUrl});
-    }
-    spec.font = metrics_.Font();
-    spec.layout.margin = metrics_.Margin();
-    spec.layout.gap = metrics_.RowGap();
-    spec.layout.width = metrics_.Scale(420);
-    spec.layout.labelHeight = 3 * metrics_.LabelHeight();  // 「为什么要在这里选」那句说明留三行。
-    spec.layout.listHeight = metrics_.Scale(140);
-    spec.layout.buttonWidth = metrics_.ButtonWidth(L"抓取选中的远端");
-    spec.layout.buttonHeight = metrics_.ControlHeight();
-    const platform::RemoteChoiceResult choice = platform::PromptForRemoteChoice(window, spec);
-    if (!choice.accepted || choice.selectedIndex < 0 ||
-        static_cast<size_t>(choice.selectedIndex) >= plan.candidates.size()) {
-      settle(L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
-      return;
-    }
-    plan = git::ChooseFetchRemote(outcome.facts,
-                                  plan.candidates[static_cast<size_t>(choice.selectedIndex)].name,
-                                  repositoryRoot);
-  }
-
-  if (plan.state != git::FetchPlanState::ready) {
-    const std::wstring message = L"没有打开命令窗口，也没有接触任何远端或改动仓库。\n\n" + plan.explanation;
-    ::MessageBoxW(window, message.c_str(), L"现在不能 fetch", MB_OK | MB_ICONINFORMATION);
-    settle(L"未执行 fetch。");
-    return;
-  }
-
-  const int answer = ::MessageBoxW(window, plan.confirmationText.c_str(), L"fetch 前请确认",
-                                   MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2);
-  if (answer != IDOK) {
-    settle(L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
-    return;
-  }
-  LaunchFetch(window, plan);
-}
-
-void MainWindow::LaunchFetch(HWND window, const git::FetchPlan& plan) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
-  // 参数按数组提交，不进任何 shell 字符串；目标只认名字，URL 由 Git 自己按配置解析。
-  operation.arguments = plan.arguments;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（目标：" + plan.remoteName +
-                        L" @ " +
-                        (plan.remoteUrl.empty() ? std::wstring(L"URL 未记录") : plan.remoteUrl) +
-                        L"），等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.fetchOperation = true;
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    state_.SetStatusNote(L"这次 fetch 没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
-    RefreshTexts(window);
-  }
-}
-
-bool MainWindow::ShowPullRiskConfirm(HWND window, const std::wstring& preview) {
-  // 与「强制撤回（仅本地）」同一套规矩：按钮文字必须说清点的到底是哪两样。
-  // 这里的「继续」只越过本程序的风险提示，不追加任何更激烈的参数——命令与无风险时一字不差，
-  // 尤其不含 --force、--no-verify、--autostash，也不会替你 reset/abort。
-  TASKDIALOGCONFIG config{};
-  config.cbSize = sizeof(config);
-  config.hwndParent = window;
-  config.hInstance = ::GetModuleHandleW(nullptr);
-  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-  config.pszWindowTitle = L"pull 整合：风险确认";
-  config.pszMainInstruction = L"这份预检带有需要你自己核对的风险";
-  config.pszContent = preview.c_str();
-  config.pszMainIcon = TD_WARNING_ICON;
-  const TASKDIALOG_BUTTON buttons[] = {
-      {IDYES, L"按这份预检继续整合"},
-      {IDNO, L"取消"},
-  };
-  config.pButtons = buttons;
-  config.cButtons = ARRAYSIZE(buttons);
-  config.nDefaultButton = IDNO;
-  int button = IDNO;
-  const HRESULT hr = ::TaskDialogIndirect(&config, &button, nullptr, nullptr);
-  if (FAILED(hr)) {
-    const int answer =
-        ::MessageBoxW(window,
-                      (preview + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“按这份预检继续整合”，"
-                                L"点“否”取消。）")
-                          .c_str(),
-                      L"pull 整合：风险确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    return answer == IDYES;
-  }
-  return button == IDYES;
-}
-
-void MainWindow::AbandonPullAttempt(HWND window, std::wstring_view reason) {
-  pendingPull_ = PendingPull{};
-  state_.SetStatusNote(std::wstring(reason));
+  fetchFlow_.Start(*this, CaptureOperationContext());
   RefreshTexts(window);
 }
 
 void MainWindow::RequestPull(HWND window) {
-  if (!RequireWritePrerequisites(window, L"pull")) {
+  if (!AdmitGitFlow(window, app::GitFlow::pull, L"pull")) {
     return;
   }
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-  if (pendingPull_.stage != PullStage::none) {
-    refuse(L"已经有一次 pull 在走流程（预检、获取或整合），请等它结束或先取消那一步。");
-    return;
-  }
-  if (pendingPush_.stage != PushStage::none) {
-    refuse(L"「推送」还在走它的预检、复核或核实，请先让那一步结束，再来 pull。");
-    return;
-  }
-  if (fetchProbing_) {
-    refuse(L"「fetch」的目标预检还在跑，请先等它的界面出现，再来 pull。");
-    return;
-  }
-  if (pendingUndo_.probing) {
-    refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来 pull。");
-    return;
-  }
-  if (CommitAttemptActive()) {
-    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来 pull。");
-    return;
-  }
-
-  pendingPull_.stage = PullStage::fetchProbe;
-  platform::PullProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
-  request.timeoutMilliseconds = kPullProbeTimeoutMs;
-  request.includeRelationship = false;
-  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
-                      [](const platform::PullProbeRequest& pending) {
-                        return platform::RunPullProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"pull 第一步：先在后台只读问清「在哪个分支、这个分支的上游是谁、你的 "
-                       L"pull/rebase 与 ff 配置怎么写的、会影响抓取范围的配置（prune／标签／fetch 映射）、"
-                       L"工作区现状」（不弹命令窗口、不接触任何远端），问回来后先把要处理的分支对摆给你看…");
+  pullFlow_.Start(*this, CaptureOperationContext());
   RefreshTexts(window);
 }
 
-void MainWindow::OnPullProbeCompleted(HWND window, uint64_t completionSerial) {
-  platform::PullProbeOutcome outcome;
-  if (!pullWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
-  }
-  const PullStage stage = pendingPull_.stage;
-  if (stage == PullStage::none) {
-    return;  // 这一次 pull 已经按「取消 / 换仓库 / 结案」作废，迟到的结果原样丢掉。
-  }
-  if (!state_.RepoUsable() ||
-      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
-    AbandonPullAttempt(window,
-                       L"预检完成时仓库已经换掉，这次 pull 没有执行任何命令。请对现在的仓库重新点一次「pull」。");
+void MainWindow::RequestPush(HWND window) {
+  if (!AdmitGitFlow(window, app::GitFlow::push, L"推送")) {
     return;
   }
-  switch (stage) {
-    case PullStage::fetchProbe:
-      HandlePullFetchProbe(window, outcome);
-      break;
-    case PullStage::integrateProbe:
-      HandlePullIntegrateProbe(window, outcome);
-      break;
-    case PullStage::recheckProbe:
-      HandlePullRecheckProbe(window, outcome);
-      break;
-    default:
-      AbandonPullAttempt(window, L"预检回来时这次 pull 已经不在等它了，没有执行任何命令。");
-      break;
-  }
-}
-
-void MainWindow::HandlePullFetchProbe(HWND window, const platform::PullProbeOutcome& outcome) {
-  const git::PullFetchPlan plan =
-      git::BuildPullFetchPlan(outcome.target, state_.Repo().detection.root);
-  if (plan.state == git::PullFetchPlanState::blocked) {
-    ::MessageBoxW(window, plan.explanation.c_str(), L"现在不能 pull", MB_OK | MB_ICONINFORMATION);
-    AbandonPullAttempt(window,
-                       L"未执行 pull：前提不成立（原因见刚才的说明框）。没有打开命令窗口，也没有接触"
-                       L"任何远端或改动仓库。");
-    return;
-  }
-  const int answer = ::MessageBoxW(window, plan.confirmationText.c_str(), L"pull 第一步：先获取，请确认",
-                                   MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2);
-  if (answer != IDOK) {
-    AbandonPullAttempt(window,
-                       L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。整合这一步更没有被谈起。");
-    return;
-  }
-
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
-  operation.arguments = plan.arguments;  // 目标只认远端名字，URL 由 Git 自己按配置解析。
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第一步：获取；" +
-                        plan.remoteName + L" → " + plan.trackingRef + L"），等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.pullFetchOperation = true;
-  pendingPull_.stage = PullStage::fetching;
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    state_.SetStatusNote(L"这次 pull 停在第一步：命令窗口未能打开，或启动失败（原因见上一行状态）。"
-                         L"远端没有被接触，仓库也没有改动。");
-    pendingPull_ = PendingPull{};
-    RefreshTexts(window);
-  }
-}
-
-void MainWindow::OnPullFetchSettled(HWND window, bool fetchSucceeded) {
-  if (pendingPull_.stage != PullStage::fetching) {
-    // 通知迟到（期间换了仓库、或这一步已按别的路径结案）：绝不能凭这份旧状态继续往下整合。
-    pendingPull_ = PendingPull{};
-    return;
-  }
-  if (!fetchSucceeded) {
-    pendingPull_ = PendingPull{};
-    state_.SetStatusNote(L"pull 停在第一步：命令窗口里那次获取没有成功，因此没有做任何整合。"
-                         L"远端跟踪引用有没有被这次抓取改动，以正在重读的现状为准；本程序不自动重试，"
-                         L"也不会因此 prune、改用别的远端或改写任何远端配置。原因看命令窗口里 Git 的真实输出。");
-    RefreshTexts(window);
-    return;
-  }
-
-  pendingPull_.stage = PullStage::integrateProbe;
-  pendingPull_.fetchAlreadyRan = true;
-  platform::PullProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
-  request.timeoutMilliseconds = kPullProbeTimeoutMs;
-  request.includeRelationship = true;
-  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
-                      [](const platform::PullProbeRequest& pending) {
-                        return platform::RunPullProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"获取已完成。正在后台重读仓库现状，并只读核对本地与远端的关系（各有几个独有提交、"
-                       L"共同基准、这次会带进哪些文件、内容冲突预演），判回来后将问你要不要整合…");
+  pushFlow_.Start(*this, CaptureOperationContext());
   RefreshTexts(window);
 }
 
-void MainWindow::HandlePullIntegrateProbe(HWND window, const platform::PullProbeOutcome& outcome) {
-  // 这一份事实是确认框与「执行前复核」的比对基准，必须先存下来再弹框。
-  pendingPull_.integrateFacts = outcome;
-  ComposeAndConfirmPullIntegrate(window, outcome, git::PullStrategyChoice::none);
+void MainWindow::SetStatus(std::wstring note) {
+  state_.SetStatusNote(std::move(note));
+  RefreshTexts(window_.get());
 }
 
-void MainWindow::ComposeAndConfirmPullIntegrate(HWND window, const platform::PullProbeOutcome& outcome,
-                                                git::PullStrategyChoice choice) {
-  git::PullIntegratePlanInput input;
-  input.target = outcome.target;
-  input.relationship = outcome.relationship;
-  input.repositoryRoot = state_.Repo().detection.root;
-  input.choice = choice;
-  const git::PullIntegratePlan plan = git::BuildPullIntegratePlan(input);
-
-  // 取消/拒绝时几乎都要带同一句：那次获取已经动了远端跟踪引用，而且不该被退回去。
-  const std::wstring fetchLeftover =
-      pendingPull_.fetchAlreadyRan
-          ? std::wstring(L"要说明的是：刚才那次获取（在命令窗口里跑的那条 fetch）已经把远端跟踪引用更新到"
-                         L"远端的位置，这一处改动保留着——本程序不会把它退回去，也不需要你做什么。"
-                         L"你取消的是接下来的整合：本地分支、索引与工作区都没有被动过。")
-          : std::wstring(L"没有执行整合：本地分支、索引与工作区都没有被动过，也没有接触任何远端。");
-
-  switch (plan.state) {
-    case git::PullPlanState::blocked: {
-      ::MessageBoxW(window, plan.explanation.c_str(), L"现在不能整合", MB_OK | MB_ICONINFORMATION);
-      AbandonPullAttempt(window, L"未执行整合：" + fetchLeftover);
-      return;
-    }
-    case git::PullPlanState::nothingToIntegrate: {
-      ::MessageBoxW(window, plan.explanation.c_str(), L"pull：远端没有要整合的内容",
-                    MB_OK | MB_ICONINFORMATION);
-      AbandonPullAttempt(window, plan.explanation + L"\n" + fetchLeftover);
-      return;
-    }
-    case git::PullPlanState::chooseStrategy: {
-      // 分叉而配置没定策略：合并与变基两种做法摆出来，选完还会再有一次带风险清单的确认。
-      platform::RemoteChoiceSpec spec;
-      spec.title = L"选择这次 pull 的整合方式";
-      spec.label = plan.explanation;
-      for (const std::wstring& candidate : plan.strategyCandidates) {
-        spec.items.push_back({candidate, L""});
-      }
-      spec.okText = L"按选中的方式整合";
-      spec.emptyItemDetail.clear();  // 这里没有第二栏，别补一句与远端无关的占位。
-      spec.needSelectionHint = L"先在列表里点选一种整合方式，再按确定。（取消不会执行任何命令）";
-      spec.font = metrics_.Font();
-      spec.layout.margin = metrics_.Margin();
-      spec.layout.gap = metrics_.RowGap();
-      spec.layout.width = metrics_.Scale(560);
-      spec.layout.labelHeight = 4 * metrics_.LabelHeight();  // 「为什么要在这里选」那句留四行。
-      spec.layout.listHeight = metrics_.Scale(110);
-      spec.layout.buttonWidth = metrics_.ButtonWidth(L"按选中的方式整合");
-      spec.layout.buttonHeight = metrics_.ControlHeight();
-      const platform::RemoteChoiceResult picked = platform::PromptForRemoteChoice(window, spec);
-      if (!picked.accepted || picked.selectedIndex < 0 ||
-          static_cast<size_t>(picked.selectedIndex) >= plan.strategyCandidates.size()) {
-        AbandonPullAttempt(window, L"已取消整合方式的选择：" + fetchLeftover);
-        return;
-      }
-      ComposeAndConfirmPullIntegrate(
-          window, outcome,
-          picked.selectedIndex == 0 ? git::PullStrategyChoice::chooseMerge
-                                    : git::PullStrategyChoice::chooseRebase);
-      return;
-    }
-    case git::PullPlanState::ready:
-      break;
-  }
-
-  const bool proceed =
-      plan.requiresForce
-          ? ShowPullRiskConfirm(window, plan.confirmationText)
-          : ::MessageBoxW(window, plan.confirmationText.c_str(), L"pull 第二步：整合前请确认",
-                          MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK;
-  if (!proceed) {
-    AbandonPullAttempt(window, L"已取消整合：" + fetchLeftover);
-    return;
-  }
-  pendingPull_.plan = plan;
-  RequestPullExecutionRecheck(window);
+void MainWindow::SetFormNote(std::wstring note) {
+  state_.SetFormNote(std::move(note));
+  RefreshTexts(window_.get());
 }
 
-void MainWindow::RequestPullExecutionRecheck(HWND window) {
-  pendingPull_.stage = PullStage::recheckProbe;
-  platform::PullProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
-  request.timeoutMilliseconds = kPullProbeTimeoutMs;
-  request.includeRelationship = false;
-  pullWorker_.Request(window, kPullProbeCompleted, std::move(request),
-                      [](const platform::PullProbeRequest& pending) {
-                        return platform::RunPullProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"点头之后、执行之前，再把预检那套只读查询原样重发一遍核对现状"
-                       L"（分支 / HEAD / 远端跟踪引用 / 工作区）：对得上才执行那条整合命令…");
-  RefreshTexts(window);
+void MainWindow::RefreshUi() {
+  UpdateCommandAvailability();
+  RefreshTexts(window_.get());
 }
 
-void MainWindow::HandlePullRecheckProbe(HWND window, const platform::PullProbeOutcome& outcome) {
-  const std::wstring change =
-      git::DescribePullChange(pendingPull_.integrateFacts.target, outcome.target);
-  if (!change.empty()) {
-    ::MessageBoxW(window, change.c_str(), L"执行前复核：仓库又变了", MB_OK | MB_ICONWARNING);
-    pendingPull_ = PendingPull{};
-    state_.SetStatusNote(L"执行前复核发现现状与预检时不一致，因此没有发出整合命令。"
-                         L"仓库状态正在重读，看清现状后如仍要 pull 请再点一次。");
-    RefreshTexts(window);
-    ScheduleRefresh(window);
-    return;
-  }
-  LaunchPullIntegrate(window, pendingPull_.plan);
+bool MainWindow::Confirm(const std::wstring& title, const std::wstring& body, bool warningIcon) {
+  return ::MessageBoxW(window_.get(), body.c_str(), title.c_str(),
+                       MB_OKCANCEL | (warningIcon ? MB_ICONWARNING : MB_ICONINFORMATION) |
+                           MB_DEFBUTTON2) == IDOK;
 }
 
-void MainWindow::LaunchPullIntegrate(HWND window, const git::PullIntegratePlan& plan) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
-  operation.arguments = plan.arguments;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第二步：整合；工作目录 " +
-                        state_.Repo().detection.root + L"），等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.pullIntegrateOperation = true;
-  pendingPull_.stage = PullStage::integrating;
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    state_.SetStatusNote(L"这次整合没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。" +
-                         std::wstring(pendingPull_.fetchAlreadyRan
-                                          ? L"之前那次获取只更新了远端跟踪引用，本地没有被改动。"
-                                          : L"本地没有任何改动。"));
-    pendingPull_ = PendingPull{};
-    RefreshTexts(window);
-  }
+void MainWindow::ShowInfo(const std::wstring& title, const std::wstring& body) {
+  ::MessageBoxW(window_.get(), body.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION);
 }
 
-std::wstring MainWindow::ReportPullIntegrateFailure(HWND window, git::CommandCompletion completion,
-                                                   long exitCode) {
-  const platform::PullAftermath aftermath = platform::CapturePullAftermath(
-      state_.Git().path, state_.Repo().detection.root, state_.Repo().detection.absoluteGitDir,
-      kPullRecheckTimeoutMs);
-
-  std::wstring text;
-  text += L"命令窗口里的那次整合没有完成（" + std::wstring(git::CommandCompletionLabel(completion));
-  if (completion == git::CommandCompletion::finished) {
-    // 只有 finished 携带 Git 真实给过的退出码；gitNotStarted 与未知形态没有数值可列，
-    // 由状态标签本身说明情况。
-    text += L"，Git 退出码 " + std::to_wstring(static_cast<long long>(exitCode));
-  }
-  text += L"）。\n\n";
-  text += L"当前流程：" +
-          (aftermath.workflow.HasSpecialFlowInProgress()
-               ? aftermath.workflow.SpecialFlowText()
-               : std::wstring(L"没有 Git 流程停在进行中（这次整合没有留下未完成的流程）")) +
-          L"\n";
-  if (!aftermath.conflict.readOk) {
-    text += L"未合并的文件：没能读回来（" +
-            (aftermath.conflict.readFailure.empty() ? std::wstring(L"原因未知")
-                                                    : aftermath.conflict.readFailure) +
-            L"）。以命令窗口里 Git 的真实输出为准。\n";
-  } else if (aftermath.conflict.conflictPaths.empty()) {
-    text += L"未合并的文件：无（索引里没有未合并条目，这次失败不是留下冲突的那种失败）。\n";
-  } else {
-    text += L"未合并的文件共 " + std::to_wstring(aftermath.conflict.conflictPaths.size()) + L" 个：";
-    const size_t shown = std::min(aftermath.conflict.conflictPaths.size(), size_t{8});
-    for (size_t index = 0; index < shown; ++index) {
-      text += L"\n  · " + aftermath.conflict.conflictPaths[index];
-    }
-    if (aftermath.conflict.conflictPaths.size() > shown) {
-      text += L"\n  · …（其余 " +
-              std::to_wstring(aftermath.conflict.conflictPaths.size() - shown) + L" 个见“未暂存的更改”）";
-    }
-    text += L"\n这些文件也正列在“未暂存的更改”里（重读完成后带「冲突」状态）。\n";
-  }
-  if (!aftermath.conflict.branchRef.empty()) {
-    text += L"当前分支：" + aftermath.conflict.branchRef + L"\n";
-  }
-  if (!aftermath.conflict.headObjectId.empty()) {
-    text += L"HEAD 现在在：" + git::ShortObjectId(aftermath.conflict.headObjectId) + L"\n";
-  }
-  text += L"\n本程序不会替你收尾：不会 abort、不会 reset、不会 continue，也不会选任何一方的内容——"
-          L"这些决定属于你，命令窗口里留着 Git 的完整输出。\n";
-  text += L"你可以继续那个流程（git merge --continue / git rebase --continue），"
-          L"或按你自己的判断中止（git merge --abort / git rebase --abort）。";
-
-  ::MessageBoxW(window, text.c_str(), L"pull 整合没有完成", MB_OK | MB_ICONWARNING);
-
-  std::wstring note = L"pull 整合未完成";
-  if (aftermath.workflow.HasSpecialFlowInProgress()) {
-    note += L"：仓库停在「" + aftermath.workflow.SpecialFlowText() + L"」";
-  }
-  if (!aftermath.conflict.conflictPaths.empty()) {
-    note += L"，未合并 " + std::to_wstring(aftermath.conflict.conflictPaths.size()) + L" 个文件";
-  }
-  note += L"。本程序没有 abort/reset/continue，处理现场由你决定（详见刚才的说明框）。";
-  return note;
+void MainWindow::ShowWarning(const std::wstring& title, const std::wstring& body) {
+  ::MessageBoxW(window_.get(), body.c_str(), title.c_str(), MB_OK | MB_ICONWARNING);
 }
 
-// ---- push（本步骤）----
-
-bool MainWindow::ShowPushRiskConfirm(HWND window, const std::wstring& preview) {
-  // 与 pull 整合、强制撤回同一套规矩：按钮文字说清点的是哪两样。
-  // 这里的「仍要推送」只越过本程序的风险提示，命令一个字都不加——
-  // 尤其不会补上 --force / --force-with-lease / --no-verify，那种「为了让它成功而更激烈」的事本程序不做。
+bool MainWindow::RiskConfirm(const std::wstring& title, const std::wstring& mainInstruction,
+                             const std::wstring& yesButton, const std::wstring& body) {
+  // 「强制/仍要」类风险确认框：按钮文字必须是两个明确的说法，
+  // MessageBox 的按钮不可自定义，所以用 TaskDialog（Common Controls v6，app.manifest 已声明）。
+  // 万一 TaskDialog 初始化失败（异常环境），退回是/否形态并在正文里点明哪个按钮是什么——
+  // 无论哪种形态，「强制」都只是确认越过本程序的风险提示，命令本身一字不变。
   TASKDIALOGCONFIG config{};
   config.cbSize = sizeof(config);
-  config.hwndParent = window;
+  config.hwndParent = window_.get();
   config.hInstance = ::GetModuleHandleW(nullptr);
   config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-  config.pszWindowTitle = L"推送：风险确认";
-  config.pszMainInstruction = L"这份预检带有需要你自己核对的风险";
-  config.pszContent = preview.c_str();
+  config.pszWindowTitle = title.c_str();
+  config.pszMainInstruction = mainInstruction.c_str();
+  config.pszContent = body.c_str();
   config.pszMainIcon = TD_WARNING_ICON;
   const TASKDIALOG_BUTTON buttons[] = {
-      {IDYES, L"仍要按这份预检推送"},
+      {IDYES, yesButton.c_str()},
       {IDNO, L"取消"},
   };
   config.pButtons = buttons;
@@ -3046,267 +2125,106 @@ bool MainWindow::ShowPushRiskConfirm(HWND window, const std::wstring& preview) {
   const HRESULT hr = ::TaskDialogIndirect(&config, &button, nullptr, nullptr);
   if (FAILED(hr)) {
     const int answer =
-        ::MessageBoxW(window,
-                      (preview + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“仍要按这份预检推送”，"
-                                L"点“否”取消。）")
+        ::MessageBoxW(window_.get(),
+                      (body + L"\n\n（风险确认框未能按样式打开：这里点“是”等同“" + yesButton +
+                       L"”，点“否”取消。）")
                           .c_str(),
-                      L"推送：风险确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                      title.c_str(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     return answer == IDYES;
   }
   return button == IDYES;
 }
 
-void MainWindow::AbandonPushAttempt(HWND window, std::wstring_view reason) {
-  pendingPush_ = PendingPush{};
-  state_.SetStatusNote(std::wstring(reason));
-  RefreshTexts(window);
+std::optional<size_t> MainWindow::PromptRemoteChoice(platform::RemoteChoiceSpec spec,
+                                                     const RemoteChoiceLayoutHints& hints) {
+  // 内容（标题、说明、条目、按钮文案）由控制器给出；几何与字体在这里按主窗口的 DPI 度量补齐，
+  // 与界面其它地方一致，也让控制器不接触任何度量状态。
+  spec.font = metrics_.Font();
+  spec.layout.margin = metrics_.Margin();
+  spec.layout.gap = metrics_.RowGap();
+  spec.layout.width = metrics_.Scale(hints.contentWidth);
+  spec.layout.labelHeight = hints.labelRows * metrics_.LabelHeight();
+  spec.layout.listHeight = metrics_.Scale(hints.listHeight);
+  spec.layout.buttonWidth = metrics_.ButtonWidth(spec.okText);
+  spec.layout.buttonHeight = metrics_.ControlHeight();
+  const platform::RemoteChoiceResult choice = platform::PromptForRemoteChoice(window_.get(), spec);
+  if (!choice.accepted || choice.selectedIndex < 0) {
+    return std::nullopt;
+  }
+  return static_cast<size_t>(choice.selectedIndex);
 }
 
-void MainWindow::RequestPush(HWND window) {
-  if (!RequireWritePrerequisites(window, L"推送")) {
-    return;
-  }
-  const auto refuse = [&](std::wstring_view message) {
-    state_.SetStatusNote(std::wstring(message));
-    RefreshTexts(window);
-  };
-  if (pendingPush_.stage != PushStage::none) {
-    refuse(L"已经有一次推送在走流程（预检、复核或核实），请等它结束或先取消那一步。");
-    return;
-  }
-  if (pendingPull_.stage != PullStage::none) {
-    refuse(L"「pull」还在走它的预检、获取或整合，请先让那一步结束，再来推送。");
-    return;
-  }
-  if (fetchProbing_) {
-    refuse(L"「fetch」的目标预检还在跑，请先等它的界面出现，再来推送。");
-    return;
-  }
-  if (pendingUndo_.probing) {
-    refuse(L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来推送。");
-    return;
-  }
-  if (CommitAttemptActive()) {
-    refuse(L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来推送。");
-    return;
-  }
-
-  pendingPush_.stage = PushStage::probe;
-  platform::PushProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
-  request.timeoutMilliseconds = kPushProbeTimeoutMs;
-  pushWorker_.Request(window, kPushProbeCompleted, std::move(request),
-                      [](const platform::PushProbeRequest& pending) {
-                        return platform::RunPushProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"推送前先在后台只读问清：在哪个分支、要推哪一份提交、上游是谁、"
-                       L"这次实际会推给哪个远端的哪个地址、本地相对上一次抓取领先几个"
-                       L"（只读查询，不弹命令窗口、不接触任何远端），问回来后把源分支 / 目标远端 / "
-                       L"目标分支一起摆给你确认…");
-  RefreshTexts(window);
+bool MainWindow::LaunchCommandWindow(const git::CommandWindowOperation& operation,
+                                     const CommandLaunchOptions& options) {
+  return LaunchCommandWindowOperation(window_.get(), operation, options);
 }
 
-void MainWindow::OnPushProbeCompleted(HWND window, uint64_t completionSerial) {
-  platform::PushProbeOutcome outcome;
-  if (!pushWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
-  }
-  const PushStage stage = pendingPush_.stage;
-  if (stage != PushStage::probe && stage != PushStage::recheckProbe) {
-    return;  // 这一次推送已经按「取消 / 结案」作废，迟到的结果原样丢掉。
-  }
-  if (!state_.RepoUsable() ||
-      !git::PathsEqualFolded(outcome.repositoryDirectory, state_.Repo().detection.root)) {
-    AbandonPushAttempt(window,
-                       L"预检完成时仓库已经换掉，这次推送没有执行任何命令。请对现在的仓库重新点一次「推送」。");
-    return;
-  }
-  if (stage == PushStage::probe) {
-    HandlePushProbe(window, outcome);
-  } else {
-    HandlePushRecheckProbe(window, outcome);
-  }
+void MainWindow::ScheduleRefresh() { ScheduleRefresh(window_.get()); }
+
+void MainWindow::RememberOperationConclusion(std::wstring_view conclusion) {
+  tasks_.RememberOperationConclusion(conclusion);
 }
 
-void MainWindow::HandlePushProbe(HWND window, const platform::PushProbeOutcome& outcome) {
-  const git::PushPlan plan = git::BuildPushPlan(outcome.facts, state_.Repo().detection.root);
-  if (plan.state == git::PushPlanState::blocked) {
-    ::MessageBoxW(window, plan.explanation.c_str(), L"现在不能推送", MB_OK | MB_ICONINFORMATION);
-    AbandonPushAttempt(window,
-                       L"未执行推送：前提不成立（原因见刚才的说明框）。没有打开命令窗口，"
-                       L"也没有接触任何远端、没有改动仓库。");
-    return;
-  }
-  const bool proceed =
-      plan.requiresForce
-          ? ShowPushRiskConfirm(window, plan.confirmationText)
-          : ::MessageBoxW(window, plan.confirmationText.c_str(), L"推送前请确认",
-                          MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK;
-  if (!proceed) {
-    AbandonPushAttempt(window,
-                       L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
-    return;
-  }
-  pendingPush_.preflight = outcome;  // 复核要拿它当「预检时的那份现状」。
-  pendingPush_.plan = plan;
-  RequestPushExecutionRecheck(window);
+CommitFormSnapshot MainWindow::CaptureCommitForm() const {
+  CommitFormSnapshot snapshot;
+  snapshot.data = commitForm_.Capture();
+  snapshot.authorWall = commitForm_.AuthorWallTime();
+  snapshot.committerWall = commitForm_.CommitterWallTime();
+  snapshot.timesSynced = commitForm_.TimeSyncChecked();
+  return snapshot;
 }
 
-void MainWindow::RequestPushExecutionRecheck(HWND window) {
-  pendingPush_.stage = PushStage::recheckProbe;
-  platform::PushProbeRequest request;
-  request.exePath = state_.Git().path;
-  request.repositoryDirectory = state_.Repo().detection.root;
-  request.absoluteGitDir = state_.Repo().detection.absoluteGitDir;
-  request.timeoutMilliseconds = kPushProbeTimeoutMs;
-  pushWorker_.Request(window, kPushProbeCompleted, std::move(request),
-                      [](const platform::PushProbeRequest& pending) {
-                        return platform::RunPushProbeLoad(pending);
-                      });
-  state_.SetStatusNote(L"点头之后、执行之前，再把预检那套只读查询原样重发一遍：分支 / 要推的那一份提交 / "
-                       L"上游 / 发布目标都对得上，才发出那条 push…");
-  RefreshTexts(window);
+bool MainWindow::CommitTimesUserEdited() const { return commitForm_.TimesUserEdited(); }
+
+void MainWindow::ApplyDefaultTimesToNow() {
+  const SYSTEMTIME now = platform::CurrentLocalTime();
+  commitForm_.SetTimes(now, now);
+  RefreshTimeControlsState(window_.get());
 }
 
-void MainWindow::HandlePushRecheckProbe(HWND window, const platform::PushProbeOutcome& outcome) {
-  const std::wstring change = git::DescribePushChange(pendingPush_.preflight.facts, outcome.facts);
-  if (!change.empty()) {
-    ::MessageBoxW(window, change.c_str(), L"执行前复核：仓库又变了", MB_OK | MB_ICONWARNING);
-    pendingPush_ = PendingPush{};
-    state_.SetStatusNote(L"执行前复核发现现状与预检时不一致，因此没有发出推送命令。"
-                         L"仓库状态正在重读，看清现状后如仍要推送请再点一次。");
-    RefreshTexts(window);
-    ScheduleRefresh(window);
-    return;
-  }
-  LaunchPush(window, pendingPush_.plan);
+void MainWindow::RunFormValidation(std::wstring_view prefixNote) {
+  RunFormValidation(window_.get(), prefixNote);
 }
 
-void MainWindow::LaunchPush(HWND window, const git::PushPlan& plan) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = state_.Repo().detection.root;
-  // 参数按数组提交，不进任何 shell 字符串：命令源侧是复核确认过的完整提交 ID，目标远端只认名字，
-  // URL 不进命令行（由 Git 自己按配置解析，界面展示与核实用的那份是 get-url --push --all 的展开
-  // 回答），因此这条链路上都不会出现凭据。
-  operation.arguments = plan.arguments;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（推送 " +
-                        git::ShortObjectId(plan.pushedObjectId) + L" → 远端「" + plan.remoteName +
-                        L"」的 " + plan.remoteBranchRef + L"），等待 Git 退出码…";
-  options.scopeNotice = plan.notice;
-  options.pushOperation = true;
-  pendingPush_.stage = PushStage::pushing;
-  if (!LaunchCommandWindowOperation(window, operation, options)) {
-    state_.SetStatusNote(L"这次推送没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。"
-                         L"远端没有被接触，本地也没有任何改动。");
-    pendingPush_ = PendingPush{};
-    RefreshTexts(window);
-  }
-}
-
-void MainWindow::RequestPushVerification(HWND window, bool commandSucceeded,
-                                        std::wstring_view commandConclusion) {
-  const git::PushPlan& plan = pendingPush_.plan;
-  platform::PushVerifyRequest request;
-  request.exePath = state_.Git().path;
-  // 工作目录取预检时那个仓库的根，而不是界面此刻显示的根：点头到终态之间用户可能已经切了仓库，
-  // 但这次核实问的始终是刚才那一条推送的去向。
-  request.repositoryDirectory = pendingPush_.preflight.repositoryDirectory;
-  request.remoteBranchRef = plan.remoteBranchRef;
-  request.expectedObjectId = plan.pushedObjectId;
-  request.pushUrls = plan.pushUrls;
-  request.pushCommandSucceeded = commandSucceeded;
-  request.commandConclusion = std::wstring(commandConclusion);
-  request.timeoutMilliseconds = kPushVerifyTimeoutMs;
-  pushVerifyWorker_.Request(window, kPushVerifyCompleted, std::move(request),
-                           [](const platform::PushVerifyRequest& pending) {
-                             return platform::RunPushVerifyLoad(pending);
-                           });
-  state_.SetStatusNote(L"正在向确认框上列出的那些**发布目标**发只读 ls-remote，核对那条引用到底停在"
-                       L"哪一份提交（这一步要按发布目标的地址问，不是按本地那个远端跟踪引用；"
-                       L"需要认证时由 Git 自己的方式处理，可能要等一会儿）…");
-  RefreshTexts(window);
-}
-
-void MainWindow::OnPushVerifyCompleted(HWND window, uint64_t completionSerial) {
-  platform::PushVerifyOutcome outcome;
-  if (!pushVerifyWorker_.FetchLatest(completionSerial, &outcome)) {
-    return;  // 更晚一次的核实已经取代了它（或这一次已经结案）。
-  }
-  if (pendingPush_.stage != PushStage::verifying) {
-    return;
-  }
-  pendingPush_ = PendingPush{};
-
-  const git::PushVerificationReport& report = outcome.report;
-  std::wstring text = report.headline;
-  for (const std::wstring& line : report.lines) {
-    text += L"\n" + line;
-  }
-  state_.SetStatusNote(text);
-  RefreshTexts(window);
-
-  // 「Git 说成功了却没核实上」与「核实到的位置和推出去的那一份不是一个东西」必须当面讲清楚，
-  // 状态栏那行会被后续刷新挤掉。全都对得上的场合不再多弹一次窗。
-  const bool needsDialog =
-      report.verdict == git::PushVerificationVerdict::mismatched ||
-      (outcome.pushCommandSucceeded && report.verdict != git::PushVerificationVerdict::confirmed);
-  if (needsDialog) {
-    ::MessageBoxW(window, text.c_str(), L"推送结果与发布目标的实况",
-                  MB_OK | (outcome.pushCommandSucceeded ? MB_ICONWARNING : MB_ICONINFORMATION));
-  }
-}
-
-void MainWindow::AfterCommitSucceeded(HWND window, const git::CommitFormData& committedForm) {
-  // 清空只清「屏幕上还是当时提交的那一份」的栏目：命令窗口跑的那段时间里，用户完全可能
-  // 已经开始写下一段的草稿，把那份新内容一起抹掉比不清更糟。逐栏比对，一致才清。
-  const git::CommitFormData current = commitForm_.Capture();
-  const bool clearSubject = current.subject == committedForm.subject;
-  const bool clearDescription = current.description == committedForm.description;
-  const bool clearCoauthors = current.coauthors == committedForm.coauthors;
+void MainWindow::ApplyCommittedFormCleanup(const app::CommittedFormCleanup& cleanup) {
   {
     // 清空是程序做的事：不该被记成「用户把标题改成了空」，否则紧接着的默认值逻辑会乱套。
     const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
-    commitForm_.ClearCommittedFields(clearSubject, clearDescription, clearCoauthors);
+    commitForm_.ClearCommittedFields(cleanup.clearSubject, cleanup.clearDescription,
+                                     cleanup.clearCoauthors);
   }
-  formSession_.NoteCommitted(clearSubject, clearDescription, clearCoauthors);
-
+  formSession_.NoteCommitted(cleanup.clearSubject, cleanup.clearDescription, cleanup.clearCoauthors);
   // 时间同样按「这期间有没有被人动过」决定：没人动过就回到此刻，作为下一次提交的默认；
   // 用户在那期间另选了时间的话那是新的意图，程序不能拿「提交成功」当理由把它抹掉。
-  const bool resetTimes = !commitForm_.TimesUserEdited();
-  if (resetTimes) {
+  if (cleanup.resetTimes) {
     const SYSTEMTIME now = platform::CurrentLocalTime();
     commitForm_.SetTimes(now, now);
-    RefreshTimeControlsState(window);
+    RefreshTimeControlsState(window_.get());
   }
-  std::wstring kept;
-  const auto appendKept = [&kept](bool cleared, std::wstring_view label) {
-    if (cleared) {
-      return;
-    }
-    if (!kept.empty()) {
-      kept += L"、";
-    }
-    kept += label;
-  };
-  appendKept(clearSubject, L"标题");
-  appendKept(clearDescription, L"描述");
-  appendKept(clearCoauthors, L"合作者");
-  std::wstring note = L"提交已创建：作者那一栏留着下次接着用";
-  note += resetTimes ? L"，两个时间也回到此刻。" : L"，你在这期间改过的时间原样留着，没有重置。";
-  if (kept.empty()) {
-    note += L"标题、描述与合作者里这次提交用掉的内容已清空。";
-  } else {
-    note += L"其中" + kept + L"在这期间换了内容，因此原样留着、没有清空。";
-  }
-  note += L"仓库状态正在重读。";
-  state_.SetFormNote(note);
+}
+
+void MainWindow::BeginStopAllBackgroundWorkers() {
+  gitWorker_.BeginStop();
+  repoWorker_.BeginStop();
+  workspaceWorker_.BeginStop();
+  authorWorker_.BeginStop();
+  commitFlow_.BeginStop();
+  undoFlow_.BeginStop();
+  fetchFlow_.BeginStop();
+  pullFlow_.BeginStop();
+  pushFlow_.BeginStop();
+}
+
+void MainWindow::JoinAllBackgroundWorkers() {
+  gitWorker_.Join();
+  repoWorker_.Join();
+  workspaceWorker_.Join();
+  authorWorker_.Join();
+  commitFlow_.JoinWorkers();
+  undoFlow_.JoinWorkers();
+  fetchFlow_.JoinWorkers();
+  pullFlow_.JoinWorkers();
+  pushFlow_.JoinWorkers();
 }
 
 LRESULT CALLBACK MainWindow::Thunk(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -3429,22 +2347,34 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       OnAuthorConfigCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
     case kUndoProbeCompleted:
-      OnUndoProbeCompleted(window, static_cast<uint64_t>(wParam));
+      undoFlow_.OnProbeCompleted(*this, CaptureOperationContext(),
+                                 static_cast<uint64_t>(wParam));
+      return 0;
+    case kUndoRecheckCompleted:
+      undoFlow_.OnRecheckCompleted(*this, CaptureOperationContext(),
+                                   static_cast<uint64_t>(wParam));
       return 0;
     case kFetchProbeCompleted:
-      OnFetchProbeCompleted(window, static_cast<uint64_t>(wParam));
+      fetchFlow_.OnProbeCompleted(*this, CaptureOperationContext(),
+                                  static_cast<uint64_t>(wParam));
       return 0;
     case kPullProbeCompleted:
-      OnPullProbeCompleted(window, static_cast<uint64_t>(wParam));
+      pullFlow_.OnProbeCompleted(*this, CaptureOperationContext(),
+                                 static_cast<uint64_t>(wParam));
+      return 0;
+    case kPullAftermathCompleted:
+      pullFlow_.OnAftermathCompleted(*this, static_cast<uint64_t>(wParam));
       return 0;
     case kPushProbeCompleted:
-      OnPushProbeCompleted(window, static_cast<uint64_t>(wParam));
+      pushFlow_.OnProbeCompleted(*this, CaptureOperationContext(),
+                                 static_cast<uint64_t>(wParam));
       return 0;
     case kPushVerifyCompleted:
-      OnPushVerifyCompleted(window, static_cast<uint64_t>(wParam));
+      pushFlow_.OnVerifyCompleted(*this, static_cast<uint64_t>(wParam));
       return 0;
     case kCommitProbeCompleted:
-      OnCommitProbeCompleted(window, static_cast<uint64_t>(wParam));
+      commitFlow_.OnProbeCompleted(*this, CaptureOperationContext(), state_.WorkspaceModel(),
+                                   static_cast<uint64_t>(wParam));
       return 0;
     case platform::CommandWindowRunner::kCompletionMessage:
       OnCommandWindowCompleted(
@@ -3460,17 +2390,12 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       }
       return 0;
     case WM_DESTROY:
-      // 先停掉后台线程，再交还窗口所有权；旧线程不会再向已销毁窗口发通知。
-      gitWorker_.Shutdown();
-      repoWorker_.Shutdown();
-      workspaceWorker_.Shutdown();
-      authorWorker_.Shutdown();
-      undoWorker_.Shutdown();
-      fetchWorker_.Shutdown();
-      pullWorker_.Shutdown();
-      pushWorker_.Shutdown();
-      pushVerifyWorker_.Shutdown();
-      commitWorker_.Shutdown();
+      // 两阶段收尾：先对所有后台 worker 喊停——在途查询跑完当前这一条后，剩余查询被停止
+      // 信号短路（多目标核实尤其如此）——再统一等待线程退出。总等待按「最长的一条在途
+      // 查询」计，而不是把十个探测各自的超时逐个相加；全部 Join 完成后才交还窗口所有权，
+      // 不会释放任何还被线程引用的对象。旧线程不会再向已销毁窗口发有效通知。
+      BeginStopAllBackgroundWorkers();
+      JoinAllBackgroundWorkers();
       StopOperationWatching();
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);

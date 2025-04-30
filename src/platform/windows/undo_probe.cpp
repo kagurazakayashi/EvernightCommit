@@ -43,6 +43,10 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
                                  git::BuildUndoSymbolicRefArguments(dir));
   queries.headCommit =
       RunQuery(deps.runner, request.exePath, dir, git::BuildUndoHeadCommitArguments(dir));
+  // 退出收尾：停止信号已起就不再发后续查询（这一趟结果随窗口一起作废）。
+  if (StopRequested(request.stopFlag)) {
+    return FailedFacts(L"程序正在退出，预检中止");
+  }
 
   // HEAD 可解析才追問父提交、父對象、淺倉庫狀態、標題與遠端包含：那種查詢在空倉庫裡必然非 0 退出，
   // 不是錯誤卻要解釋；而且沒有 HEAD ID 也沒有可查詢的目標。
@@ -73,6 +77,9 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
     queries.remoteRefs = RunQuery(deps.runner, request.exePath, dir, git::BuildUndoRemoteRefsArguments(dir));
     queries.remoteContains =
         RunQuery(deps.runner, request.exePath, dir, git::BuildUndoRemoteContainsArguments(dir, headSha));
+  }
+  if (StopRequested(request.stopFlag)) {
+    return FailedFacts(L"程序正在退出，预检中止");
   }
   queries.status = RunQuery(deps.runner, request.exePath, dir, git::BuildWorkspaceStatusArguments(dir));
   return git::InterpretUndoPreflight(queries);

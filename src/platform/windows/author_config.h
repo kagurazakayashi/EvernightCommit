@@ -16,6 +16,7 @@ struct AuthorConfigRequest {
   std::wstring exePath;
   std::wstring repositoryDirectory;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时第二条查询不再发起。
 };
 
 // 一次背景讀取的成品：判讀結果加上請求攜帶的目錄回顯。

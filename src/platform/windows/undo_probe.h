@@ -14,6 +14,7 @@ struct UndoProbeRequest {
   std::wstring exePath;
   std::wstring repositoryDirectory;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时逐条查询前核对，剩余查询不再发起。
 };
 
 // 一次後臺預檢的成品：判讀結果加請求攜帶的目錄回顯。
@@ -38,9 +39,9 @@ struct UndoProbeDeps {
 // 用本工程的隱藏窗口子進程執行器裝配 UndoProbeDeps。
 [[nodiscard]] UndoProbeDeps MakeUndoProbeDeps(unsigned long timeoutMilliseconds);
 
-// 用戶在確認框點頭之後、啓動命令窗口之前，界面要同步複核 HEAD 與分支——只發這兩條
-// 極輕的只讀查詢，直接在調用線程執行（本地毫秒級；超時/啓動失敗如實記進 queryOk=false，
-// 由調用方按「複核不過就放棄執行」處理）。返回的 facts 只填 symbolic-ref/rev-parse 相關字段。
+// 用戶在確認框點頭之後、啓動命令窗口之前，還要比對一次 HEAD 與分支。這一步走
+// GitTaskWorker 在後台執行（不凍結界面）：返回的 facts 只填 symbolic-ref/rev-parse
+// 相關字段，超時/啟動失敗如實記進 queryOk=false，由調用方按「複核不過就放棄執行」處理。
 [[nodiscard]] git::UndoHeadFacts CaptureUndoHeadSnapshot(const std::wstring& exePath,
                                                          const std::wstring& repositoryDirectory,
                                                          unsigned long timeoutMilliseconds);
@@ -51,5 +52,9 @@ struct UndoProbeDeps {
 // 預檢的後臺控制器：查詢在工作線程執行，GUI 線程不凍結；
 // 連續點擊時舊結果按序號作廢，不會把上一個倉庫的事實混進確認框。
 using UndoProbeWorker = GitTaskWorker<UndoProbeRequest, UndoProbeOutcome>;
+
+// 「點頭之後、發命令之前」的 HEAD/分支複核也走後台：同一種請求、只取回這一組事實。
+// 遲到的舊複核按序號作廢；複核沒回來之前不啟動命令窗口（複核不過就放棄執行）。
+using UndoHeadRecheckWorker = GitTaskWorker<UndoProbeRequest, git::UndoHeadFacts>;
 
 }  // namespace gc::platform

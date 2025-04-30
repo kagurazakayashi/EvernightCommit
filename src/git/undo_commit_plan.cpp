@@ -919,4 +919,21 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
   return plan;
 }
 
+std::wstring DescribeUndoRecheckMismatch(const UndoHeadFacts& recheck,
+                                         const UndoPreflightFacts& preflight) {
+  if (!recheck.queryOk) {
+    return L"确认后复核 HEAD 没能完成（" +
+           (recheck.queryFailure.empty() ? std::wstring(L"原因未知") : recheck.queryFailure) +
+           L"），本次没有执行任何命令。仓库状态正在重读，请看清现状后再来。";
+  }
+  if (recheck.branchRef != preflight.head.branchRef || recheck.headObjectId != preflight.head.headObjectId) {
+    return L"确认之后、执行之前，HEAD/分支又变了（分支：" +
+           (recheck.branchRef.empty() ? std::wstring(L"不在分支上") : recheck.branchRef) +
+           L"；HEAD：" +
+           (recheck.headObjectId.empty() ? std::wstring(L"尚无提交") : ShortObjectId(recheck.headObjectId)) +
+           L"）。本次没有执行任何命令。仓库状态正在重读，看清现状后如仍要撤回请再点一次。";
+  }
+  return {};
+}
+
 }  // namespace gc::git

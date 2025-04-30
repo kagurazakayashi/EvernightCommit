@@ -85,6 +85,10 @@ git::PullTargetFacts CollectPullTarget(const PullProbeRequest& request, const Pu
 
   for (const std::wstring_view key : {L"pull.rebase", L"pull.ff", L"merge.ff"}) {
     // 「没设」与「设成了什么」是两回事，四条 config 都得问一句，由判读层按退出码区分。
+    // 退出收尾：停止信号已起就不再逐条追问，剩下的现状查询同样一并发不出去。
+    if (StopRequested(request.stopFlag)) {
+      return FailedTarget(L"程序正在退出，预检中止");
+    }
     const std::vector<std::wstring> arguments = git::BuildPullConfigArguments(dir, key);
     const git::GitQueryResult result = RunQuery(deps.runner, request.exePath, dir, arguments);
     if (key == L"pull.rebase") {
@@ -98,6 +102,9 @@ git::PullTargetFacts CollectPullTarget(const PullProbeRequest& request, const Pu
 
   // 合并等效性配置（外部 merge driver、遗留策略）：它不改变命令形态，只决定冲突预演结论
   // 能不能被当成保证；读取失败按「没读回来」降档处理，绝不当成「没有」。
+  if (StopRequested(request.stopFlag)) {
+    return FailedTarget(L"程序正在退出，预检中止");
+  }
   queries.mergeEquivalenceRan = true;
   queries.mergeEquivalence = RunQuery(deps.runner, request.exePath, dir,
                                       git::BuildPullMergeEquivalenceArguments(dir));
@@ -153,6 +160,9 @@ git::PullRelationshipFacts CollectPullRelationship(const git::PullTargetFacts& t
 
   git::PullRelationshipQueries queries;
   queries.aheadBehind = firstPass.aheadBehind;
+  if (StopRequested(request.stopFlag)) {
+    return FailedRelationship(L"程序正在退出，关系核对中止");
+  }
   queries.mergeBaseRan = true;
   queries.mergeBase =
       RunQuery(deps.runner, request.exePath, dir, git::BuildPullMergeBaseArguments(dir, head, tracking));
@@ -203,21 +213,31 @@ PullProbeOutcome RunPullProbeLoad(const PullProbeRequest& request) {
   return outcome;
 }
 
-PullAftermath CapturePullAftermath(const std::wstring& exePath, const std::wstring& repositoryDirectory,
-                                   const std::wstring& absoluteGitDir,
-                                   unsigned long timeoutMilliseconds) {
+PullAftermath RunPullAftermathLoad(const PullAftermathRequest& request) {
   PullAftermath aftermath;
   // 流程痕迹的依据是 Git 目录里的档案（MERGE_HEAD、rebase-merge\ 等），与创建提交/撤回同一来源；
   // 未合并条目与分支/HEAD 的位置才是问 Git 要的。两边都只是把现场读回来，不做任何收尾。
-  aftermath.workflow = ProbeRepositoryWorkflowState(absoluteGitDir);
+  aftermath.workflow = ProbeRepositoryWorkflowState(request.absoluteGitDir);
 
-  const PullProbeDeps deps = MakePullProbeDeps(timeoutMilliseconds);
+  const PullProbeDeps deps = MakePullProbeDeps(request.timeoutMilliseconds);
+  const std::wstring& repositoryDirectory = request.repositoryDirectory;
+  // 退出收尾：停止信号已起就带着「已读到的部分」收场，剩余查询不再发起。
+  if (StopRequested(request.stopFlag)) {
+    aftermath.conflict = git::InterpretPullConflictState(git::GitQueryResult{}, git::GitQueryResult{},
+                                                         git::GitQueryResult{});
+    return aftermath;
+  }
   const git::GitQueryResult listing =
-      RunQuery(deps.runner, exePath, repositoryDirectory,
+      RunQuery(deps.runner, request.exePath, repositoryDirectory,
                git::BuildPullConflictListingArguments(repositoryDirectory));
-  const git::GitQueryResult symbolicRef = RunQuery(deps.runner, exePath, repositoryDirectory,
+  if (StopRequested(request.stopFlag)) {
+    aftermath.conflict = git::InterpretPullConflictState(listing, git::GitQueryResult{},
+                                                         git::GitQueryResult{});
+    return aftermath;
+  }
+  const git::GitQueryResult symbolicRef = RunQuery(deps.runner, request.exePath, repositoryDirectory,
                                                    git::BuildPullSymbolicRefArguments(repositoryDirectory));
-  const git::GitQueryResult headObject = RunQuery(deps.runner, exePath, repositoryDirectory,
+  const git::GitQueryResult headObject = RunQuery(deps.runner, request.exePath, repositoryDirectory,
                                                   git::BuildPullHeadObjectArguments(repositoryDirectory));
   aftermath.conflict = git::InterpretPullConflictState(listing, symbolicRef, headObject);
   return aftermath;

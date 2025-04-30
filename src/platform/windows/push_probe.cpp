@@ -75,6 +75,10 @@ git::PushPreflightFacts CollectPushPreflight(const PushProbeRequest& request,
 
   queries.configListing =
       RunQuery(deps.runner, request.exePath, dir, git::BuildPushConfigListingArguments(dir));
+  // 退出收尾：最慢的一组已经问过就不再追问发布 URL 与领先落后。
+  if (StopRequested(request.stopFlag)) {
+    return FailedPreflight(L"程序正在退出，预检中止");
+  }
 
   // 「实际推给哪个远端」要由这份配置清单裁决定出来，才能接着问那个远端的发布 URL——
   // 这一步的裁决与判读层用的是同一个函数，界面与判读因此不会各算一套目标。
@@ -141,6 +145,16 @@ PushVerifyOutcome RunPushVerifyLoad(const PushVerifyRequest& request) {
   std::vector<git::PushTargetCheck> checks;
   checks.reserve(request.pushUrls.size());
   for (const std::wstring& url : request.pushUrls) {
+    // 多目标核实的整体退出策略：程序正在退出时，剩下的发布目标按「没问过」如实记录，
+    // 不再逐个发起 ls-remote——WM_DESTROY 因此只等当前这一条在途查询，而不是全部目标排完。
+    if (StopRequested(request.stopFlag)) {
+      git::PushTargetCheck skipped;
+      skipped.url = url;
+      skipped.queried = false;
+      skipped.failure = L"程序正在退出，核对没有对它发出";
+      checks.push_back(std::move(skipped));
+      continue;
+    }
     const std::vector<std::wstring> arguments =
         git::BuildPushRemoteProbeArguments(request.repositoryDirectory, url, request.remoteBranchRef);
     // 参数构造期就拒绝（例如引用名形态不合格）时不留「没问过」的空档：直接记一条问不到的结果，

@@ -158,3 +158,56 @@ GC_TEST(commit_form_session_default_remembered_value_is_comparable) {
   session.NoteAuthorDefaultApplied(L"张三 <z@e.com>");
   GC_CHECK_MESSAGE(session.AppliedAuthorDefault() == L"张三 <z@e.com>", "重复填同一串不产生变化");
 }
+
+// ---- 提交成功后的表单收尾判定（PlanCommittedFormCleanup）----
+
+namespace {
+
+gc::git::CommitFormData FormData(std::wstring subject, std::wstring description,
+                                 std::vector<std::wstring> coauthors) {
+  gc::git::CommitFormData data;
+  data.subject = std::move(subject);
+  data.description = std::move(description);
+  data.coauthors = std::move(coauthors);
+  return data;
+}
+
+}  // namespace
+
+GC_TEST(form_cleanup_clears_only_unchanged_columns) {
+  const auto committed = FormData(L"标题甲", L"描述乙", {L"张三 <z@e.com>"});
+
+  // 屏幕上还是提交的那一份：三栏都清，时间回到此刻。
+  const auto same = FormData(L"标题甲", L"描述乙", {L"张三 <z@e.com>"});
+  const auto untouched = gc::app::PlanCommittedFormCleanup(committed, same, false);
+  GC_CHECK(untouched.clearSubject);
+  GC_CHECK(untouched.clearDescription);
+  GC_CHECK(untouched.clearCoauthors);
+  GC_CHECK(untouched.resetTimes);
+  GC_CHECK_MESSAGE(untouched.note.find(L"已清空") != std::wstring::npos,
+                   "全清时的说明要写明清了三样");
+
+  // 提交跑的那段时间里用户又写了新标题：新草稿一个字节都不能被抹掉。
+  const auto retitled = FormData(L"新的下一段标题", L"描述乙", {L"张三 <z@e.com>"});
+  const auto kept = gc::app::PlanCommittedFormCleanup(committed, retitled, false);
+  GC_CHECK_MESSAGE(!kept.clearSubject, "换过内容的标题不许清");
+  GC_CHECK(kept.clearDescription);
+  GC_CHECK_MESSAGE(kept.note.find(L"标题") != std::wstring::npos &&
+                   kept.note.find(L"原样留着") != std::wstring::npos,
+                   "说明必须点名哪一栏留着了");
+
+  // 合作者列表逐条比对：多一条也算换过内容。
+  const auto more = FormData(L"标题甲", L"描述乙", {L"张三 <z@e.com>", L"李四 <l@e.com>"});
+  const auto coauthorsChanged = gc::app::PlanCommittedFormCleanup(committed, more, false);
+  GC_CHECK_MESSAGE(!coauthorsChanged.clearCoauthors, "合作者列表变了就不许清");
+}
+
+GC_TEST(form_cleanup_keeps_user_picked_times) {
+  const auto committed = FormData(L"标题甲", L"", {});
+  const auto same = FormData(L"标题甲", L"", {});
+  // 用户在这期间亲手改过时间：那是新的意图，「提交成功」不是把它抹掉的理由。
+  const auto edited = gc::app::PlanCommittedFormCleanup(committed, same, true);
+  GC_CHECK_MESSAGE(!edited.resetTimes, "用户改过的时间必须原样留着");
+  GC_CHECK_MESSAGE(edited.note.find(L"没有重置") != std::wstring::npos,
+                   "说明要把「没重置时间」说清楚");
+}

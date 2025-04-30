@@ -10,32 +10,30 @@
 
 #include "app/app_state.h"
 #include "app/commit_form_session.h"
+#include "app/operation_gate.h"
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
-#include "git/commit_plan.h"
-#include "git/pull_plan.h"
-#include "git/push_plan.h"
 #include "git/staging_plan.h"
-#include "git/undo_commit_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
-#include "platform/windows/commit_probe.h"
-#include "platform/windows/fetch_probe.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
-#include "platform/windows/pull_probe.h"
-#include "platform/windows/push_probe.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
-#include "platform/windows/undo_probe.h"
 #include "platform/windows/workspace_status.h"
 #include "ui/action_bar.h"
 #include "ui/changes_pane.h"
+#include "ui/commit_flow.h"
 #include "ui/commit_form.h"
 #include "ui/controls.h"
+#include "ui/fetch_flow.h"
 #include "ui/layout.h"
+#include "ui/operation_host.h"
+#include "ui/pull_flow.h"
+#include "ui/push_flow.h"
 #include "ui/repo_bar.h"
 #include "ui/splitter.h"
+#include "ui/undo_flow.h"
 #include "ui/ui_metrics.h"
 
 namespace gc::ui {
@@ -43,39 +41,11 @@ namespace gc::ui {
 inline constexpr const wchar_t* kMainWindowWindowClass = L"EvernightCommit.MainWindow";
 inline constexpr const wchar_t* kWindowTitle = L"Git 提交工具";
 
-// 一次命令窗口操作的发起参数。查看类操作（viewKind 有值）与写操作在“退出码算什么”上
-// 语义不同，所以这里带的不是文案，而是判定所需的类别。
-struct CommandLaunchOptions {
-  app::OperationExitPolicy policy = app::OperationExitPolicy::requireZeroExit;
-  std::wstring startedNote;   // 启动成功后立刻写进“任务状态”的说明
-  std::wstring scopeNotice;   // 随状态一起显示的范围说明（子模块指针/二进制/摘要上限）
-  std::optional<git::DiffViewKind> viewKind;
-  // 本次操作独占的路径清单临时文件（git add 用）。Git 还在读它的时候绝不能删，
-  // 因此所有权随操作一起交给 ActiveOperation，只在拿到终态或启动失败时回收。
-  std::wstring pathspecFile;
-  // 本次操作独占的提交信息临时文件（git commit -F 用），回收规则与清单文件同一套。
-  std::wstring messageFile;
-  // 这次是「创建提交」：只有确认它创建成功，界面才清空已提交的标题/描述/合作者。
-  bool commitOperation = false;
-  // 这次「创建提交」真正提交的那一份表单内容（标题/描述/合作者）。命令窗口跑的那几分钟里
-  // 用户完全可能又打了新东西，收尾时只有「屏幕上还是这一份」的栏目才允许清空。
-  git::CommitFormData committedForm;
-  // 这次是「撤回最近提交」：成功时把恢复线索（原提交完整 ID）拼进结果说明。
-  bool undoOperation = false;
-  std::wstring restoreHint;
-  // 这次是「fetch」：结论里追加一句范围承诺（只更新了远端跟踪引用；失败时不自动重试）。
-  bool fetchOperation = false;
-  // 这次是「pull 的第一步：获取」。它的完成不是终态——还要接着做阶段二预检并再问一次才整合，
-  // 因此界面要在终态里认出「这一步属于哪一次 pull」。
-  bool pullFetchOperation = false;
-  // 这次是「pull 的第二步：整合」。非 0 退出时界面要把现场读回来如实说（冲突文件、卡在哪一步）。
-  bool pullIntegrateOperation = false;
-  // 这次是「推送」：终态之后还要向发布目标做一次只读核对，成功与否以那份实况参与结论。
-  bool pushOperation = false;
-};
-
-// 主窗口：只做窗口过程分发、子面板装配与布局调用，业务状态留在 app::AppState。
-class MainWindow {
+// 主窗口：窗口过程分发、子面板装配与布局、基础设施读取（Git 验证/仓库识别/工作区/作者身份）、
+// 命令窗口执行器；五个被编排的 Git 操作（创建提交/撤回/fetch/pull/推送）各由一个操作控制器
+// 负责编排，本类通过 OperationHost 接口只提供「呈现确认与结果、启动命令窗口、请求刷新」这些
+// 服务，不再在成员里保存这些操作的中间状态。
+class MainWindow : private CommitOperationHost {
 public:
   MainWindow() = default;
   MainWindow(const MainWindow&) = delete;
@@ -142,7 +112,7 @@ private:
   // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
   void InitializeCommandWatching(HWND window);
   // 提交一次命令窗口操作：状态登记、槽位占用与失败结案都在这里，
-  // status 按钮与“双击查看差异”共用同一条路径，两种入口的行为完全一致。
+  // status 按钮、“双击查看差异”与五个操作控制器的启动共用同一条路径，入口不同行为完全一致。
   [[nodiscard]] bool LaunchCommandWindowOperation(HWND window,
                                                  const git::CommandWindowOperation& operation,
                                                  const CommandLaunchOptions& options);
@@ -168,7 +138,13 @@ private:
 
   // 写操作共同的执行前提核对：Git 与仓库可用、没有别的命令窗口操作在跑、
   // 界面显示的工作区根仍然是协调器绑定的那一个。不通过时写好状态栏并返回 false。
+  // （判定规则与文案在 app/operation_gate；暂存/查看类只走这一层，
+  //   五个被编排的操作另有 AdmitGitFlow 的流程互斥裁决。）
   [[nodiscard]] bool RequireWritePrerequisites(HWND window, std::wstring_view actionLabel);
+  // 被编排操作的统一入口裁决：共同前提 + 「谁正走在自己的流程里」。拒绝时写好状态栏并返回 false。
+  [[nodiscard]] bool AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_view actionLabel);
+  // 把界面上的可变状态在这一刻拷成只读快照，交给操作控制器；控制器全程只认这份快照。
+  [[nodiscard]] OperationContext CaptureOperationContext() const;
   // 把选中的行号逐行核对成条目快照：行数、行号对应的条目、路径与状态都要和刚读回来的模型一致，
   // 任何一处对不上就整份拒绝（*refusal 给出要显示的原因，此时返回空）。
   [[nodiscard]] std::vector<git::ChangeItem> CaptureCheckedSelection(
@@ -220,120 +196,49 @@ private:
   // 编程式改写「作者」输入框：期间抑制 EN_CHANGE，免得把程序填的值记成用户输入。
   void SetAuthorField(HWND window, const std::wstring& text);
 
-  // ---- 创建提交（本步骤）----
-  // 一次「创建提交」要走三段只读动作，全程不碰命令窗口，直到最后一步才发命令：
-  //   点击 → 后台重读工作区状态（列表）→ 后台问一组身份事实（预检）→ 确认框
-  //   → 点头 → 同一组查询原样重发一遍（执行前复核）→ 对得上才启动命令窗口。
-  // 确认范围与实际索引的一致就靠这两趟同构查询：确认框摆的是预检那一份，
-  // 发命令前逐条复核的也是那一份，启动时的工作目录与 git.exe 一律取自方案本身。
+  // ---- 五个被编排操作的按钮入口 ----
+  // 每个入口只做三件事：准入裁决（app/operation_gate）→ 采集只读快照 → 把流程交给对应控制器。
+  // 之后的预检、确认、复核、启动、完成、验证与清理都在各控制器的文件里。
   void CreateCommit(HWND window);
-  // 列表读回来后发起身份预检（确认框之前的那一趟）。
-  void RequestCommitPreflightProbe(HWND window);
-  // 预检/复核回来：按 pendingCommit_.stage 分派，迟到的或换了仓库的结果一律作废。
-  void OnCommitProbeCompleted(HWND window, uint64_t completionSerial);
-  // 预检回来：合成方案（确认框摆的就是这份方案），点头后把方案与预检事实一起留下，
-  // 再做执行前复核。
-  void HandleCommitPreflightProbe(HWND window, const platform::CommitProbeOutcome& outcome);
-  // 点头之后、发命令之前：把预检那组查询原样重发一遍。
-  void RequestCommitExecutionRecheck(HWND window);
-  // 复核回来：逐条比对「确认框上那一份」与「刚刚读回的这一份」，任何一条不符就不发命令。
-  void HandleCommitRecheckProbe(HWND window, const platform::CommitProbeOutcome& outcome);
-  // 在命令窗口里启动一条已复核通过的提交方案（工作目录与 git.exe 都取自方案绑定的身份）。
-  void LaunchCommit(HWND window, const git::CommitPlan& plan, const git::CommitFormData& committedForm);
-  // 放弃这次提交（核对失败、用户取消、复核不过）：删掉刚写的信息文件（还没交给 Git 的那份），
-  // 把原因写进状态栏，表单一个字都不动。
-  void AbandonCommitAttempt(HWND window, std::wstring_view reason);
-  // 这次尝试到此为止：清掉阶段标记、点击瞬间的摘要、预检事实与方案。
-  // 信息文件归本方案保管时（还没进命令窗口）一并回收；命令已经启动的那一路必须传 false，
-  // 因为那份文件此刻是 ActiveOperation 的财产，Git 可能还在读。
-  void ReleaseCommitAttempt(bool reclaimMessageFile);
-  // 还有没有一次「创建提交」在走它自己的只读流程（重读/预检/复核）：其它写操作入口据此拒绝，
-  // 免得两条流程同时改同一份索引。
-  [[nodiscard]] bool CommitAttemptActive() const noexcept { return pendingCommit_.stage != CommitStage::none; }
-  // 把一段墙上时间换算成「交给 Git 的值 + 给人看的说明」；失败时写原因并返回 false。
-  [[nodiscard]] bool BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
-                                           std::wstring* refusal) const;
+  void UndoLastCommit(HWND window);
+  void RequestFetch(HWND window);
+  void RequestPull(HWND window);
+  void RequestPush(HWND window);
+
   // 时间控件的联动与说明：勾选同步时提交者跟着作者、提交者那两块置灰，
   // 并把「所选作者时间实际生效的 UTC 偏移」写进本机时区那句说明里。
   void RefreshTimeControlsState(HWND window);
   // 恢复当前时间：控件回到此刻、清掉「用户改过时间」的记号（这是那条明确的退路）。
   void ResetCommitTimesToNow(HWND window);
-  // 提交创建成功后的表单收尾：只清「屏幕上还是当时提交的那一份」的栏目，作者与用户改过的时间留着。
-  void AfterCommitSucceeded(HWND window, const git::CommitFormData& committedForm);
 
-  // ---- 撤回最近提交（本步骤）----
-  // 点击「撤回最近提交」：核对写操作共同前提后，发起一轮只读预检（分支 / HEAD 完整 ID /
-  // 父提交 / 远端跟踪包含 / 工作区状态）。预检回来之前不弹任何确认框，也不碰仓库。
-  void UndoLastCommit(HWND window);
-  // 预检回来：判读成方案。blocked 直接说明原因；有可继续风险时确认框要求「强制撤回（仅本地）」；
-  // 用户点头后还要同步复核一次 HEAD/分支，对得上才启动命令窗口。
-  void OnUndoProbeCompleted(HWND window, uint64_t completionSerial);
-  void ConfirmAndLaunchUndo(HWND window, const git::UndoPreflightFacts& facts);
-  // 放弃这次撤回（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
-  void AbandonUndoAttempt(HWND window, std::wstring_view reason);
+  // ---- OperationHost / CommitOperationHost：控制器对界面唯一的接触面 ----
+  // 每个方法都只做「呈现给定的内容」或「对整界面做一次重画」，不返回任何可变引用；
+  // 控制器需要的数据一律经 CaptureOperationContext 的快照传入，不从这里回头读窗口状态。
+  void SetStatus(std::wstring note) override;
+  void SetFormNote(std::wstring note) override;
+  void RefreshUi() override;
+  bool Confirm(const std::wstring& title, const std::wstring& body, bool warningIcon) override;
+  void ShowInfo(const std::wstring& title, const std::wstring& body) override;
+  void ShowWarning(const std::wstring& title, const std::wstring& body) override;
+  bool RiskConfirm(const std::wstring& title, const std::wstring& mainInstruction,
+                   const std::wstring& yesButton, const std::wstring& body) override;
+  std::optional<size_t> PromptRemoteChoice(platform::RemoteChoiceSpec spec,
+                                           const RemoteChoiceLayoutHints& hints) override;
+  bool LaunchCommandWindow(const git::CommandWindowOperation& operation,
+                           const CommandLaunchOptions& options) override;
+  void ScheduleRefresh() override;
+  void RememberOperationConclusion(std::wstring_view conclusion) override;
+  [[nodiscard]] CommitFormSnapshot CaptureCommitForm() const override;
+  [[nodiscard]] bool CommitTimesUserEdited() const override;
+  void ApplyDefaultTimesToNow() override;
+  void RunFormValidation(std::wstring_view prefixNote) override;
+  void ApplyCommittedFormCleanup(const app::CommittedFormCleanup& cleanup) override;
 
-  // ---- fetch（已接通）----
-  // 点击「fetch」：核对共同前提后发起一次只读目标预检（当前分支 / 分支配置的远端 /
-  // 远端清单）。预检回来之前不弹任何框、不发任何对外命令。
-  void RequestFetch(HWND window);
-  // 预检回来：判读成方案。目标唯一 → 确认框；定不下来 → 远端选择界面列出既有远端；
-  // 没有远端/查询失败 → 如实说明，不猜 origin、不创建远端、不改配置。
-  void OnFetchProbeCompleted(HWND window, uint64_t completionSerial);
-  // 在命令窗口里启动一条确定的 fetch 方案（确认框已由调用方点头）。
-  void LaunchFetch(HWND window, const git::FetchPlan& plan);
-
-  // ---- pull（本步骤）----
-  // pull 分两步，两步都在命令窗口里看得见，中间夹两次只读预检：
-  //   获取（fetch）→ 重读事实并判出关系/风险/策略 → 点头 → 执行前复核 → 整合（merge / rebase）。
-  // 点击「pull」：核对共同前提后发起阶段一只读预检（分支 / HEAD / 上游 / 策略配置 / 现状）。
-  void RequestPull(HWND window);
-  // 预检回来，按 pendingPull_.stage 分派到下面三条路之一（迟到或换仓库的结果一律作废）。
-  void OnPullProbeCompleted(HWND window, uint64_t completionSerial);
-  // 阶段一：给出「本地分支 ← 远端分支」的确认框，点头才在命令窗口里 fetch。
-  void HandlePullFetchProbe(HWND window, const platform::PullProbeOutcome& outcome);
-  // 抓取的操作终态回来：成功才继续做阶段二预检；失败就停在这里（不自动重试、不改配置）。
-  void OnPullFetchSettled(HWND window, bool fetchSucceeded);
-  // 阶段二：判关系与风险 → 需要时让用户选合并/变基 → 给带风险清单的确认框。
-  void HandlePullIntegrateProbe(HWND window, const platform::PullProbeOutcome& outcome);
-  // 用给定的策略选择合成方案，并按方案的状态走「说明 / 选择框 / 确认框」三条路之一。
-  void ComposeAndConfirmPullIntegrate(HWND window, const platform::PullProbeOutcome& outcome,
-                                      git::PullStrategyChoice choice);
-  // 确认框点头之后：在后台把预检那套只读查询重发一遍，比对两回事实——一致才启动整合命令。
-  void RequestPullExecutionRecheck(HWND window);
-  void HandlePullRecheckProbe(HWND window, const platform::PullProbeOutcome& outcome);
-  // 在命令窗口里启动一条确定的整合方案（复核已通过）。
-  void LaunchPullIntegrate(HWND window, const git::PullIntegratePlan& plan);
-  // 整合没跑成：把现场读回来（还有没有流程在走、哪些文件未合并），如实告诉用户程序不会替他收尾。
-  // 弹出的说明框由本函数负责；返回值是写进状态栏的那句结论（同时并进操作的终态说明里）。
-  [[nodiscard]] std::wstring ReportPullIntegrateFailure(HWND window, git::CommandCompletion completion,
-                                                        long exitCode);
-  // 放弃这次 pull（预检失败、用户取消、复核不过）：原因写进状态栏，必要时说明 fetch 的遗留影响。
-  void AbandonPullAttempt(HWND window, std::wstring_view reason);
-  // 风险确认框：按钮是「仍要按这份预检继续整合」与「取消」，跟撤回那套一样走 TaskDialog。
-  [[nodiscard]] bool ShowPullRiskConfirm(HWND window, const std::wstring& preview);
-
-  // ---- push（本步骤）----
-  // 推送只有一个可见阶段：命令窗口里那一条 `git push`。它前后各夹一次后台只读动作：
-  //   预检（分支/HEAD/上游/生效配置/发布 URL/领先落后）→ 点头 → 执行前复核 → 命令窗口 push
-  //   → 终态 → 向**发布目标**逐条只读核实那条引用停在哪。
-  // 点击「推送」：核对共同前提后发起预检。预检回来之前不弹任何框、不接触任何远端。
-  void RequestPush(HWND window);
-  // 预检回来：判读成方案。blocked 只说明原因；ready 给确认框（有风险时要求明确点「仍要推送」）。
-  void OnPushProbeCompleted(HWND window, uint64_t completionSerial);
-  void HandlePushProbe(HWND window, const platform::PushProbeOutcome& outcome);
-  // 确认框点头之后：把预检那套只读查询原样重发一遍，比对两回事实——一致才启动那条命令。
-  void RequestPushExecutionRecheck(HWND window);
-  void HandlePushRecheckProbe(HWND window, const platform::PushProbeOutcome& outcome);
-  // 在命令窗口里启动一条确定的推送方案（复核已通过）。
-  void LaunchPush(HWND window, const git::PushPlan& plan);
-  // 推送终态回来：无论成败都要向发布目标核实（失败时那份实况正是解释「到底送没送到」的证据）。
-  void RequestPushVerification(HWND window, bool commandSucceeded, std::wstring_view commandConclusion);
-  // 核实结果回来：结论写进状态栏；与命令窗口的结论不符时另开一个说明框，把逐目标证据摆出来。
-  void OnPushVerifyCompleted(HWND window, uint64_t completionSerial);
-  // 风险确认框：与 pull 整合同一套规矩——「仍要推送」只越过本程序的提示，命令一个字都不加。
-  [[nodiscard]] bool ShowPushRiskConfirm(HWND window, const std::wstring& preview);
-  // 放弃这次推送（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。
-  void AbandonPushAttempt(HWND window, std::wstring_view reason);
+  // 窗口收尾的两阶段：先对所有后台 worker 喊停（在途查询跑完后剩余查询被停止信号短路），
+  // 再逐个 Join 等待线程真正退出。总等待按「最长的一条在途查询」计，
+  // 不是把每个探测的超时相加；Join 完成前不释放任何还被线程引用的对象。
+  void BeginStopAllBackgroundWorkers();
+  void JoinAllBackgroundWorkers();
 
   // 一次在途的外部命令窗口操作：协调器保管“同时只许一个”的规则与结论，
   // 这里只保存它与执行器操作 ID 的对应关系（通知里只带执行器 ID）。
@@ -341,7 +246,7 @@ private:
     unsigned long long serial = 0;  // 协调器序号；0 表示没有在途操作
     unsigned long long runnerId = 0;
     std::wstring displayName;
-    // 这次查看的范围说明（子模块只给指针差异、二进制不输出内容、大文件只给摘要）。
+    // 这次查看的范围说明（子模块只给指针差异、二进制不输出内容、大文件只给摘要上限）。
     // 命令窗口打开期间一直跟着状态一起显示，否则用户只剩一句“执行中”可看。
     std::wstring scopeNotice;
     // 查看类操作的退出码含义由 git::DescribeDiffViewExitCode 解释（协调器只判定成败）。
@@ -362,89 +267,10 @@ private:
     bool fetchOperation = false;
     // 这次是「pull 的获取阶段」：终态不是终点——成功要继续问本地与远端的关系，失败就此为止。
     bool pullFetchOperation = false;
-    // 这次是「pull 的整合阶段」：非 0 退出时界面要把现场读回来如实交代。
+    // 这次是「pull 的整合阶段」：非 0 退出时要把现场交回 pull 控制器做后台读取与结案。
     bool pullIntegrateOperation = false;
-    // 这次是「推送」：终态之后界面要发起对发布目标的核实（那才是「送到没送到」的依据）。
+    // 这次是「推送」：终态之后要把结论交回 push 控制器发起对发布目标的核实。
     bool pushOperation = false;
-  };
-
-  // 一次「等待预检回来再确认」的撤回最近提交：点击瞬间把界面摘要留在这儿，
-  // 预检回来后与它对比；两者不一致时确认框必须说明以刚读回的为准。
-  struct PendingUndoProbe {
-    bool probing = false;
-    git::CapturedSnapshot captured;
-  };
-
-  // 一次「创建提交」走到哪一步。重读、预检、复核共用同一个后台预检器与同一个阶段标记，
-  // 靠它分辨「回来的那份事实给谁用」，也让其它写操作的入口知道这里正占着这份索引：
-  //   preConfirmRead  —— 点击之后，后台重读工作区状态（确认框要摆刚刚读回的列表）；
-  //   preConfirmProbe —— 列表回来了，后台问那一组身份事实（确认框之前）；
-  //   executionRecheck—— 用户点头之后、发命令之前，同一组查询原样重发一遍。
-  // 确认框是模态的，弹出时界面仍停在 preConfirmProbe 上，不需要额外的阶段。
-  enum class CommitStage {
-    none = 0,
-    preConfirmRead,
-    preConfirmProbe,
-    executionRecheck,
-  };
-
-  // 一次进行中的「创建提交」。captured 是点击瞬间界面显示的摘要（确认框要交代它以刚读回的为准）；
-  // preflight/plan 只在走到确认框之后才有内容——复核比对的是「预检那一份」与「点头后重读的那一份」，
-  // 两者缺一就不发命令。plan.identity 里带着这次的信息文件路径：谁持有它，谁负责回收。
-  struct PendingCommit {
-    CommitStage stage = CommitStage::none;
-    git::CapturedSnapshot captured;
-    platform::CommitProbeOutcome preflight;
-    git::CommitPlan plan;
-    // 确认框点头时那一份表单内容（标题/描述/合作者）：命令成功后的收尾按它逐栏比对，
-    // 期间用户另写的草稿不在清理范围内。
-    git::CommitFormData confirmedForm;
-    // 这次尝试写好的提交信息文件。还没交给命令窗口时由这里保管，作废时回收；
-    // 交给命令窗口之后所有权转给 ActiveOperation，那条路上绝不能再删（Git 可能还在读）。
-    std::wstring messageFile;
-  };
-
-  // pull 进行到哪一步。三个阶段共用同一个后台预检器，靠这个标记分辨「回来的那份事实给谁用」：
-  //   fetchProbe     —— 抓取前的阶段一只读预检在跑（分支/上游/配置/现状）；
-  //   fetching       —— 命令窗口里的那次获取在跑（网络操作，用户看得见）；
-  //   integrateProbe —— 抓取成功后的阶段二预检在跑（关系/带入文件/冲突预演）；
-  //   recheckProbe   —— 用户点头之后的执行前复核在跑（把阶段一那套查询原样重发一遍）；
-  //   integrating    —— 命令窗口里的那次整合在跑。
-  // 确认框/选择框是模态的，不需要额外的阶段：弹出时界面仍然停在对应的预检阶段上。
-  enum class PullStage {
-    none = 0,
-    fetchProbe,
-    fetching,
-    integrateProbe,
-    recheckProbe,
-    integrating,
-  };
-
-  // 一次进行中的 pull。integrateFacts/plan 只在走到确认框之后才有内容：
-  // 复核比对的是「预检那一份」与「点头后重读的那一份」，两者缺一就不能执行旧方案。
-  struct PendingPull {
-    PullStage stage = PullStage::none;
-    platform::PullProbeOutcome integrateFacts;
-    git::PullIntegratePlan plan;
-    // 这一次 pull 是否已经在命令窗口里跑过「获取」：取消整合时要把这一点交代清楚
-    // （远端跟踪引用已经被那次抓取更新过，本程序不会、也不该把它退回去）。
-    bool fetchAlreadyRan = false;
-  };
-
-  // 一次进行中的推送走到哪一步。预检与执行前复核共用 pushWorker_，靠这个标记分辨
-  // 「回来的那份事实给谁用」；核实走 pushVerifyWorker_，与它们互不干扰。
-  enum class PushStage {
-    none = 0,
-    probe,        // 点击之后的只读预检在跑
-    recheckProbe, // 点头之后的执行前复核在跑
-    pushing,      // 命令窗口里的那条 push 在跑
-    verifying,    // 向发布目标核对在跑（这一步不影响仓库，只影响结论措辞）
-  };
-
-  struct PendingPush {
-    PushStage stage = PushStage::none;
-    platform::PushProbeOutcome preflight;  // 预检那一份：复核要和它逐条比对
-    git::PushPlan plan;
   };
 
   platform::UniqueWindow window_;
@@ -452,28 +278,17 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
-  platform::UndoProbeWorker undoWorker_;
-  platform::FetchProbeWorker fetchWorker_;
-  // pull 的三个预检阶段共用这一个后台预检器（阶段一 / 阶段二 / 执行前复核），
-  // 回来的那份事实给谁用，由 pendingPull_.stage 分辨。
-  platform::PullProbeWorker pullWorker_;
-  PendingPull pendingPull_;
-  // push 的预检与执行前复核共用这一个后台预检器；核实另用一个（它在命令窗口操作终态之后才发起）。
-  platform::PushProbeWorker pushWorker_;
-  platform::PushVerifyWorker pushVerifyWorker_;
-  PendingPush pendingPush_;
-  // 是否有一次 fetch 目标预检在跑：重复点击先被这句拒绝，迟到的旧结果按序号作废。
-  bool fetchProbing_ = false;
+  // 五个被编排操作的控制器：各自的后台预检器、阶段标记、方案与复核基准都由控制器自己保管。
+  CommitFlow commitFlow_;
+  UndoFlow undoFlow_;
+  FetchFlow fetchFlow_;
+  PullFlow pullFlow_;
+  PushFlow pushFlow_;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;
   app::AppState state_;
   app::CommitFormSession formSession_;
-  PendingCommit pendingCommit_;
-  // 「创建提交」的预检与执行前复核共用这一个后台预检器（同一组查询、同一个问法），
-  // 回来的那份事实给谁用，由 pendingCommit_.stage 分辨。
-  platform::CommitProbeWorker commitWorker_;
-  PendingUndoProbe pendingUndo_;
   UiMetrics metrics_;
   std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别

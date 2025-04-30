@@ -94,6 +94,12 @@ inline constexpr UINT kPushVerifyCompleted = WM_APP + 11;
 // 索引内容标识／流程痕迹／提交者身份配置）的后台查询完成通知；wParam 为请求序号。
 // 确认框之前的预检与点头之后的执行前复核共用这一条，回来给谁用由界面的阶段标记分辨。
 inline constexpr UINT kCommitProbeCompleted = WM_APP + 12;
+// 「撤回最近提交」点头之后的 HEAD/分支后台复核完成通知；wParam 为请求序号。
+// 这一步原来是 GUI 线程上的同步子进程调用，走后台之后窗口不再冻结；没回来之前不发命令。
+inline constexpr UINT kUndoRecheckCompleted = WM_APP + 13;
+// pull 整合失败后的「现场读取」（流程痕迹／未合并条目／HEAD 位置，全部只读）完成通知；
+// wParam 为请求序号。读回来才补完那句结论并请求重读。
+inline constexpr UINT kPullAftermathCompleted = WM_APP + 14;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -117,8 +123,9 @@ inline constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
 inline constexpr unsigned long kAuthorConfigTimeoutMs = 8000;
 // 撤回预检同样是本地只读查询，但里面包含最慢的 git status，沿用工作区读取的 20 秒放宽值。
 inline constexpr unsigned long kUndoProbeTimeoutMs = 20000;
-// 确认框点头之后、启动命令窗口之前的同步复核只有两条毫秒级查询：超时即按「复核不过」
-// 取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目 reset），因此用短超时、绝不长等。
+// 确认框点头之后、启动命令窗口之前的 HEAD/分支复核只有两条毫秒级查询：现在走后台任务，
+// 超时即按「复核不过」取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目动引用），
+// 因此用短超时；GUI 线程不等它，冻结问题已不存在。
 inline constexpr unsigned long kUndoRecheckTimeoutMs = 3000;
 // fetch 目标预检同样是本地只读查询（symbolic-ref / config / remote -v 三条都是毫秒级），
 // 沿用识别的 8 秒放宽值以容纳慢盘；超时按「查询失败」展示，绝不自动重试。
@@ -134,7 +141,8 @@ inline constexpr unsigned long kPullRecheckTimeoutMs = 3000;
 inline constexpr unsigned long kPushProbeTimeoutMs = 20000;
 // 推送之后向发布目标的那一次核对要走网络（ls-remote），凭据由 Git 自己的认证方式处理：
 // 给 30 秒，超时只说明「这一处没能核实」，不据此断言推送失败，也不自动重试。
-// 上限不宜再放大：程序退出时 WM_DESTROY 会等工作线程收尾，最长就阻塞这么久（隐藏查询没有取消接口）。
+// 程序退出时这一步有整体退出策略：worker 的停止信号让剩余目标不再发起 ls-remote，
+// WM_DESTROY 的等待因此只按「当前在途的那一条」计，而不是全部目标逐个把超时排完。
 inline constexpr unsigned long kPushVerifyTimeoutMs = 30000;
 // 「创建提交」的身份预检里最慢的一条是 git write-tree（大仓库要现算若干棵树），量级与 git status
 // 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、

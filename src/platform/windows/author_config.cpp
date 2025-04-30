@@ -33,6 +33,15 @@ git::AuthorIdentityConfig LoadAuthorIdentity(const AuthorConfigRequest& request,
     return git::CombineIdentityConfig(name, name);
   }
 
+  // 退出收尾：停止信号已起就不再追问第二个字段，结果按「查不到」如实收场
+  // （这一趟结果随窗口一起作废，界面不会把它当成回答）。
+  if (StopRequested(request.stopFlag)) {
+    git::ConfigValueRead aborted;
+    aborted.state = git::ConfigValueState::failed;
+    aborted.error = git::RepoError::gitUnavailable;
+    aborted.detail = L"程序正在退出，身份读取中止";
+    return git::CombineIdentityConfig(name, aborted);
+  }
   const git::ConfigValueRead email = git::ParseIdentityConfigQuery(
       deps.runner(request.exePath, request.repositoryDirectory,
                   git::BuildIdentityConfigArguments(request.repositoryDirectory,
