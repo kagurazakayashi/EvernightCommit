@@ -16,6 +16,7 @@ struct PushProbeRequest {
   std::wstring repositoryDirectory;
   std::wstring absoluteGitDir;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时剩余查询不再发起。
 };
 
 struct PushProbeOutcome {
@@ -58,6 +59,7 @@ struct PushVerifyRequest {
   bool pushCommandSucceeded = false;
   std::wstring commandConclusion;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时不再向剩下的发布目标发 ls-remote。
 };
 
 struct PushVerifyOutcome {

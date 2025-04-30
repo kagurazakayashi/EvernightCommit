@@ -32,6 +32,8 @@ add_executable(gc_tests
   list_view_memory_tests.cpp
   local_time_tests.cpp
   machine_output_completeness_tests.cpp
+  operation_conclusions_tests.cpp
+  operation_gate_tests.cpp
   refresh_repository_tests.cpp
   repo_detect_fixture_tests.cpp
   repository_tests.cpp

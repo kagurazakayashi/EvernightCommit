@@ -1,5 +1,7 @@
 #include "app/commit_form_session.h"
 
+#include <string_view>
+
 namespace gc::app {
 
 size_t CommitFormSession::Index(Field field) noexcept {
@@ -117,6 +119,42 @@ void CommitFormSession::NoteCommitted(bool subject, bool description, bool coaut
   if (coauthors) {
     edited_[Index(Field::coauthors)] = false;
   }
+}
+
+CommittedFormCleanup PlanCommittedFormCleanup(const git::CommitFormData& committed,
+                                              const git::CommitFormData& current,
+                                              bool timesUserEdited) {
+  // 逐栏比对：屏幕上还是当时提交的那一份才允许清空（规则说明见头文件）。
+  CommittedFormCleanup cleanup;
+  cleanup.clearSubject = current.subject == committed.subject;
+  cleanup.clearDescription = current.description == committed.description;
+  cleanup.clearCoauthors = current.coauthors == committed.coauthors;
+  cleanup.resetTimes = !timesUserEdited;
+
+  std::wstring kept;
+  const auto appendKept = [&kept](bool cleared, std::wstring_view label) {
+    if (cleared) {
+      return;
+    }
+    if (!kept.empty()) {
+      kept += L"、";
+    }
+    kept += label;
+  };
+  appendKept(cleanup.clearSubject, L"标题");
+  appendKept(cleanup.clearDescription, L"描述");
+  appendKept(cleanup.clearCoauthors, L"合作者");
+
+  std::wstring note = L"提交已创建：作者那一栏留着下次接着用";
+  note += cleanup.resetTimes ? L"，两个时间也回到此刻。" : L"，你在这期间改过的时间原样留着，没有重置。";
+  if (kept.empty()) {
+    note += L"标题、描述与合作者里这次提交用掉的内容已清空。";
+  } else {
+    note += L"其中" + kept + L"在这期间换了内容，因此原样留着、没有清空。";
+  }
+  note += L"仓库状态正在重读。";
+  cleanup.note = std::move(note);
+  return cleanup;
 }
 
 }  // namespace gc::app

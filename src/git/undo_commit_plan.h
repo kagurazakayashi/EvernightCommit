@@ -278,4 +278,12 @@ struct UndoCommitPlan {
 // 「強制繼續」不等於繞過它們。
 [[nodiscard]] UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input);
 
+// 「确认后、执行前的复核」裁决：把后台读回的 HEAD/分支与方案绑定的那份预检事实逐条比对。
+// 返回空串 = 一致，可以发出那条 update-ref；否则返回要原样写进「任务状态」的完整说明
+// （「复核没能完成」与「HEAD/分支又变了」各有各的措辞，绝不合并成一句“请重试”）。
+// 调用方拿到非空答案就不得发命令：这一轮放弃的是「这一份现状」，不是用户的意图——
+// 表单与仓库都不动，重读回来后由用户决定是否再来一次。
+[[nodiscard]] std::wstring DescribeUndoRecheckMismatch(const UndoHeadFacts& recheck,
+                                                       const UndoPreflightFacts& preflight);
+
 }  // namespace gc::git

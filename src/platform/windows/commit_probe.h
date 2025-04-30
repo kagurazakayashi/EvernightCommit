@@ -15,6 +15,7 @@ struct CommitProbeRequest {
   std::wstring exePath;
   std::wstring repositoryDirectory;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时剩余查询（含 write-tree）不再发起。
 };
 
 // 一次后台预检的成品：判读结果加请求携带的目录回显。

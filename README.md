@@ -62,7 +62,7 @@ HEAD、本地分支、本地标签、索引与工作区都不受影响；映射�
 | --- | --- | --- |
 | 编译器 | MSVC 工具集 14.28（Visual Studio 2019 16.11）起提供 `/std:c++20` | 14.51.36231（cl 19.51） |
 | Windows SDK | Windows 10 SDK（`GetDpiForWindow`、`AdjustWindowRectExForDpi` 需 10.0.14393+；本工程按 `_WIN32_WINNT=0x0A00` 编译） | 10.0.26100.0 |
-| CMake | 3.28（`CMakePresets` schema 8；C++20 支持自 3.12 的 `cxx_std_20` 起即有） | 4.4.2 / VS 自带 4.3.1 |
+| CMake | 3.28（`CMakePresets` schema 8；C++20 支持自 3.12 的 `cxx_std_20` 起即有）。`vs2026-x64` 预设另需 **4.2 及以上**：“Visual Studio 18 2026” 生成器自 CMake 4.2 提供 | VS 2026 自带 4.2.3-msvc3；MSYS2 4.3.1（无 Visual Studio 生成器） |
 | 生成器 | Visual Studio 生成器，或 Ninja（需自带 `cl`/`rc` 的开发者环境） | VS 2026 + Ninja 1.13 |
 | 目标平台 | Windows x64（仅支持 x64，非 Windows 会在配置阶段直接报错） | — |
 
@@ -71,13 +71,43 @@ HEAD、本地分支、本地标签、索引与工作区都不受影响；映射�
 
 ### 运行库部署要求
 
-默认动态链接 VC 运行库（Debug `/MDd`、Release `/MD`）。因此：
+未显式指定时，CMake 提供默认值：动态链接 VC 运行库（Debug `/MDd`、Release `/MD`）。
+该默认值**只在用户没有指定时生效**——配置时传入 `-DCMAKE_MSVC_RUNTIME_LIBRARY=<值>`
+即整体采用该值，并统一作用于核心库、平台库、UI、主程序与测试目标（本工程不做混合
+CRT 链接，混用会在链接期直接失败）。
 
-- 开发机上（已装 Visual Studio）直接运行 `EvernightCommit.exe` 即可；
-- 在未安装运行库的机器上分发时，需要随程序部署 **Microsoft Visual C++ Redistributable (x64)**，
-  本机对应安装包为 `VC\Redist\MSVC\<版本>\vc_redist.x64.exe`；
-- 若希望免部署单文件，可改用静态运行库：配置时加上
-  `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>`。
+两种选择的实际依赖（本机对 Release 产物 `dumpbin /dependents` 实测）：
+
+| 运行库 | 配置值（生成器表达式，Debug 与非 Debug 各自映射） | Release 产物的 VC 运行库导入 | 分发方式 |
+| --- | --- | --- | --- |
+| 动态（默认） | `MultiThreaded$<$<CONFIG:Debug>:Debug>DLL` | `VCRUNTIME140.dll`、`VCRUNTIME140_1.dll`、`MSVCP140.dll`、`api-ms-win-crt-*.dll` | 在未装 Visual Studio 的机器上，随程序部署 **Microsoft Visual C++ Redistributable (x64)**（本机对应安装包：`VC\Redist\MSVC\<版本>\vc_redist.x64.exe`） |
+| 静态 | `MultiThreaded$<$<CONFIG:Debug>:Debug>` | 不导入上述 VC/UCRT DLL，仅导入 `KERNEL32`、`USER32`、`GDI32`、`COMCTL32`、`SHELL32`、`ole32` 等系统组件 | 就 VC 运行库而言免部署，exe 可单文件拷走 |
+
+命令行示例。生成器表达式含 `<` 与 `>`，它们在 cmd 和 PowerShell 里都是重定向符，
+**必须整体加引号**，否则命令会被截断或直接报语法错误：
+
+```bat
+:: cmd：引号使 < > 不触发重定向（Ninja 需先进入 Developer Command Prompt / vcvars64.bat）
+cmake -S . -B build\static -G "Ninja Multi-Config" -D "CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>"
+```
+
+```powershell
+# PowerShell：用单引号最稳妥（$ 与 <> 都按字面传入；--preset 后可追加 -D 覆盖缓存项）
+cmake --preset vs2026-x64 '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+```
+
+两点必须说清：
+
+- **“静态运行库”不等于“无系统依赖”**：程序仍需要 x64 版 Windows 10 及以上
+  （Common Controls v6、每显示器 DPI 与长路径行为均由系统与随程序的 manifest 声明
+  决定），需要外部可用的 **Git 命令行工具**（本程序调用 `git.exe`，不内置）；在更老的
+  Windows 上即便静态 CRT 也要先确认系统已具备 UCRT API Set 补丁。
+- **Debug 配置只供开发机自用**：Debug 运行库（`/MDd`，或静态选项下的 `/MTd`）依赖
+  `ucrtbased.dll`、`VCRUNTIME140D.dll` 等调试专用 DLL，不能随可再发行包分发给普通用户。
+
+分发验证状态：本机（装有 Visual Studio 的开发机）只完成了依赖导入表核验；**在未安装
+运行库的干净 Windows 机器上的实际部署运行未验证**，上表“分发方式”是依据依赖清单的
+推断，不等同于已在干净机器上跑通。
 
 ### 系统区域、代码页与用户名
 
@@ -123,7 +153,9 @@ ctest --preset ninja-debug
 其他常用开关：
 
 - `-DBUILD_TESTING=OFF`：不生成测试目标；
-- `-DGC_WARNINGS_AS_ERRORS=ON`：把 `/W4` 警告视为错误（CI 用）。
+- `-DGC_WARNINGS_AS_ERRORS=ON`：把 `/W4` 警告视为错误（CI 用）；
+- `-DCMAKE_MSVC_RUNTIME_LIBRARY=<值>`：显式选择 VC 运行库（如免部署分发用静态运行库；
+  引号写法与部署含义见“运行库部署要求”）。
 
 产物位置：`build/<预设名>/bin/<配置>/EvernightCommit.exe`。构建目录与 IDE 本地文件均已在
 `.gitignore` 中排除。

@@ -10,17 +10,44 @@ if(NOT WIN32)
     "本工程只支持 Windows：需要 MSVC 与 Windows SDK 提供的 Win32 GUI API。")
 endif()
 
+# x64 判定：64 位指针只是必要条件，ARM64 同样为 8 字节。MSVC 下以编译器
+# 自报的目标架构为准（VS 生成器来自 -A，Ninja 来自 vcvars 选定的 cl.exe）。
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "只支持 x64 构建（Visual Studio 生成器请使用 -A x64）。")
+endif()
+if(MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID AND
+   NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+  message(FATAL_ERROR
+    "只支持 Windows x64：编译器目标架构为 '${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}'。"
+    "Visual Studio 生成器请使用 -A x64；Ninja 请在 x64 开发者环境（vcvars64.bat）中配置。")
+elseif(MSVC AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+  # 架构未知时不静默放行：本工程按 x64 设计，宁可显式失败也不产出未验证二进制。
+  message(FATAL_ERROR
+    "无法确定 MSVC 编译器的目标架构（CMAKE_CXX_COMPILER_ARCHITECTURE_ID 为空）。"
+    "请确认使用 Visual Studio 生成器加 -A x64，或在 vcvars64.bat 环境中配置 Ninja。")
+endif()
+
+# Windows SDK 下限：界面代码依赖 10.0.14393+ 提供的每显示器 DPI API。
+# VS 生成器会解析出所选 SDK 版本；Ninja 环境无法可靠取得时不猜测、不强检。
+if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION AND
+   CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION VERSION_LESS "10.0.14393")
+  message(FATAL_ERROR
+    "需要 Windows 10 SDK 10.0.14393 或更高（GetDpiForWindow 等 API），"
+    "当前所选 SDK 为 ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}。")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 动态链接 VC 运行库：Debug 用 /MDd、Release 用 /MD。
-# 若要发布免安装版本，可改为静态运行库（见 README 的“运行库部署要求”）。
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# VC 运行库：默认动态链接（Debug /MDd、Release /MD），但只在用户未通过
+# -DCMAKE_MSVC_RUNTIME_LIBRARY 指定时提供该默认值——此前这里的无条件 set
+# 会用目录变量遮蔽缓存项，把命令行的显式选择（例如免部署的静态运行库）覆盖掉。
+# 该变量是目录作用域，其后的核心库、平台库、UI、主程序与测试目标共用同一策略，
+# 避免混合 CRT 链接。部署含义与静态选项见 README 的“运行库部署要求”。
+if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -57,6 +84,8 @@ add_library(gc_core STATIC
   src/app/app_state.cpp
   src/app/commit_form_session.cpp
   src/app/list_view_memory.cpp
+  src/app/operation_conclusions.cpp
+  src/app/operation_gate.cpp
   src/app/task_coordinator.cpp
   src/git/author_config.cpp
   src/git/command_window.cpp
@@ -115,12 +144,17 @@ target_link_libraries(gc_platform PUBLIC gc_build_settings gc_core comctl32 ole3
 add_library(gc_ui STATIC
   src/ui/action_bar.cpp
   src/ui/changes_pane.cpp
+  src/ui/commit_flow.cpp
   src/ui/commit_form.cpp
   src/ui/controls.cpp
+  src/ui/fetch_flow.cpp
   src/ui/layout.cpp
   src/ui/main_window.cpp
+  src/ui/pull_flow.cpp
+  src/ui/push_flow.cpp
   src/ui/repo_bar.cpp
   src/ui/splitter.cpp
+  src/ui/undo_flow.cpp
   src/ui/ui_metrics.cpp)
 target_include_directories(gc_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_ui PUBLIC gc_core gc_platform

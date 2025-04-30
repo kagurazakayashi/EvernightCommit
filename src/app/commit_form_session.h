@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "git/commit_message.h"
+
 namespace gc::app {
 
 // 提交表單的「這份內容是誰寫的」記錄。純狀態機，不碰 Win32，因此可以逐條測試。
@@ -76,5 +78,25 @@ private:
   std::wstring appliedAuthorDefault_;
   std::wstring boundKey_;
 };
+
+// 「创建提交」成功之后的表单收尾判定（纯逻辑，界面拿到结果再执行）。
+// 规则一条都不能少：
+//   * 只清「屏幕上还是当时提交的那一份」的栏目——命令窗口跑的那段时间里用户完全可能
+//     已经开始写下一段的草稿，把新内容一起抹掉比不清更糟；
+//   * 时间只在没人动过时回到此刻（那是下一次提交的默认）；用户期间另选过时间就是新的意图，
+//     程序不能拿「提交成功」当理由把它抹掉；
+//   * 作者一栏一律留着下次接着用。
+struct CommittedFormCleanup {
+  bool clearSubject = false;
+  bool clearDescription = false;
+  bool clearCoauthors = false;
+  bool resetTimes = false;
+  // 收尾之后要留在表单说明通道里的那句（写清了清了哪些、留了哪些、为什么）。
+  std::wstring note;
+};
+
+[[nodiscard]] CommittedFormCleanup PlanCommittedFormCleanup(const git::CommitFormData& committed,
+                                                            const git::CommitFormData& current,
+                                                            bool timesUserEdited);
 
 }  // namespace gc::app

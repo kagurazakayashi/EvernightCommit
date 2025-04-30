@@ -61,6 +61,10 @@ git::CommitIdentityFacts CollectCommitPreflight(const CommitProbeRequest& reques
   queries.branchRef = RunQuery(deps.runner, request.exePath, dir, git::BuildCommitBranchRefArguments(dir));
   queries.headObject =
       RunQuery(deps.runner, request.exePath, dir, git::BuildCommitHeadObjectArguments(dir));
+  // 退出收尾：停止信号已起就不再往后问（含会写对象库的 write-tree，这一趟结果随窗口一起作废）。
+  if (StopRequested(request.stopFlag)) {
+    return FailedIdentity(L"程序正在退出，预检中止。");
+  }
   // 索引内容标识。这一条是整组查询里唯一会写对象库的（其余几条纯读），副作用见头文件说明。
   queries.indexTree =
       RunQuery(deps.runner, request.exePath, dir, git::BuildCommitIndexTreeArguments(dir));

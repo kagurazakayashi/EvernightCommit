@@ -184,6 +184,10 @@ git::RepoDetection DetectRepository(const RepoDetectRequest& request, const Repo
   }
 
   // 2. 子模块：Git 自己知道这一块工作区是否由父仓库登记（.git 是文件的情形）。
+  // 退出收尾：停止信号已起就不再追问后面的阶段，识别按「没能完成」如实收场。
+  if (StopRequested(request.stopFlag)) {
+    return withNotice(FailWith(request.directory, git::RepoError::gitUnavailable, L"程序正在退出，识别中止"));
+  }
   const git::GitQueryResult superproject =
       RunQuery(deps.runner, request.exePath, request.directory, kSuperprojectArguments);
   if (superproject.started && superproject.exited && superproject.exitCode == 0) {

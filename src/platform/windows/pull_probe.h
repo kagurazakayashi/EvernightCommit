@@ -18,6 +18,7 @@ struct PullProbeRequest {
   std::wstring repositoryDirectory;
   std::wstring absoluteGitDir;
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时剩余查询不再发起。
   // false：只问阶段一（分支 / HEAD / 上游 / 策略配置 / 现状）——抓取前的前提核对，
   //         以及点头之后、执行之前的那次「还是不是同一份现状」的复核都走这一档；
   // true：抓取结束之后，连本地与远端的关系、会带进哪些文件、内容冲突预演一起问回来。
@@ -54,21 +55,30 @@ struct PullProbeDeps {
 [[nodiscard]] PullProbeOutcome RunPullProbeLoad(const PullProbeRequest& request);
 
 // 整合命令非 0 退出之后，问一句「现在究竟卡在什么现场」：Git 目录里的流程痕迹（merge/rebase
-// 进行中）、索引里的未合并条目，以及分支/HEAD 现在的位置。三条查询加一次档案存在性判断，
-// 都是毫秒级，直接在调用线程执行。
+// 进行中）、索引里的未合并条目，以及分支/HEAD 现在的位置。三条查询加一次档案存在性判断。
 // 全程只读：本函数与它的调用方都不会 abort、不会 reset、不会 continue，也不会替用户选任何一边。
 struct PullAftermath {
   git::RepositoryWorkflowState workflow;
   git::PullConflictState conflict;
 };
 
-[[nodiscard]] PullAftermath CapturePullAftermath(const std::wstring& exePath,
-                                                 const std::wstring& repositoryDirectory,
-                                                 const std::wstring& absoluteGitDir,
-                                                 unsigned long timeoutMilliseconds);
+// 现场读取的请求。这一步在命令窗口操作的终态之后进行，与预检的 worker 互不干扰。
+struct PullAftermathRequest {
+  std::wstring exePath;
+  std::wstring repositoryDirectory;
+  std::wstring absoluteGitDir;
+  unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时剩余查询不再发起。
+};
+
+// 现场读取走后台任务：GUI 线程不再同步等待子进程（确认后窗口长时间无响应正是这里要避免的）。
+[[nodiscard]] PullAftermath RunPullAftermathLoad(const PullAftermathRequest& request);
 
 // 预检的后台控制器：查询在工作线程执行，GUI 线程不冻结；
 // 连续点击时旧结果按序号作废，不会把上一个仓库的事实混进确认框。
 using PullProbeWorker = GitTaskWorker<PullProbeRequest, PullProbeOutcome>;
+
+// 失败现场读取的后台控制器：迟到或换仓库的旧结果同样按序号作废。
+using PullAftermathWorker = GitTaskWorker<PullAftermathRequest, PullAftermath>;
 
 }  // namespace gc::platform

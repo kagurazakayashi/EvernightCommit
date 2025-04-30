@@ -808,3 +808,57 @@ GC_TEST(interpret_head_snapshot_only_reads_branch_and_head) {
   GC_CHECK(!dead.queryOk);
   GC_CHECK(!dead.queryFailure.empty());
 }
+
+// ---- 確認後、執行前複核的裁決（界面據此決定發不發那條 update-ref）----
+
+GC_TEST(undo_recheck_mismatch_refusal_is_verbatim) {
+  UndoPreflightFacts preflight;
+  preflight.head.queryOk = true;
+  preflight.head.branchRef = L"refs/heads/main";
+  preflight.head.headObjectId = std::wstring(kShaA);
+
+  // 一致：空串 = 可以發命令。
+  UndoHeadFacts same;
+  same.queryOk = true;
+  same.branchRef = L"refs/heads/main";
+  same.headObjectId = std::wstring(kShaA);
+  GC_CHECK_MESSAGE(gc::git::DescribeUndoRecheckMismatch(same, preflight).empty(),
+                   "復核與預檢一致時不得攔下命令");
+
+  // HEAD 換了一份提交：拒绝说明必须把两边的位置都报出来（短 ID 形态）。
+  UndoHeadFacts moved;
+  moved.queryOk = true;
+  moved.branchRef = L"refs/heads/main";
+  moved.headObjectId = std::wstring(kShaB);
+  const std::wstring refusal = gc::git::DescribeUndoRecheckMismatch(moved, preflight);
+  GC_CHECK(TextContains(refusal, L"确认之后、执行之前，HEAD/分支又变了"));
+  GC_CHECK(TextContains(refusal, gc::git::ShortObjectId(kShaB)));
+  GC_CHECK(TextContains(refusal, L"本次没有执行任何命令"));
+
+  // 换到别的分支：分支名要出现在说明里。
+  UndoHeadFacts switched;
+  switched.queryOk = true;
+  switched.branchRef = L"refs/heads/dev";
+  switched.headObjectId = std::wstring(kShaA);
+  GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(switched, preflight),
+                        L"refs/heads/dev"));
+
+  // 不在分支上：按「不在分支上」如实说，不留空。
+  UndoHeadFacts detached;
+  detached.queryOk = true;
+  detached.headObjectId = std::wstring(kShaA);
+  GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(detached, preflight), L"不在分支上"));
+
+  // 复核没完成：另一套措辞，且不合并成一句「请重试」。
+  UndoHeadFacts failed;
+  failed.queryOk = false;
+  failed.queryFailure = L"git 启动失败（示例原因）";
+  const std::wstring failedRefusal = gc::git::DescribeUndoRecheckMismatch(failed, preflight);
+  GC_CHECK(TextContains(failedRefusal, L"确认后复核 HEAD 没能完成（git 启动失败（示例原因））"));
+  GC_CHECK(TextContains(failedRefusal, L"仓库状态正在重读"));
+
+  // 失败但没有具体原因时给「原因未知」，不留空括号。
+  UndoHeadFacts failedQuiet;
+  failedQuiet.queryOk = false;
+  GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(failedQuiet, preflight), L"原因未知"));
+}

@@ -14,6 +14,12 @@ void LoadRecentCommits(const WorkspaceStatusRequest& request, const WorkspaceSta
   if (!request.repositoryHasCommits) {
     return;
   }
+  if (StopRequested(request.stopFlag)) {
+    // 退出收尾：不再追问提交历史，按「没读到」如实记录，列表本身照常（这一趟随窗口作废）。
+    snapshot->historyError = git::RepoError::gitUnavailable;
+    snapshot->historyMessage = L"程序正在退出，未读取提交历史。文件列表来自 git status，仍然照常显示。";
+    return;
+  }
   const git::GitQueryResult result =
       deps.runner(request.exePath, request.repositoryDirectory,
                   git::BuildRecentCommitsArguments(request.repositoryDirectory,

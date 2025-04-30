@@ -22,6 +22,7 @@ struct WorkspaceStatusRequest {
   // 而不是靠「是不是最後一次提交」——換到一個讀不了的倉庫時根本不會再有新的提交。
   unsigned long long readSerial = 0;
   unsigned long long bindingGeneration = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时第二条查询（提交历史）不再发起。
 };
 
 // 一次後台讀取的成品：快照加上請求攜帶的身份回顯。

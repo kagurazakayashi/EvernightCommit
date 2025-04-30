@@ -51,6 +51,10 @@ git::FetchTargetFacts CollectFetchTarget(const FetchProbeRequest& request, const
       branchName = std::wstring(ref.substr(prefix.size()));
     }
   }
+  // 退出收尾：停止信号已起就不再发后续查询（这一趟结果随窗口一起作废）。
+  if (StopRequested(request.stopFlag)) {
+    return FailedFacts(L"程序正在退出，目标预检中止");
+  }
   const std::vector<std::wstring> branchRemoteArguments =
       git::BuildFetchBranchRemoteArguments(dir, branchName);
   if (!branchRemoteArguments.empty()) {

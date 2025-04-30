@@ -21,6 +21,7 @@ struct RepoDetectRequest {
   std::wstring exePath;
   std::wstring directory;  // 用户选择的目录（绝对路径；Git 回答的工作区根写进结果）
   unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时后续阶段的查询不再发起。
 };
 
 // 仓库识别的执行依赖，全部以回调注入，使流程编排可脱离 Win32 单元测试：
