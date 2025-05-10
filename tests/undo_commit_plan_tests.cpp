@@ -121,7 +121,8 @@ UndoPreflightQueries HealthyQueries() {
   queries.shallowState = Answer(0, L"false\n");
   queries.parentObjectRan = true;
   queries.parentObjectQueryOid = std::wstring(kShaB);
-  queries.parentObject = Answer(0, L"commit\n");
+  // 剝皮問法的「合格」回答就是那個 ID 自己（實測：合格的提交經 --verify --quiet 原樣答出）。
+  queries.parentObject = Answer(0, std::wstring(kShaB) + L"\n");
   queries.headSummary = Answer(0, L"fix: 修一个很要紧的 bug\n");
   queries.remoteRefs = Answer(0, L"refs/remotes/origin/main\n");
   queries.remoteContains = Answer(0, L"");
@@ -144,7 +145,7 @@ void MakeMergeShaped(UndoPreflightQueries& queries) {
       Answer(0, std::wstring(kShaA) + L" " + std::wstring(kShaB) + L" " + std::wstring(kShaC) + L"\n");
   queries.commitObject = Answer(0, CommitObjectText({kShaB, kShaC}));
   queries.parentObjectQueryOid = std::wstring(kShaB);
-  queries.parentObject = Answer(0, L"commit\n");
+  queries.parentObject = Answer(0, std::wstring(kShaB) + L"\n");
 }
 
 UndoCommitPlanInput InputFromQueries(const UndoPreflightQueries& queries) {
@@ -192,7 +193,12 @@ GC_TEST(undo_probe_arguments_are_read_only_and_bound_to_repository) {
   const std::vector<std::wstring> parents = gc::git::BuildUndoParentsArguments(dir, kShaA);
   GC_CHECK(Contains(parents, kShaA) && !Contains(parents, L"HEAD"));
   GC_CHECK(Contains(gc::git::BuildUndoCommitObjectArguments(dir, kShaA), kShaA));
-  GC_CHECK(Contains(gc::git::BuildUndoParentObjectArguments(dir, kShaB), kShaB));
+  // 父對象的可讀性問法：`rev-parse --verify --quiet <ID>^{commit}`。
+  // 回歸釘：絕不能退回 `cat-file -t --quiet`——本機 Git 2.53 對它一律退出碼 129，預檢一問就報錯。
+  const std::vector<std::wstring> parentObject = gc::git::BuildUndoParentObjectArguments(dir, kShaB);
+  GC_CHECK(Contains(parentObject, L"rev-parse") && Contains(parentObject, L"--verify") &&
+           Contains(parentObject, std::wstring(kShaB) + L"^{commit}"));
+  GC_CHECK(!Contains(parentObject, L"cat-file"));
   // 形態不合格的 ID 根本不配送進 Git（返回空數組＝跳過這條查詢）。
   GC_CHECK(gc::git::BuildUndoParentsArguments(dir, L"deadbeef").empty());
   GC_CHECK(gc::git::BuildUndoHeadSummaryArguments(dir, L"").empty());
@@ -354,14 +360,14 @@ GC_TEST(interpret_shallow_boundary_is_hidden_parent_relation) {
 }
 
 GC_TEST(interpret_rejects_unreadable_or_non_commit_parent) {
-  // 目標父對象在本地讀不到：這是「歷史不完整」的明確答案（cat-file -t --quiet 退出碼 1、無輸出）。
+  // 目標父對象在本地讀不到：這是「歷史不完整」的明確答案（--quiet 系契約：退出碼 1、無輸出）。
   UndoPreflightQueries missing = HealthyQueries();
   missing.parentObject = Answer(1);
   UndoPreflightFacts facts = gc::git::InterpretUndoPreflight(missing);
   GC_CHECK(facts.head.target.kind == UndoTargetKind::unreadableParent);
   GC_CHECK(facts.head.target.unreadableParentId == kShaB);
 
-  // 那個 ID 存在卻不是提交對象：對象庫形態超出可安全判讀的範圍。
+  // 那個 ID 存在卻不是提交對象（或要靠剝皮才成提交）：對象庫形態超出可安全判讀的範圍。
   UndoPreflightQueries notCommit = HealthyQueries();
   notCommit.parentObject = Answer(0, L"blob\n");
   facts = gc::git::InterpretUndoPreflight(notCommit);
@@ -566,7 +572,7 @@ GC_TEST(plan_blocks_shallow_boundary_and_never_deletes_the_ref) {
 
 GC_TEST(plan_blocks_unreadable_parent_without_touching_the_network) {
   UndoPreflightQueries missing = HealthyQueries();
-  missing.parentObject = Answer(1);  // cat-file -t --quiet 明確回答：本地沒有這個對象
+  missing.parentObject = Answer(1);  // --quiet 系契約的明確回答：本地沒有這個對象
   const UndoCommitPlan plan = gc::git::BuildUndoCommitPlan(InputFromQueries(missing));
   GC_CHECK(plan.blocked);
   GC_CHECK(plan.arguments.empty());

@@ -26,17 +26,23 @@ struct PrerequisiteFailure : std::runtime_error {
 };
 
 struct Registrar {
-  Registrar(const char* name, CaseBody body);
+  Registrar(const char* name, CaseBody body, const char* file);
 };
 
 // 运行全部用例；nameFilter 非空时只运行用例名包含该片段的用例。
-int RunAll(std::string_view nameFilter = {});
+// groupFilter 非空时按验收分组（pure/windows/git-readonly/git-mutating/all）再筛一道；
+// 解析与统计都在 RunAll 内部完成（见 test_main.cpp 的分组表）。
+// 过滤器命中 0 个用例时返回 2，绝不把「一个都没跑」报成通过。
+int RunAll(std::string_view nameFilter = {}, std::string_view groupFilter = {});
+
+// 按分打印全部注册用例（group<TAB>name），供 --list 与外部工具生成名单；同样接受过滤。
+int ListCases(std::string_view nameFilter = {}, std::string_view groupFilter = {});
 
 }  // namespace gc::test
 
 #define GC_TEST(name)                              \
   static void name();                              \
-  static const ::gc::test::Registrar kRegistrar_##name(#name, &name); \
+  static const ::gc::test::Registrar kRegistrar_##name(#name, &name, __FILE__); \
   static void name()
 
 #define GC_CHECK(condition) \
