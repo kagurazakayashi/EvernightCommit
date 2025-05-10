@@ -42,8 +42,13 @@ namespace gc::git {
 //     因此這裡能看到被歷史視圖隱藏的父；兩者不一致就說明父關係不可信。
 //   * `rev-parse --is-shallow-repository`：倉庫是不是淺倉庫。真正根提交只有在「兩處都說沒有父」
 //     **且**倉庫不是淺倉庫時才成立，才會進入刪除引用的路徑。
-//   * `cat-file -t --quiet <第一父完整ID>`：要挪去的那一個提交對象在本地讀不讀得到。
-//     讀不到就拒絕（需要用戶自己 `git fetch` / `--unshallow` 補全歷史），絕不自動聯網、不自動 unshallow。
+//   * `rev-parse --verify --quiet <第一父完整ID>^{commit}`：要挪去的那一個提交對象在本地讀不讀得到。
+//     讀不到（或存在卻剝不出一個提交）就拒絕（需要用戶自己 `git fetch` / `--unshallow` 補全歷史），
+//     絕不自動聯網、不自動 unshallow。
+//     實測更正（本機 Git 2.53.0.windows.3）：原本形態 `cat-file -t --quiet <ID>` 不可用——
+//     `git cat-file` 根本不認 `--quiet`，帶著它一律退出碼 129 用法錯誤，預檢一問就報錯。
+//     改用同族 `--quiet` 契約的剝皮問法後實測核對：缺失對象與 blob 對象都以退出碼 1 + 空輸出
+//     作答（明確「沒有」），合格提交以退出碼 0 回答那個 ID 自己。
 //   所有對象查詢都帶 `--no-replace-objects`：`git replace` 造出的替換對象不會改變判定結果，
 //   被判讀採信的始終是倉庫裡那個真實對象。
 //
@@ -59,8 +64,9 @@ namespace gc::git {
 //     因此判據是三態：已知已發布／本地信息未發現已發布／無法判斷，後兩者語氣必須誠實。
 //   * 各查詢全部帶 `--no-optional-locks`；`for-each-ref --format=%(refname)` 一行一個引用名，
 //     refs/refname 不會含換行，按行取用安全。
-//   * symbolic-ref／rev-parse／cat-file -t 都帶 `--quiet`：「不在分支上」「HEAD 不可解析」
-//     「對象不存在」是以退出碼 1 + 空輸出作答的正常結論，不是錯誤；其餘非 0 退出纔是 Git 報了問題。
+//   * symbolic-ref／rev-parse --verify（含父對象的 `<ID>^{commit}` 剝皮問法）都帶 `--quiet`：
+//     「不在分支上」「HEAD 不可解析」「對象不存在或剝不出提交」是以退出碼 1 + 空輸出作答的正常結論，
+//     不是錯誤；其餘非 0 退出纔是 Git 報了問題。
 
 // ---- 只讀預檢的查詢參數（全部顯式 -C 綁定倉庫根，不依賴進程全局目錄） ----
 

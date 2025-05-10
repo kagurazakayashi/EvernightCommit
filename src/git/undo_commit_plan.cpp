@@ -273,11 +273,18 @@ std::vector<std::wstring> BuildUndoParentObjectArguments(std::wstring_view repos
   if (!LooksLikeFullObjectId(parentSha)) {
     return {};
   }
-  // --quiet：對象不在本地時以退出碼 1 + 空輸出作答，這是一個明確答案（歷史不完整），
-  // 而不是「查詢失敗」；類型不是提交則是另一回事，判讀層按不一致處理。
+  // 實測事實（本機 Git 2.53.0.windows.3）：`git cat-file` 不接受 `--quiet`，帶上它一律以
+  // 退出碼 129 的用法錯誤收場——這條查詢若沿用那個形態，真實倉庫的撤回預檢一問就報錯。
+  // 改成 `rev-parse --verify --quiet <第一父>^{commit}`，三態都經實測核對：
+  //   * 對象在本地且就是提交：退出碼 0，輸出那個完整 ID；
+  //   * 對象不在本地、或存在卻剝不出提交（如 blob）：退出碼 1 + 空輸出——與 symbolic-ref／
+  //     rev-parse 同族「--quiet 系」的明確「沒有」契約，判讀層按歷史不完整拒絕；
+  //   * 其餘非 0（倉庫壞到問不動）：走失敗路徑，歸「問不出來」，絕不当「明確沒有」。
+  // rc0 但回的不是那個 ID 本身（例如父指針指向 tag 對象被剝皮成別的提交）由判讀層按
+  // 不一致處理：--no-replace-objects 之下「parent 行寫的那個對象自己就是提交」纔是可信形態。
   return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
-                                   L"--no-replace-objects", L"cat-file", L"-t", L"--quiet",
-                                   std::wstring(parentSha)};
+                                   L"--no-replace-objects", L"rev-parse", L"--verify", L"--quiet",
+                                   std::wstring(parentSha) + L"^{commit}"};
 }
 
 std::vector<std::wstring> BuildUndoRemoteRefsArguments(std::wstring_view repositoryDirectory) {
@@ -336,8 +343,8 @@ UndoQueryRead ReadUndoQuery(const GitQueryResult& result) {
   }
   if (result.exitCode == 1 && TrimWide(result.utf16Output).empty()) {
     // --quiet 系查詢的「正常沒有」：symbolic-ref（不在分支上）、rev-parse --verify --quiet
-    // （HEAD 不可解析）與 cat-file -t --quiet（對象不在本地）都以退出碼 1、無輸出作答。
-    // 其餘命令不該走到這裡，判讀方會按語義處理。
+    // （HEAD 不可解析）與父對象的 rev-parse --verify --quiet <ID>^{commit}（對象不在本地、
+    // 或剝不出提交）都以退出碼 1、無輸出作答。其餘命令不該走到這裡，判讀方會按語義處理。
     read.outcome = UndoQueryOutcome::noResult;
     return read;
   }
@@ -528,6 +535,8 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
   }
   const UndoQueryRead parentRead = ReadUndoQuery(queries.parentObject);
   if (parentRead.outcome == UndoQueryOutcome::noResult) {
+    // `--quiet` 系的明確「沒有」：那個父對象不在本地，或存在卻剝不出一個提交。
+    // 兩者都意味著「撤回去的那一站現在不可用」，按歷史不完整拒絕，不猜。
     target.kind = UndoTargetKind::unreadableParent;
     target.unreadableParentId = wanted;
     return;
@@ -535,10 +544,13 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
   if (parentRead.outcome != UndoQueryOutcome::answered) {
     target.kind = UndoTargetKind::undetermined;
     target.failure = L"没能问出那个父提交对象在不在本地：" +
-                     RefusalWith(parentRead, L"cat-file -t 未成功");
+                     RefusalWith(parentRead, L"rev-parse --verify 未成功");
     return;
   }
-  if (LowerAscii(parentRead.firstLine) != L"commit") {
+  if (LowerAscii(parentRead.firstLine) != LowerAscii(wanted)) {
+    // 問的是 `<那個ID>^{commit}`：退出碼 0 時答的應當就是那個 ID 自己。
+    // 答了別的 ID 意味著那個 parent 指針指向的對象要靠剝皮（如 tag）纔成為提交——
+    // 那不是「歷史裡那個父提交」的正常形態，按不一致拒絕。
     target.kind = UndoTargetKind::inconsistentParents;
     target.mismatchedParentId = wanted;
     return;
@@ -719,8 +731,9 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
                    L"不会改动任何远端配置。");
     case UndoTargetKind::unreadableParent:
       return block(L"要挪去的那个父提交（" + ShortObjectId(target.unreadableParentId) +
-                   L"）在本地读不到对象内容：这份历史不完整（浅克隆、部分克隆或被清理过的对象库）"
-                   L"。本程序不把分支引用挪向一个读不到的提交，也不会自动联网补全。请先用你自己的方式"
+                   L"）在本地读不到，或者并不是一个能解出的提交对象：这份历史不完整（浅克隆、"
+                   L"部分克隆、被清理过的对象库，或损坏的父指针）。本程序不把分支引用挪向一个读"
+                   L"不到的提交，也不会自动联网补全。请先用你自己的方式"
                    L"补全历史（git fetch / git fetch --unshallow），再点“刷新”。");
     case UndoTargetKind::inconsistentParents: {
       const std::wstring named =
