@@ -46,9 +46,11 @@ namespace gc::git {
 //     順序按配置原樣），本程式拿它當場證據展示與核實，不自己 reimplement 改寫規則。
 //
 // 「不猜」的界線：
-//   * 必須在分支上（游離 HEAD 沒有分支可推，本程式不替它挑一個）、分支必須有明確上游
-//     （branch.<分支>.remote + .merge）；無上游一律拒絕，不 --set-upstream、不猜 origin/main、
-//     不創建遠端分支設定、不寫任何配置文件；
+//   * 必須在分支上（游離 HEAD 沒有分支可推，本程式不替它挑一個）；本模組的 PushPlan 只服務
+//     「已有明確上游」的推送（branch.<分支>.remote + .merge），無上游時一律 blocked：
+//     不 --set-upstream、不猜 origin/main、不創建遠端分支設定、不寫任何配置文件。
+//     這種場合界面是否改走「首次推送嚮導」（用户當場選遠端與目標分支、推送與寫上游分成
+//     兩個各有結果的階段）由 git/first_push_plan 裁決，本模組的拒絕契約不變；
 //   * 分支還沒有任何提交（HEAD 不可解析）時拒絕：那種場合连「要推哪一份」都問不出來；
 //   * 實際發布目標與界面上的抓取目標不一致時（branch.<分支>.pushRemote／remote.pushDefault／
 //     獨立 pushurl／insteadOf 改寫）一律解析出來如實展示，並列為需明確點頭的風險；
@@ -97,6 +99,15 @@ namespace gc::git {
 
 // ---- 生效配置清單（`git config --list --null` 的判讀結果） ----
 
+// 三段「能不能安全交出去」的形態底線。普通推送與「首次推送」向導共用這一份判定：
+// 本地分支引用必須是 refs/heads/ 開頭，遠端側引用必須是 refs/ 開頭（上游把分支映射到
+// refs/heads/ 以外是 Git 允許的形態，本程序照它推、不糾正），遠端名不得為空或以 - 開頭；
+// 三者都不接受雙引號、控制字符，refspec 源與目標還不接受冒號。返回 false 就是「不構造命令」，
+// 由調用方給出具體原因，絕不湊一個看起來能跑的。
+[[nodiscard]] bool IsUsableLocalBranchRef(std::wstring_view ref);
+[[nodiscard]] bool IsUsableRemoteRef(std::wstring_view ref);
+[[nodiscard]] bool IsUsableRemoteName(std::wstring_view name);
+
 // 一條生效配置。Git 明確分得開三件事，這裡必須原樣帶過去：
 //   * 「根本沒有這個鍵」——entries 裡查不到；
 //   * 「設成了空值」（`key =` 這種寫法，輸出是 `key<換行><NUL>`）——valueOmitted=false、value 為空；
@@ -128,6 +139,8 @@ struct PushConfigListing {
                                                        std::wstring_view variable) const;
   // 倉庫既有遠端：有 url 或 pushurl 的遠端名，按首次出現的順序去重。
   [[nodiscard]] std::vector<std::wstring> RemoteNames() const;
+  // 這個遠端在倉庫的遠端清單裡（有 url 或 pushurl）——與「定得出遠端名」是兩件事。
+  [[nodiscard]] bool HasRemote(std::wstring_view remoteName) const;
 };
 
 [[nodiscard]] PushConfigListing ParsePushConfigListing(const GitQueryResult& listing);
@@ -145,6 +158,53 @@ struct PushConfigListing {
 
 // 多個目標 URL 折成一行展示文字（逐條編號，全部已做憑據掩碼）。
 [[nodiscard]] std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls);
+
+// ---- 發布 URL 解析與範圍設置判定（普通推送與「首次推送嚮導」共用的唯一一份） ----
+// 抽出來不是為了整齊：同一條解析鏈路若有兩份實現，界面承諾的地点與命令實際去的地方
+// 就可能各算一套。首次推送的一切範圍承諾都以這裡的函數為準。
+
+// 配置裡這個遠端**未經解析**的地址清單：有 pushurl 就用 pushurl，一條 pushurl 也沒有才落回 url。
+// 它的用途是條數核對（`get-url --push --all` 的回答條數理應與它一致）與辨認 insteadOf 改寫過，
+// 绝不作为实际发布地址使用。
+[[nodiscard]] std::vector<std::wstring> RawConfiguredPushUrls(const PushConfigListing& config,
+                                                             std::wstring_view remoteName);
+
+// 一次發布 URL 解析的結論。urls 為空就是「看不清要去哪裡」，failure 給出面向界面的完整說明；
+// 這裡永遠不會填入配置裡未經解析的原樣地址。
+struct PushUrlResolution {
+  std::vector<std::wstring> urls;
+  std::wstring failure;
+  bool rewritten = false;  // 回答與原樣清單不完全一致：改寫規則生效過
+};
+
+// 判讀 `git remote get-url --push --all <遠端>` 的回答：空回答、含控制字符的地址、
+// 與配置條目數對不上、非 0 退出、啟動不成、压根沒發問——各自都是失敗，且都拒絕繼續發布。
+[[nodiscard]] PushUrlResolution ResolvePushUrls(const GitQueryResult& remoteUrlQuery, bool queryRan,
+                                                const PushConfigListing& config,
+                                                std::wstring_view remoteName);
+
+// 多個發布地址時必須交代的事（Git 會推給每一個、退出碼是各目標合計、二次改寫的邊界），
+// 單一地址但被改寫過時改說改寫。不需要特別說明時返回空字串。
+[[nodiscard]] std::wstring DescribePushUrlNote(const std::vector<std::wstring>& urls, bool rewritten,
+                                               const std::vector<std::wstring>& rawUrls);
+
+// 會被本次推送就地中和／不受影響的倉庫設定（只影響這一個子進程，不寫任何配置文件）。
+// 命令要不要補那幾句 `-c`、確認框要不要說明，全部以這裡的判定為準。
+struct PushScopeConfigEffects {
+  bool mirrorConfigured = false;
+  bool tagOptConfigured = false;
+  bool followTagsConfigured = false;
+  bool extraPushRefspecsConfigured = false;
+  std::wstring pushDefault;  // 僅供展示：顯式 refspec 讓它不参与本次推送
+};
+
+[[nodiscard]] PushScopeConfigEffects InspectPushScopeConfig(const PushConfigListing& config,
+                                                            std::wstring_view remoteName);
+
+// 「會被本次命令就地中和的設置」那幾句說明。普通推送與首次推送共用同一份措辭與同一批判定：
+// 兩處各寫一套就會出現「一個入口說了、另一個入口漏說」的中和項。
+[[nodiscard]] std::wstring DescribePushNeutralization(std::wstring_view remoteName,
+                                                      const PushScopeConfigEffects& effects);
 
 // ---- 只讀查詢的參數（全部顯式 -C 綁定倉庫根，不依賴進程全局目錄） ----
 

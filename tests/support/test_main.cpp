@@ -94,6 +94,7 @@ constexpr const char* kPureFiles[] = {
     "environment_block_tests.cpp",  // 仅在本进程内改环境并 RAII 复原；串行运行前提见 docs/testing.md
     "fetch_plan_tests.cpp",
     "fetch_scope_tests.cpp",
+    "first_push_plan_tests.cpp",
     "git_environment_tests.cpp",
     "git_locator_tests.cpp",
     "git_probe_tests.cpp",
@@ -131,6 +132,7 @@ constexpr const char* kFixtureFiles[] = {
     "diff_view_fixture_tests.cpp",
     "fetch_fixture_tests.cpp",
     "fetch_scope_fixture_tests.cpp",
+    "first_push_fixture_tests.cpp",
     "git_environment_fixture_tests.cpp",
     "git_fixture_tests.cpp",
     "pull_probe_fixture_tests.cpp",
@@ -207,6 +209,10 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     "undo_probe_on_repository_without_commits_blocks_everything",
     // fetch_fixture_tests.cpp —— 远端守卫自身
     "test_remote_guard_rejects_network_forms_and_out_of_root",
+    // first_push_fixture_tests.cpp —— 只发 check-ref-format / rev-parse / ls-remote，
+    // 不建提交、不推送、不写任何配置（逐行核实于 2026-10-08 首次推送任务）。
+    "first_push_ref_format_fixture_verdicts_match_the_contract",
+    "first_push_remote_probe_fixture_separates_absent_from_unreachable",
 };
 
 bool InTable(const char* const* table, size_t count, std::string_view value) {

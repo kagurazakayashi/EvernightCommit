@@ -17,6 +17,7 @@
 #include "git/repository.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
+#include "platform/windows/identity_prompt.h"
 #include "platform/windows/remote_choice_dialog.h"
 
 namespace gc::ui {
@@ -50,6 +51,10 @@ struct CommandLaunchOptions {
   bool pullIntegrateOperation = false;
   // 这次是「推送」：终态之后还要向发布目标做一次只读核对，成功与否以那份实况参与结论。
   bool pushOperation = false;
+  // 这次是「首次推送之后的上游写入」：第几条 git config（1 = branch.<分支>.remote，
+  // 2 = branch.<分支>.merge）。0 表示不是这一步。终态要交回推送控制器决定下一条与最终结论：
+  // 「推送成功」与「配置写成没有」是两件事，各自有退出码，绝不合并成一句「推送并设置上游成功」。
+  int upstreamWriteStep = 0;
 };
 
 // 决策点一次性取用的仓库与界面只读快照。操作控制器全程只能用这里的值——不允许回头读
@@ -74,6 +79,13 @@ struct RemoteChoiceLayoutHints {
   int labelRows = 3;       // 「为什么要在这里选」那句说明留几行
   int contentWidth = 420;  // 对话框内容宽度（DIP）
   int listHeight = 140;    // 列表区高度（DIP）
+};
+
+// 「问一个字串」那次弹窗的布局参数，与单选列表框同一套规矩：几何由主窗口按 DPI 填。
+struct TextInputLayoutHints {
+  int labelRows = 3;       // 输入框上方那句说明的行数
+  int noteRows = 2;        // 框内校验说明预留的行数
+  int contentWidth = 420;  // 对话框内容宽度（DIP）
 };
 
 // 操作控制器需要的界面服务：呈现确认与结果、启动命令窗口操作、请求刷新。
@@ -106,6 +118,11 @@ public:
   // 单选列表框（fetch 选远端、pull 选整合方式共用）：返回选中下标；取消返回空。
   virtual std::optional<size_t> PromptRemoteChoice(platform::RemoteChoiceSpec spec,
                                                    const RemoteChoiceLayoutHints& hints) = 0;
+  // 单行文本输入框（与「合作者」那一套模态输入同一份实现，几何同样由主窗口按 DPI 填）：
+  // 确定返回输入值，取消返回空。validate 只在框内做纯形态提示——这里绝不能同步等子进程，
+  // 权威裁定由控制器在输入之后于后台问回来（例如首次推送的 git check-ref-format）。
+  virtual std::optional<std::wstring> PromptForText(platform::IdentityPromptSpec spec,
+                                                    const TextInputLayoutHints& hints) = 0;
 
   // 占用命令窗口单槽并启动一次操作；false = 没跑起来（原因已被执行路径写进状态栏）。
   virtual bool LaunchCommandWindow(const git::CommandWindowOperation& operation,
