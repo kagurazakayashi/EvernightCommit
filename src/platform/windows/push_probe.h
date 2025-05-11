@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "git/first_push_plan.h"
 #include "git/push_plan.h"
 #include "git/repository.h"
 #include "platform/windows/git_task_worker.h"
@@ -78,5 +79,59 @@ struct PushVerifyOutcome {
 // 与预检的迟到结果作废判定互不干扰。
 using PushProbeWorker = GitTaskWorker<PushProbeRequest, PushProbeOutcome>;
 using PushVerifyWorker = GitTaskWorker<PushVerifyRequest, PushVerifyOutcome>;
+
+// ---- 首次推送向导：选定目标之前的候选清单 ----
+
+// 一次「把有哪些远端、各自实际去哪里摆出来」的请求。全部是本地只读查询
+// （config --list --null 与逐远端的 remote get-url --push --all），不接触任何远端。
+struct FirstPushTargetsRequest {
+  std::wstring exePath;
+  std::wstring repositoryDirectory;
+  unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;  // 由 worker 挂上：退出收尾时剩余远端不再逐个发问。
+};
+
+struct FirstPushTargetsOutcome {
+  git::FirstPushCandidateFacts candidates;
+  std::wstring repositoryDirectory;
+};
+
+// 判读与展示都用 git/first_push_plan 那一份规则：远端名按生效配置给出的顺序逐个问
+// `get-url --push --all`，问不成的候选带着「为什么问不成」原样交回界面（不拿别的远端的地址充数）。
+// 名字形态不合格而发不出查询时，结果数组里放一条「没启动」的占位，保证下标与远端顺序对齐。
+// deps 由调用方注入：界面走真实的隐藏子进程，夹具走它自己的隔离执行器（两条路同一套编排）。
+[[nodiscard]] git::FirstPushCandidateFacts CollectFirstPushTargets(
+    const FirstPushTargetsRequest& request, const PushProbeDeps& deps);
+
+[[nodiscard]] FirstPushTargetsOutcome RunFirstPushTargetsLoad(const FirstPushTargetsRequest& request);
+
+// ---- 首次推送向导：选定目标之后的只读预检 ----
+
+// 目标（远端名 + refs/heads/… 的完整引用）由用户当场选定，本请求只负责把事实问回来：
+// 分支 / HEAD 那份提交 / 上游还是没有 / 生效配置 / 选定远端展开后的发布地址 /
+// 引用名的 Git 裁定（check-ref-format）/ 逐发布地址那条引用在不在（只读 ls-remote，**要联网**）/
+// 本地与对端的领先落后（只在问得出时问）/ 配置文件落点（rev-parse --git-path config）。
+struct FirstPushProbeRequest {
+  std::wstring exePath;
+  std::wstring repositoryDirectory;
+  std::wstring remoteName;
+  std::wstring targetBranchRef;
+  unsigned long timeoutMilliseconds = 0;
+  StopFlag stopFlag;
+};
+
+struct FirstPushProbeOutcome {
+  git::FirstPushFacts facts;
+  std::wstring repositoryDirectory;
+};
+
+[[nodiscard]] git::FirstPushFacts CollectFirstPushProbe(const FirstPushProbeRequest& request,
+                                                        const PushProbeDeps& deps);
+
+[[nodiscard]] FirstPushProbeOutcome RunFirstPushProbeLoad(const FirstPushProbeRequest& request);
+
+using FirstPushTargetsWorker = GitTaskWorker<FirstPushTargetsRequest, FirstPushTargetsOutcome>;
+using FirstPushProbeWorker = GitTaskWorker<FirstPushProbeRequest, FirstPushProbeOutcome>;
+
 
 }  // namespace gc::platform

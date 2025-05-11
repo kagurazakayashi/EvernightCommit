@@ -133,7 +133,14 @@ constexpr std::wstring_view kTipPush =
     L"绝不带 --force / --force-with-lease / --mirror / --all / --tags，也不推标签、不动子模块；"
     L"Git 认为不是快进时就会把它拒绝，本程序不会为了让它“成功”而更激烈。\r\n"
     L"没有上游、游离 HEAD、分支还没有提交、发布目标问不出一个明确地址时一律拒绝，并给出具体原因："
-    L"不猜 origin、不代设 upstream、不替你创建远端分支、不写任何配置文件。\r\n"
+    L"不猜 origin、不替你创建远端分支、不写任何配置文件。\r\n"
+    L"分支还没有上游而仓库里有配好地址的远端时，改走「首次推送」：先逐个远端问出 Git 自己展开的实际"
+    L"发布地址（本地只读），再让你当场选目标远端、输入目标分支名（这个名字交给 git check-ref-format "
+    L"裁定，不合格就不发任何命令）、决定要不要设上游，然后向每个发布地址只读问一次「那条引用在不在」。"
+    L"对端已有那条引用时明确列成风险：仍然不带 --force，非快进会被 Git 拒绝。\r\n"
+    L"「推送」与「设置上游」是两步各自报告的事：上游写入是两条 git config（branch.<分支>.remote、"
+    L".merge），推送确实成功后才逐条在命令窗口里跑，一条一个退出码；没写成就停下并说清写到哪一条，"
+    L"不自动重发、不自动回退。取消或推送失败时一个配置都不写。\r\n"
     L"branch.<分支>.pushRemote / remote.pushDefault / 独立 push URL / url.*.insteadOf 让实际发布"
     L"地点与抓取的那一侧不同时，会被解析出来明确展示并要求你明确点头。\r\n"
     L"命令窗口报告结束后，还会向确认框上列出的那些**发布目标**逐个发只读 ls-remote，核对那条引用"
@@ -1112,7 +1119,8 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.fetchOperation,
                                      options.pullFetchOperation,
                                      options.pullIntegrateOperation,
-                                     options.pushOperation};
+                                     options.pushOperation,
+                                     options.upstreamWriteStep};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1825,6 +1833,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const bool pullFetchOperation = activeOperation_.pullFetchOperation;
   const bool pullIntegrateOperation = activeOperation_.pullIntegrateOperation;
   const bool pushOperation = activeOperation_.pushOperation;
+  const int upstreamWriteStep = activeOperation_.upstreamWriteStep;
   const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
@@ -1890,6 +1899,9 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (pushOperation) {
     conclusion += app::DescribePushCommandConclusion(outcome.succeeded);
   }
+  // 上游写入的那几条 git config：结论里不追加推送那句承诺（它们不是推送），
+  // 成败交回推送控制器逐条判定——「推送成功」与「配置写成没有」必须分开说。
+  const bool upstreamWriteOperation = upstreamWriteStep != 0;
   // 集中环境策略移除过继承的重定向变量时，结论必须把这句话说完：
   // 用户从终端启动本程序时要知道“那些变量被移除了、操作绑定的是界面上选中的仓库”。
   if (!result.environmentNotice.empty()) {
@@ -1912,6 +1924,12 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     // 命令报成功时要拿它当证据，命令报失败时它正是「远端到底动没动」的唯一凭据。
     pushFlow_.BeginVerification(*this, CaptureOperationContext(), outcome.succeeded, conclusion);
   }
+  if (upstreamWriteOperation) {
+    // 首次推送之后的上游写入：这一步的终态交回推送控制器。成功就发下一条，
+    // 失败就停下并分开说清「推送已经成的那部分」与「配置只写了一半」——绝不自动重发。
+    pushFlow_.OnUpstreamStepSettled(*this, CaptureOperationContext(), upstreamWriteStep,
+                                    outcome.succeeded, conclusion);
+  }
   // 无论成功还是失败都要重读一次：失败的操作同样可能已经改动仓库
   // （提交到一半、push 被拒、合并留下冲突），只有退出码决定要不要报成功。
   ScheduleRefresh(window);
@@ -1927,7 +1945,8 @@ void MainWindow::TickActiveOperations(HWND window) {
     const std::wstring name = activeOperation_.displayName;
     const bool pullStepInProgress = activeOperation_.pullFetchOperation ||
                                     activeOperation_.pullIntegrateOperation;
-    const bool pushStepInProgress = activeOperation_.pushOperation;
+    const bool pushStepInProgress =
+        activeOperation_.pushOperation || activeOperation_.upstreamWriteStep != 0;
     // 这里不删清单文件：通知丢失意味着 Git 可能还在命令窗口里跑，删掉正在被读的文件
     // 会让一次合法的 git add 变成 Git 的报错。%TEMP% 里留下几百字节的清单远小于那个代价。
     activeOperation_ = ActiveOperation{};
@@ -2154,6 +2173,26 @@ std::optional<size_t> MainWindow::PromptRemoteChoice(platform::RemoteChoiceSpec 
   return static_cast<size_t>(choice.selectedIndex);
 }
 
+std::optional<std::wstring> MainWindow::PromptForText(platform::IdentityPromptSpec spec,
+                                                     const TextInputLayoutHints& hints) {
+  // 与「合作者」那一套输入框共用同一份对话框实现与同一套 DPI 度量：控制器只给内容与行数，
+  // 几何一律在这里按本窗口的度量填，高 DPI 下和界面其它部分一致。
+  spec.font = metrics_.Font();
+  spec.layout.margin = metrics_.Margin();
+  spec.layout.gap = metrics_.RowGap();
+  spec.layout.width = metrics_.Scale(hints.contentWidth);
+  spec.layout.labelHeight = hints.labelRows * metrics_.LabelHeight();
+  spec.layout.editHeight = metrics_.ControlHeight();
+  spec.layout.noteHeight = hints.noteRows * metrics_.LabelHeight();
+  spec.layout.buttonWidth = metrics_.ButtonWidth(spec.okText);
+  spec.layout.buttonHeight = metrics_.ControlHeight();
+  const platform::IdentityPromptResult result = platform::PromptForIdentity(window_.get(), spec);
+  if (!result.accepted) {
+    return std::nullopt;
+  }
+  return result.value;
+}
+
 bool MainWindow::LaunchCommandWindow(const git::CommandWindowOperation& operation,
                                      const CommandLaunchOptions& options) {
   return LaunchCommandWindowOperation(window_.get(), operation, options);
@@ -2370,7 +2409,16 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
                                  static_cast<uint64_t>(wParam));
       return 0;
     case kPushVerifyCompleted:
-      pushFlow_.OnVerifyCompleted(*this, static_cast<uint64_t>(wParam));
+      pushFlow_.OnVerifyCompleted(*this, CaptureOperationContext(),
+                                  static_cast<uint64_t>(wParam));
+      return 0;
+    case kFirstPushTargetsCompleted:
+      pushFlow_.OnFirstPushTargetsCompleted(*this, CaptureOperationContext(),
+                                            static_cast<uint64_t>(wParam));
+      return 0;
+    case kFirstPushProbeCompleted:
+      pushFlow_.OnFirstPushProbeCompleted(*this, CaptureOperationContext(),
+                                          static_cast<uint64_t>(wParam));
       return 0;
     case kCommitProbeCompleted:
       commitFlow_.OnProbeCompleted(*this, CaptureOperationContext(), state_.WorkspaceModel(),

@@ -224,6 +224,10 @@ private:
                    const std::wstring& yesButton, const std::wstring& body) override;
   std::optional<size_t> PromptRemoteChoice(platform::RemoteChoiceSpec spec,
                                            const RemoteChoiceLayoutHints& hints) override;
+  // 单行输入框：与「合作者」那一套模态框同一份实现，几何同样按本窗口的 DPI 度量填。
+  // 首次推送向导用它问目标分支名（框内的 validate 只做纯形态提示，权威裁定在后台问 Git）。
+  std::optional<std::wstring> PromptForText(platform::IdentityPromptSpec spec,
+                                            const TextInputLayoutHints& hints) override;
   bool LaunchCommandWindow(const git::CommandWindowOperation& operation,
                            const CommandLaunchOptions& options) override;
   void ScheduleRefresh() override;
@@ -271,6 +275,10 @@ private:
     bool pullIntegrateOperation = false;
     // 这次是「推送」：终态之后要把结论交回 push 控制器发起对发布目标的核实。
     bool pushOperation = false;
+    // 这次是「首次推送之后的上游写入」第几条 git config（0 = 不是这一步）。
+    // 终态交回 push 控制器：成功才发下一条，失败就把「推送已成的那部分」和「配置只写了一半」
+    // 分开说完——两条各自有退出码，绝不合并成一句成功。
+    int upstreamWriteStep = 0;
   };
 
   platform::UniqueWindow window_;

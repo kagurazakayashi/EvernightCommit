@@ -97,6 +97,7 @@ add_library(gc_core STATIC
   src/git/diff_view.cpp
   src/git/fetch_plan.cpp
   src/git/fetch_scope.cpp
+  src/git/first_push_plan.cpp
   src/git/git_environment.cpp
   src/git/git_locator.cpp
   src/git/git_probe.cpp

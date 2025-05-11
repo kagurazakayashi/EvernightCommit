@@ -100,6 +100,14 @@ inline constexpr UINT kUndoRecheckCompleted = WM_APP + 13;
 // pull 整合失败后的「现场读取」（流程痕迹／未合并条目／HEAD 位置，全部只读）完成通知；
 // wParam 为请求序号。读回来才补完那句结论并请求重读。
 inline constexpr UINT kPullAftermathCompleted = WM_APP + 14;
+// 「首次推送」向导第一步：仓库里有哪些远端、各自实际发布地址（config --list 与逐远端
+// get-url --push --all，全部本地只读）完成通知；wParam 为请求序号。
+inline constexpr UINT kFirstPushTargetsCompleted = WM_APP + 15;
+// 「首次推送」向导第二步：选定目标之后的只读预检（分支／HEAD／上游还是没有／引用名裁定／
+// 逐发布地址那条引用在不在／配置文件落点）完成通知；wParam 为请求序号。
+// 确认框之前的预检与点头之后的执行前复核共用这一条，回来给谁用由推送控制器的阶段标记分辨。
+// 注意这一步里的 ls-remote 会访问远端（只读），与「不接触任何远端」的本地预检不同。
+inline constexpr UINT kFirstPushProbeCompleted = WM_APP + 16;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -144,6 +152,12 @@ inline constexpr unsigned long kPushProbeTimeoutMs = 20000;
 // 程序退出时这一步有整体退出策略：worker 的停止信号让剩余目标不再发起 ls-remote，
 // WM_DESTROY 的等待因此只按「当前在途的那一条」计，而不是全部目标逐个把超时排完。
 inline constexpr unsigned long kPushVerifyTimeoutMs = 30000;
+// 「首次推送」向导第一步全是本地只读查询（config --list 与逐远端 get-url），
+// 沿用推送预检的 20 秒放宽值；问不成的远端逐个带着原因交回界面，不自动重试。
+inline constexpr unsigned long kFirstPushTargetsTimeoutMs = 20000;
+// 「首次推送」向导第二步里含一条要访问远端的只读 ls-remote，与推送后的核实同一档：
+// 30 秒。超时只落成「对端现状没能问出来」，不据此断言任何一边被改过，也不自动重问。
+inline constexpr unsigned long kFirstPushProbeTimeoutMs = 30000;
 // 「创建提交」的身份预检里最慢的一条是 git write-tree（大仓库要现算若干棵树），量级与 git status
 // 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、
 // 命令不发，绝不退回用早前那一份事实继续，也不自动重试。

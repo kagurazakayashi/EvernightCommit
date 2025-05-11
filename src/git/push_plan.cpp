@@ -40,6 +40,10 @@ bool HasIllegalCharacter(std::wstring_view text) {
   return false;
 }
 
+}  // namespace
+
+// 下面三个形态判定是普通推送与「首次推送」向导共用的唯一一份底线（声明见 push_plan.h）：
+// 两处各写一套就会出现「界面说合格、命令构造期拒绝」的分裂。
 bool IsUsableLocalBranchRef(std::wstring_view ref) {
   return ref.size() > kHeadsPrefix.size() && StartsWith(ref, kHeadsPrefix) &&
          !HasIllegalCharacter(ref);
@@ -55,6 +59,8 @@ bool IsUsableRemoteRef(std::wstring_view ref) {
 bool IsUsableRemoteName(std::wstring_view name) {
   return !name.empty() && name.front() != L'-' && !HasIllegalCharacter(name);
 }
+
+namespace {
 
 // URL 不会进命令行的引用区（命令里出现的是远端名字），这里只挡「根本没法作为单个参数
 // 交出去」的形态：控制字符。双引号、冒号、斜杠都是 URL（或本机路径）里可能合法出现的字符，
@@ -192,29 +198,12 @@ std::wstring PushTargetSentence(const PushPreflightFacts& facts) {
 }
 
 std::wstring NeutralizeSentence(const PushPreflightFacts& facts) {
-  std::wstring text;
-  if (facts.mirrorConfigured) {
-    text += L" · 仓库里有 remote." + facts.pushRemoteName +
-            L".mirror：实测它会让「带 refspec 的 push」整条命令失败，因此这条命令临时按 "
-            L"-c remote." + facts.pushRemoteName +
-            L".mirror=false 发出（只对这个子进程生效，不写你的配置文件）。\n";
-  }
-  if (facts.tagOptConfigured) {
-    // 命令里写作 `tagopt`（小写）：Git 的配置键名大小写不敏感，这里跟命令保持一字不差，
-    // 免得人在窗口里找不到界面说的那个写法。
-    text += L" · 仓库里有 remote." + facts.pushRemoteName +
-            L".tagOpt：为免它把标签一起带上，这条命令临时用 -c remote." + facts.pushRemoteName +
-            L".tagopt= 把它置空。\n";
-  }
-  if (facts.followTagsConfigured) {
-    text += L" · 仓库里有 push.followTags：这条命令临时用 -c push.followTags=false 关掉它。\n";
-  }
-  if (facts.extraPushRefspecsConfigured) {
-    text += L" · 仓库里有 remote." + facts.pushRemoteName +
-            L".push（额外的推送 refspec）：实测带显式 refspec 时它不会被附上，"
-            L"本程序仍然只推命令行上那一条。\n";
-  }
-  return text;
+  PushScopeConfigEffects effects;
+  effects.mirrorConfigured = facts.mirrorConfigured;
+  effects.tagOptConfigured = facts.tagOptConfigured;
+  effects.followTagsConfigured = facts.followTagsConfigured;
+  effects.extraPushRefspecsConfigured = facts.extraPushRefspecsConfigured;
+  return DescribePushNeutralization(facts.pushRemoteName, effects);
 }
 
 std::wstring QuotedArguments(const std::vector<std::wstring>& arguments) {
@@ -487,6 +476,121 @@ std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls) {
   return text;
 }
 
+bool PushConfigListing::HasRemote(std::wstring_view remoteName) const {
+  return !RemoteValues(remoteName, L"url").empty() || !RemoteValues(remoteName, L"pushurl").empty();
+}
+
+// ---- 发布 URL 解析与范围设置判定 ----
+
+std::vector<std::wstring> RawConfiguredPushUrls(const PushConfigListing& config,
+                                                std::wstring_view remoteName) {
+  const std::vector<std::wstring> configuredPushUrls = config.RemoteValues(remoteName, L"pushurl");
+  return configuredPushUrls.empty() ? config.RemoteValues(remoteName, L"url") : configuredPushUrls;
+}
+
+PushUrlResolution ResolvePushUrls(const GitQueryResult& remoteUrlQuery, bool queryRan,
+                                 const PushConfigListing& config, std::wstring_view remoteName) {
+  PushUrlResolution resolution;
+  const std::vector<std::wstring> rawUrls = RawConfiguredPushUrls(config, remoteName);
+  if (!queryRan) {
+    resolution.failure = L"这条查询压根没发出去（远端名字的形态先不合格）";
+    return resolution;
+  }
+  // 发布 URL 只认 `git remote get-url --push --all` 的回答：Git 自己按「pushurl 优先于 url、
+  // 逐条叠加 insteadOf（落回 url 的场合还叠 pushInsteadOf）」算出的**全部**实际地址，按配置顺序。
+  // 这条查询问不成（非 0、启动不成、一行地址都没有、地址里有控制字符、条数与配置清单对不上——
+  // 最后一种意味着某个值里带换行被按行拆开了，那是没法作为单个参数交出去的地址），就只能拒绝：
+  // 把配置里未经解析的原样 URL 塞回来继续发布，等于嘴上念 A、手上寄往一个「大概等于 A」的地方。
+  const UndoQueryRead urlRead = ReadUndoQuery(remoteUrlQuery);
+  if (urlRead.outcome == UndoQueryOutcome::failed) {
+    resolution.failure = RefusalWith(urlRead, L"git remote get-url --push --all 未成功");
+    return resolution;
+  }
+  if (urlRead.outcome != UndoQueryOutcome::answered) {
+    resolution.failure = L"git remote get-url --push --all 没有给出可解析的回答";
+    return resolution;
+  }
+  if (urlRead.lines.empty()) {
+    resolution.failure = L"git remote get-url --push --all 成功返回，却没有答出任何一个地址"
+                         L"（这个远端实际没有可推送的目标）";
+    return resolution;
+  }
+  for (const std::wstring& candidate : urlRead.lines) {
+    if (HasIllegalUrlCharacter(candidate)) {
+      resolution.failure = L"Git 答出的发布地址里有没法作为单个参数交出去的字符（控制字符）：" +
+                           ConfigRecordSampleForUi(candidate);
+      return resolution;
+    }
+  }
+  if (urlRead.lines.size() != rawUrls.size()) {
+    resolution.failure = L"Git 答出的地址条数（" + std::to_wstring(urlRead.lines.size()) +
+                         L"）与生效配置清单里这个远端的地址条目（" + std::to_wstring(rawUrls.size()) +
+                         L"）对不上——某个地址值里带着换行被按行拆开时就是这样，"
+                         L"本程序不猜哪几条是完整地址";
+    return resolution;
+  }
+  resolution.urls = urlRead.lines;
+  resolution.rewritten = resolution.urls != rawUrls;
+  return resolution;
+}
+
+std::wstring DescribePushUrlNote(const std::vector<std::wstring>& urls, bool rewritten,
+                                const std::vector<std::wstring>& rawUrls) {
+  if (urls.size() > 1) {
+    return L"这个远端配了 " + std::to_wstring(urls.size()) +
+           L" 个发布地址：实测 `git push <远端>` 会推给每一个，上面每一条都是 Git 自己"
+           L"（get-url --push --all）答出来的已展开地址。那条 push 命令的退出码是**各目标合计**的："
+           L"整体成功不代表每个都送到位。推送后本程序会把上面每一个地址逐个再问一次 ls-remote，"
+           L"每个目标的核实结果各记各的。注意：把这些已展开的地址再交回 Git 时，它们仍可能命中"
+           L" url.*.insteadOf 被**再次改写**（实测空值的 `-c url.<base>.insteadOf=` 并不能取消既有"
+           L"规则，本程序不假装能关掉它）——核实问到的地方若因此变了，结论会如实落到「与预期不符/"
+           L"没能核实」，本程序不猜、不硬说成成功。";
+  }
+  if (rewritten && !rawUrls.empty()) {
+    return L"这个地址是 Git 按 url.*.insteadOf / pushInsteadOf 改写之后的结果"
+           L"（配置里写的是 " + MaskPushUrlCredentials(rawUrls.front()) + L"）。";
+  }
+  return std::wstring();
+}
+
+PushScopeConfigEffects InspectPushScopeConfig(const PushConfigListing& config,
+                                             std::wstring_view remoteName) {
+  PushScopeConfigEffects effects;
+  effects.pushDefault = config.Value(L"push.default");
+  effects.extraPushRefspecsConfigured = !config.RemoteValues(remoteName, L"push").empty();
+  effects.mirrorConfigured = ConfigTakesEffect(config, RemoteKey(remoteName, L"mirror"));
+  effects.tagOptConfigured = !config.RemoteValues(remoteName, L"tagopt").empty();
+  effects.followTagsConfigured = ConfigTakesEffect(config, L"push.followtags");
+  return effects;
+}
+
+std::wstring DescribePushNeutralization(std::wstring_view remoteName,
+                                       const PushScopeConfigEffects& effects) {
+  std::wstring text;
+  if (effects.mirrorConfigured) {
+    text += L" · 仓库里有 remote." + std::wstring(remoteName) +
+            L".mirror：实测它会让「带 refspec 的 push」整条命令失败，因此这条命令临时按 "
+            L"-c remote." + std::wstring(remoteName) +
+            L".mirror=false 发出（只对这个子进程生效，不写你的配置文件）。\n";
+  }
+  if (effects.tagOptConfigured) {
+    // 命令里写作 `tagopt`（小写）：Git 的配置键名大小写不敏感，这里跟命令保持一字不差，
+    // 免得人在窗口里找不到界面说的那个写法。
+    text += L" · 仓库里有 remote." + std::wstring(remoteName) +
+            L".tagOpt：为免它把标签一起带上，这条命令临时用 -c remote." + std::wstring(remoteName) +
+            L".tagopt= 把它置空。\n";
+  }
+  if (effects.followTagsConfigured) {
+    text += L" · 仓库里有 push.followTags：这条命令临时用 -c push.followTags=false 关掉它。\n";
+  }
+  if (effects.extraPushRefspecsConfigured) {
+    text += L" · 仓库里有 remote." + std::wstring(remoteName) +
+            L".push（额外的推送 refspec）：实测带显式 refspec 时它不会被附上，"
+            L"本程序仍然只推命令行上那一条。\n";
+  }
+  return text;
+}
+
 // ---- 查询参数 ----
 
 std::vector<std::wstring> BuildPushConfigListingArguments(std::wstring_view repositoryDirectory) {
@@ -688,83 +792,29 @@ PushPreflightFacts InterpretPushPreflight(const PushPreflightQueries& queries) {
       ResolvePushRemote(facts.config, facts.branchName, facts.upstreamRemote);
   facts.pushRemoteName = choice.remoteName;
   facts.pushRemoteSource = choice.source;
-  facts.pushDefault = facts.config.Value(L"push.default");
-  facts.extraPushRefspecsConfigured = !facts.config.RemoteValues(facts.pushRemoteName, L"push").empty();
-  facts.mirrorConfigured = ConfigTakesEffect(facts.config, RemoteKey(facts.pushRemoteName, L"mirror"));
-  facts.tagOptConfigured = !facts.config.RemoteValues(facts.pushRemoteName, L"tagopt").empty();
-  facts.followTagsConfigured = ConfigTakesEffect(facts.config, L"push.followtags");
+  const PushScopeConfigEffects scopeEffects =
+      InspectPushScopeConfig(facts.config, facts.pushRemoteName);
+  facts.pushDefault = scopeEffects.pushDefault;
+  facts.extraPushRefspecsConfigured = scopeEffects.extraPushRefspecsConfigured;
+  facts.mirrorConfigured = scopeEffects.mirrorConfigured;
+  facts.tagOptConfigured = scopeEffects.tagOptConfigured;
+  facts.followTagsConfigured = scopeEffects.followTagsConfigured;
 
   if (IsUsableRemoteName(facts.pushRemoteName)) {
-    facts.pushRemoteExists = !facts.config.RemoteValues(facts.pushRemoteName, L"url").empty() ||
-                             !facts.config.RemoteValues(facts.pushRemoteName, L"pushurl").empty();
-    const std::vector<std::wstring> configuredPushUrls =
-        facts.config.RemoteValues(facts.pushRemoteName, L"pushurl");
-    facts.rawPushUrls = configuredPushUrls.empty()
-                            ? facts.config.RemoteValues(facts.pushRemoteName, L"url")
-                            : configuredPushUrls;
-    // 发布 URL 只认 `git remote get-url --push --all` 的回答：Git 自己按「pushurl 优先于 url、
-    // 逐条叠加 insteadOf（落回 url 的场合还叠 pushInsteadOf）」算出的**全部**实际地址，按配置顺序。
-    // 这条查询问不成（非 0、启动不成、一行地址都没有、地址里有控制字符、条数与配置清单对不上——
-    // 最后一种意味着某个值里带换行被按行拆开了，那是没法作为单个参数交出去的地址），就只能拒绝：
-    // 把配置里未经解析的原样 URL 塞回来继续发布，等于嘴上念 A、手上寄往一个「大概等于 A」的地方。
-    std::vector<std::wstring> resolved;
-    std::wstring urlFailure;
-    if (queries.remoteUrlRan) {
-      const UndoQueryRead urlRead = ReadUndoQuery(queries.remoteUrl);
-      if (urlRead.outcome == UndoQueryOutcome::answered) {
-        if (urlRead.lines.empty()) {
-          urlFailure = L"git remote get-url --push --all 成功返回，却没有答出任何一个地址"
-                       L"（这个远端实际没有可推送的目标）";
-        } else {
-          bool usable = true;
-          for (const std::wstring& candidate : urlRead.lines) {
-            if (HasIllegalUrlCharacter(candidate)) {
-              urlFailure = L"Git 答出的发布地址里有没法作为单个参数交出去的字符（控制字符）：" +
-                           ConfigRecordSampleForUi(candidate);
-              usable = false;
-              break;
-            }
-          }
-          if (!usable) {
-            // 上面已带原因。
-          } else if (urlRead.lines.size() != facts.rawPushUrls.size()) {
-            urlFailure = L"Git 答出的地址条数（" + std::to_wstring(urlRead.lines.size()) +
-                         L"）与生效配置清单里这个远端的地址条目（" +
-                         std::to_wstring(facts.rawPushUrls.size()) +
-                         L"）对不上——某个地址值里带着换行被按行拆开时就是这样，"
-                         L"本程序不猜哪几条是完整地址";
-          } else {
-            resolved = urlRead.lines;
-          }
-        }
-      } else if (urlRead.outcome == UndoQueryOutcome::failed) {
-        urlFailure = RefusalWith(urlRead, L"git remote get-url --push --all 未成功");
-      } else {
-        urlFailure = L"git remote get-url --push --all 没有给出可解析的回答";
-      }
-    } else {
-      urlFailure = L"这条查询压根没发出去（远端名字的形态先不合格）";
-    }
-    facts.pushUrlFailure = urlFailure;
-    facts.pushUrls = resolved;  // 解析不成时保持为空——绝不塞原样地址顶替。
-    facts.pushUrlRewritten = !resolved.empty() && resolved != facts.rawPushUrls;
-    if (resolved.size() > 1) {
-      facts.pushUrlNote =
-          L"这个远端配了 " + std::to_wstring(resolved.size()) +
-          L" 个发布地址：实测 `git push <远端>` 会推给每一个，上面每一条都是 Git 自己"
-          L"（get-url --push --all）答出来的已展开地址。那条 push 命令的退出码是**各目标合计**的："
-          L"整体成功不代表每个都送到位。推送后本程序会把上面每一个地址逐个再问一次 ls-remote，"
-          L"每个目标的核实结果各记各的。注意：把这些已展开的地址再交回 Git 时，它们仍可能命中"
-          L" url.*.insteadOf 被**再次改写**（实测空值的 `-c url.<base>.insteadOf=` 并不能取消既有"
-          L"规则，本程序不假装能关掉它）——核实问到的地方若因此变了，结论会如实落到「与预期不符/"
-          L"没能核实」，本程序不猜、不硬说成成功。";
-    } else if (facts.pushUrlRewritten && !facts.rawPushUrls.empty()) {
-      facts.pushUrlNote = L"这个地址是 Git 按 url.*.insteadOf / pushInsteadOf 改写之后的结果"
-                          L"（配置里写的是 " + MaskPushUrlCredentials(facts.rawPushUrls.front()) + L"）。";
-    }
+    facts.pushRemoteExists = facts.config.HasRemote(facts.pushRemoteName);
+    facts.rawPushUrls = RawConfiguredPushUrls(facts.config, facts.pushRemoteName);
+    const PushUrlResolution resolution =
+        ResolvePushUrls(queries.remoteUrl, queries.remoteUrlRan, facts.config, facts.pushRemoteName);
+    facts.pushUrlFailure = resolution.failure;
+    facts.pushUrls = resolution.urls;  // 解析不成时保持为空——绝不塞原样地址顶替。
+    facts.pushUrlRewritten = resolution.rewritten;
+    facts.pushUrlNote = DescribePushUrlNote(facts.pushUrls, facts.pushUrlRewritten, facts.rawPushUrls);
+    // 「发布目标就是抓取的那一侧」只在两条都不成立时才算：没配独立 pushurl（光有 url 不算）、
+    // 而且 Git 展开出来的地址与配置原样一致（没被 insteadOf 改写过）。
+    // 注意这里判的是 pushurl 的有无，不是原样地址清单的有无：只有 url 才是最常见的「同地」形态。
     facts.pushTargetIsFetchTarget =
-        facts.pushRemoteName == facts.upstreamRemote && configuredPushUrls.empty() &&
-        !facts.pushUrlRewritten;
+        facts.pushRemoteName == facts.upstreamRemote &&
+        facts.config.RemoteValues(facts.pushRemoteName, L"pushurl").empty() && !facts.pushUrlRewritten;
   }
 
   if (queries.aheadBehindRan) {
@@ -833,7 +883,10 @@ std::wstring PushPrerequisiteRefusal(const PushPreflightFacts& facts,
            L"没有上游就不知道“该推给哪个远端的哪条分支”，本程序不猜 origin/" + facts.branchName +
            L"，也不替你 git push --set-upstream、git branch --set-upstream-to——那些都会写你的配置文件。"
            L"请先用 Git 把上游设好（例如 git push -u origin " + facts.branchName +
-           L"，或 git branch --set-upstream-to=origin/" + facts.branchName + L"），再回来点“推送”。";
+           L"，或 git branch --set-upstream-to=origin/" + facts.branchName + L"），再回来点“推送”。"
+           L"（仓库里只要有配好地址的远端，点“推送”就会改走「首次推送」：由你当场选目标远端与目标分支，"
+           L"推送与写上游各自单独确认、单独报告。现在没走到那一步，说明这个仓库一个有地址的远端也没有，"
+           L"或当前分支/提交不满足它的前提——上面那句拒绝说的就是这种情况。）";
   }
   if (!IsUsableRemoteRef(facts.upstreamRemoteRef)) {
     return L"上游配置给出的远端引用形态不合格（不是 refs/ 开头，或含 `:`、引号等无法安全进入命令的字符）：" +
