@@ -54,4 +54,14 @@ struct WritePrerequisites {
                                           const WritePrerequisites& prerequisites,
                                           std::wstring_view actionLabel);
 
+// 仓库导航（「进入子模块」/「返回父仓库」）的准入裁决。导航本身不写任何东西——不改索引、
+// 不产生提交、不访问远端——但它会把界面绑定的仓库整个换掉。任何在途的被编排操作（只读预检、
+// 执行前复核、命令窗口里那条命令、推送后的核实、上游写入）等的都是「它自己核对过的那份现状」，
+// 仓库一换，回来的结果就不属于那个现状了。因此这里比写操作之间的互斥更严：五个流程只要有
+// 任何一个在走、或命令窗口槽被占，导航就拒绝，并点名是谁占着。返回空串 = 可以导航。
+// 放宽其中任何一条之前，必须先想清楚「哪一步的等结果会因此落到别的仓库上」。
+[[nodiscard]] std::wstring DescribeNavigationRefusal(const WritePrerequisites& prerequisites,
+                                                     const GitFlowActivity& activity,
+                                                     std::wstring_view actionLabel);
+
 }  // namespace gc::app

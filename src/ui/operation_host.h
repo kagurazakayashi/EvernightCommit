@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "app/commit_form_session.h"
+#include "app/submodule_journey.h"  // HeldForm：子模块导航交还表单时要倒回的那一份
 #include "app/task_coordinator.h"
 #include "git/author_config.h"
 #include "git/commit_date.h"
@@ -131,6 +132,12 @@ public:
   virtual void ScheduleRefresh() = 0;
   // 把一段结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
   virtual void RememberOperationConclusion(std::wstring_view conclusion) = 0;
+
+  // 导航用的仓库切换：把界面绑定的仓库整个换到给出的目录，走的就是既有的那条链路
+  // （后台识别 → 绑定 → 作废旧列表 → 重读 → 作者默认值重查），不另开一套。
+  // 控制器只决定「去哪儿」与「这句状态怎么写」；换绑定的全部后果由实现承担。
+  // 返回 false = 没有切换（原因已由实现写进状态栏）。
+  virtual bool NavigateRepository(std::wstring_view directory, std::wstring_view statusNote) = 0;
 };
 
 // 「创建提交」额外需要的表单桥：内容重采集与收尾落地都在提交表单控件里，
@@ -154,6 +161,18 @@ public:
   virtual void RunFormValidation(std::wstring_view prefixNote) = 0;
   // 提交创建成功的收尾：按判定清空对应栏目；resetTimes 时把两个时间回到此刻并跟上联动。
   virtual void ApplyCommittedFormCleanup(const app::CommittedFormCleanup& cleanup) = 0;
+
+  // ---- 子模块导航的表单代管 ----
+  // 界面上现在有没有「用户写的东西」。交还代管草稿之前必须先问这一句：
+  // 两份内容都可能是要的，程序无权替人取舍。
+  [[nodiscard]] virtual bool CommitFormHasUserContent() const = 0;
+  // 离开这个仓库：整张表单倒空，并撤掉「这是用户写的」那些记号（内容已由导航收进代管）。
+  // note 写进「表单自己的说明」那条通道，让人看得见那些字去了哪里。
+  virtual void ClearFormForNavigation(std::wstring_view note) = 0;
+  // 回到这个仓库：把代管的那一份原样倒回表单（含两个时间与同步勾选）。
+  // 交还的作者栏是用户当时写的字，必须记成用户内容：随后到达的「这个仓库的默认作者」
+  // 不能把它悄悄盖掉——那正是身份串用的来路。
+  virtual void ApplyHeldFormForNavigation(const app::HeldForm& held, std::wstring_view note) = 0;
 };
 
 }  // namespace gc::ui

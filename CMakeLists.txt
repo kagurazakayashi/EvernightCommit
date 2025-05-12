@@ -86,6 +86,7 @@ add_library(gc_core STATIC
   src/app/list_view_memory.cpp
   src/app/operation_conclusions.cpp
   src/app/operation_gate.cpp
+  src/app/submodule_journey.cpp
   src/app/task_coordinator.cpp
   src/git/author_config.cpp
   src/git/command_window.cpp
@@ -105,6 +106,7 @@ add_library(gc_core STATIC
   src/git/push_plan.cpp
   src/git/repository.cpp
   src/git/staging_plan.cpp
+  src/git/submodule_navigation.cpp
   src/git/undo_commit_plan.cpp
   src/git/workspace_model.cpp
   src/git/workspace_status.cpp)
@@ -133,6 +135,7 @@ add_library(gc_platform STATIC
   src/platform/windows/remote_choice_dialog.cpp
   src/platform/windows/repo_detect.cpp
   src/platform/windows/subprocess.cpp
+  src/platform/windows/submodule_probe.cpp
   src/platform/windows/undo_probe.cpp
   src/platform/windows/utf_text.cpp
   src/platform/windows/win_path.cpp
@@ -155,6 +158,7 @@ add_library(gc_ui STATIC
   src/ui/push_flow.cpp
   src/ui/repo_bar.cpp
   src/ui/splitter.cpp
+  src/ui/submodule_flow.cpp
   src/ui/undo_flow.cpp
   src/ui/ui_metrics.cpp)
 target_include_directories(gc_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

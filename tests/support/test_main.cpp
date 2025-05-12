@@ -108,6 +108,8 @@ constexpr const char* kPureFiles[] = {
     "push_plan_tests.cpp",
     "repository_tests.cpp",
     "staging_plan_tests.cpp",
+    "submodule_journey_tests.cpp",
+    "submodule_navigation_tests.cpp",
     "subprocess_capture_tests.cpp",
     "subprocess_command_line_tests.cpp",
     "task_coordinator_tests.cpp",
@@ -140,6 +142,7 @@ constexpr const char* kFixtureFiles[] = {
     "refresh_repository_tests.cpp",
     "repo_detect_fixture_tests.cpp",
     "staging_plan_fixture_tests.cpp",
+    "submodule_navigation_fixture_tests.cpp",
     "undo_probe_fixture_tests.cpp",
     "workspace_status_fixture_tests.cpp",
 };
@@ -213,6 +216,10 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // 不建提交、不推送、不写任何配置（逐行核实于 2026-10-08 首次推送任务）。
     "first_push_ref_format_fixture_verdicts_match_the_contract",
     "first_push_remote_probe_fixture_separates_absent_from_unreachable",
+    // submodule_navigation_fixture_tests.cpp —— 只有 init、只读查询与在临时目录里造物
+    // （写文件/建目录）：不建提交、不推送、不动索引（2026-10-08 子模块导航任务逐行核实）。
+    "submodule_navigation_queries_fixture_are_accepted_by_real_git",
+    "submodule_entry_probe_fixture_refuses_paths_that_are_not_gitlinks",
 };
 
 bool InTable(const char* const* table, size_t count, std::string_view value) {

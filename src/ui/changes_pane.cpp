@@ -31,9 +31,17 @@ int ChangesPane::HintTextHeight(const UiMetrics& metrics) noexcept { return 2 * 
 int ChangesPane::HintVerticalPadding(const UiMetrics& metrics) noexcept { return metrics.Scale(16); }
 int ChangesPane::InnerInset(const UiMetrics& metrics) noexcept { return metrics.Scale(7); }
 
+int ChangesPane::ButtonStackHeight(const UiMetrics& metrics) noexcept {
+  // 四行按钮 + 三个行距 + 一个组间隔（暂存那两个与导航那两个之间留一组，看得出是两件事）。
+  return 4 * metrics.ControlHeight() + 3 * metrics.RowGap() + metrics.RowGap() * 2;
+}
+
 int ChangesPane::MinimumHeight(const UiMetrics& metrics) noexcept {
-  return GroupCaption(metrics) + ListHeaderHeight(metrics) + HintTextHeight(metrics) +
-         HintVerticalPadding(metrics) + InnerInset(metrics);
+  const int listNeed = GroupCaption(metrics) + ListHeaderHeight(metrics) + HintTextHeight(metrics) +
+                       HintVerticalPadding(metrics) + InnerInset(metrics);
+  // 中间那一栏的四个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
+  // 否则最后那一个按钮会被摆到表单那一带上去。
+  return std::max(listNeed, ButtonStackHeight(metrics));
 }
 
 void ChangesPane::Create(HWND parent) {
@@ -43,6 +51,8 @@ void ChangesPane::Create(HWND parent) {
 
   stageAdd_ = CreatePushButton(parent, L"加入暂存区 →", kIdStageAddButton);
   stageRemove_ = CreatePushButton(parent, L"← 移出暂存区", kIdStageRemoveButton);
+  enterSubmodule_ = CreatePushButton(parent, L"进入子模块", kIdEnterSubmoduleButton);
+  returnToParent_ = CreatePushButton(parent, L"返回父仓库", kIdReturnToParentButton);
 
   stagedGroup_ = CreateGroupBox(parent, L"已暂存的更改", kIdStagedGroup);
   stagedList_ = CreateReportListView(parent, kIdStagedList, changeColumns_);
@@ -105,15 +115,26 @@ void ChangesPane::Layout(const ChangesColumns& columns, const UiMetrics& metrics
   const int gap = metrics.RowGap();
   const int rowHeight = metrics.ControlHeight();
   const int arrowWidth = columns.arrows.right - columns.arrows.left;
-  const int stackHeight = 2 * rowHeight + gap;
+  // 四行：加入暂存区 / 移出暂存区 /（一组间隔）/ 进入子模块 / 返回父仓库。
+  // 间隔让「动索引的那两个」与「只换绑定仓库的那两个」在同一栏里也看得出是两类事。
+  const int stackHeight = ChangesPane::ButtonStackHeight(metrics);
   int top = columns.arrows.top + ((columns.arrows.bottom - columns.arrows.top) - stackHeight) / 2;
   top = std::max<int>(columns.arrows.top, top);
 
   const int addWidth = std::min(arrowWidth, metrics.ButtonWidth(L"加入暂存区 →"));
   const int removeWidth = std::min(arrowWidth, metrics.ButtonWidth(L"← 移出暂存区"));
+  const int enterWidth = std::min(arrowWidth, metrics.ButtonWidth(L"进入子模块"));
+  const int returnWidth = std::min(arrowWidth, metrics.ButtonWidth(L"返回父仓库"));
   Place(stageAdd_, Box(columns.arrows.left + (arrowWidth - addWidth) / 2, top, addWidth, rowHeight));
   top += rowHeight + gap;
-  Place(stageRemove_, Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
+  Place(stageRemove_,
+        Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
+  top += rowHeight + gap * 3;  // 组间隔（与 ButtonStackHeight 里多留的那两行距一致）
+  Place(enterSubmodule_,
+        Box(columns.arrows.left + (arrowWidth - enterWidth) / 2, top, enterWidth, rowHeight));
+  top += rowHeight + gap;
+  Place(returnToParent_,
+        Box(columns.arrows.left + (arrowWidth - returnWidth) / 2, top, returnWidth, rowHeight));
 }
 
 template <typename Item>

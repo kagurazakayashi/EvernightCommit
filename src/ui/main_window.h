@@ -33,6 +33,7 @@
 #include "ui/push_flow.h"
 #include "ui/repo_bar.h"
 #include "ui/splitter.h"
+#include "ui/submodule_flow.h"
 #include "ui/undo_flow.h"
 #include "ui/ui_metrics.h"
 
@@ -205,6 +206,17 @@ private:
   void RequestPull(HWND window);
   void RequestPush(HWND window);
 
+  // ---- 子模块导航的两个入口 ----
+  // 两个入口都做同一套准入（app/DescribeNavigationRefusal：导航不写任何东西，但它会把界面
+  // 绑定的仓库整个换掉，因此在途的预检/复核/命令窗口/核实都要先结束），然后交给
+  // ui/submodule_flow 那台控制器：进入之前的只读核对、代管父仓库草稿、返回之后核那三份位置。
+  void EnterSubmodule(HWND window);
+  void ReturnToParent(HWND window);
+  // 「恰好选中一条子模块记录」的核对：按钮可用性与点击处理共用这一份判定，
+  // 两处各判一次就会出现「按钮开着而点下去说不能进」或反过来。refusal 给完整说法。
+  [[nodiscard]] bool CapturedSubmoduleSelection(git::ChangeItem* item,
+                                                std::wstring* refusal) const;
+
   // 时间控件的联动与说明：勾选同步时提交者跟着作者、提交者那两块置灰，
   // 并把「所选作者时间实际生效的 UTC 偏移」写进本机时区那句说明里。
   void RefreshTimeControlsState(HWND window);
@@ -232,11 +244,18 @@ private:
                            const CommandLaunchOptions& options) override;
   void ScheduleRefresh() override;
   void RememberOperationConclusion(std::wstring_view conclusion) override;
+  // 导航用的仓库切换：把「本地仓库」那一栏改到给出的目录，然后走既有的那条识别链路
+  // （后台识别 → 绑定 → 作废旧列表 → 重读 → 作者默认值重查）。不另开一套换绑逻辑。
+  bool NavigateRepository(std::wstring_view directory, std::wstring_view statusNote) override;
   [[nodiscard]] CommitFormSnapshot CaptureCommitForm() const override;
   [[nodiscard]] bool CommitTimesUserEdited() const override;
   void ApplyDefaultTimesToNow() override;
   void RunFormValidation(std::wstring_view prefixNote) override;
   void ApplyCommittedFormCleanup(const app::CommittedFormCleanup& cleanup) override;
+  // 子模块导航的表单代管：界面上有没有用户写的字 / 收起 / 交还（键号与默认值记号都在这一层处理）。
+  [[nodiscard]] bool CommitFormHasUserContent() const override;
+  void ClearFormForNavigation(std::wstring_view note) override;
+  void ApplyHeldFormForNavigation(const app::HeldForm& held, std::wstring_view note) override;
 
   // 窗口收尾的两阶段：先对所有后台 worker 喊停（在途查询跑完后剩余查询被停止信号短路），
   // 再逐个 Join 等待线程真正退出。总等待按「最长的一条在途查询」计，
@@ -292,6 +311,8 @@ private:
   FetchFlow fetchFlow_;
   PullFlow pullFlow_;
   PushFlow pushFlow_;
+  // 子模块导航：进来路、代管各仓库的表单草稿、两条只读探测都在这台控制器里。
+  SubmoduleFlow submoduleFlow_;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;

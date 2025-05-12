@@ -63,6 +63,9 @@ enum ControlId : int {
   kIdPushButton = 193,
   kIdBottomStatusLabel = 194,
   kIdTimeResetButton = 195,
+  // 子模块导航的两个按钮：只对状态列写着「子模块」的那一条起作用，返回的可用性由导航栈决定。
+  kIdEnterSubmoduleButton = 196,
+  kIdReturnToParentButton = 197,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
@@ -108,6 +111,11 @@ inline constexpr UINT kFirstPushTargetsCompleted = WM_APP + 15;
 // 确认框之前的预检与点头之后的执行前复核共用这一条，回来给谁用由推送控制器的阶段标记分辨。
 // 注意这一步里的 ls-remote 会访问远端（只读），与「不接触任何远端」的本地预检不同。
 inline constexpr UINT kFirstPushProbeCompleted = WM_APP + 16;
+// 「进入子模块」之前的只读探测（目录存在性 + 那次仓库识别 + 父索引里那条 gitlink）完成通知；
+// wParam 为请求序号。导航本身不改父索引、不提交、不访问远端，切换动作在通知回来之后才发起。
+inline constexpr UINT kSubmoduleEntryProbeCompleted = WM_APP + 17;
+// 「返回父仓库」之后那三份位置的只读核对（父索引 / 父提交 / 子模块 HEAD）完成通知；wParam 为请求序号。
+inline constexpr UINT kSubmodulePointerProbeCompleted = WM_APP + 18;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -158,6 +166,9 @@ inline constexpr unsigned long kFirstPushTargetsTimeoutMs = 20000;
 // 「首次推送」向导第二步里含一条要访问远端的只读 ls-remote，与推送后的核实同一档：
 // 30 秒。超时只落成「对端现状没能问出来」，不据此断言任何一边被改过，也不自动重问。
 inline constexpr unsigned long kFirstPushProbeTimeoutMs = 30000;
+// 子模块导航的探测沿用仓库识别那一档（识别本身最慢的一条是几条毫秒级只读查询，
+// 放宽到 8 秒容纳慢盘与大型仓库）。两条都不联网：目录属性、识别、ls-files / rev-parse 都是本地。
+inline constexpr unsigned long kSubmoduleProbeTimeoutMs = 8000;
 // 「创建提交」的身份预检里最慢的一条是 git write-tree（大仓库要现算若干棵树），量级与 git status
 // 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、
 // 命令不发，绝不退回用早前那一份事实继续，也不自动重试。

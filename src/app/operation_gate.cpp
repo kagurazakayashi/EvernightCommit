@@ -145,4 +145,26 @@ std::wstring AdmitWriteFlow(GitFlow requested, const GitFlowActivity& activity,
   return {};
 }
 
+std::wstring DescribeNavigationRefusal(const WritePrerequisites& prerequisites,
+                                      const GitFlowActivity& activity,
+                                      std::wstring_view actionLabel) {
+  // 共同前提那三条与写操作同一份判定（Git/仓库可用、命令窗口单槽、界面工作区仍是绑定的那一个）：
+  // 导航同样要求这三条成立，否则连「要换掉的是哪个仓库」都说不清。
+  const std::wstring prerequisiteRefusal =
+      DescribeWritePrerequisiteRefusal(prerequisites, actionLabel);
+  if (!prerequisiteRefusal.empty()) {
+    return prerequisiteRefusal;
+  }
+  // 五个流程逐个点名（顺序与被编排操作的常见轻重一致：命令窗口那条 → 核实那类 → 预检那类）。
+  static constexpr GitFlow kAll[] = {GitFlow::push, GitFlow::pull, GitFlow::fetch, GitFlow::undo,
+                                     GitFlow::commit};
+  for (const GitFlow flow : kAll) {
+    if (Active(activity, flow)) {
+      return std::wstring(BlockerPhrase(flow)) + std::wstring(actionLabel) +
+             L"。导航会把界面绑定的仓库整个换掉，那一步等回来的就不是它自己核对过的那份现状了。";
+    }
+  }
+  return {};
+}
+
 }  // namespace gc::app
