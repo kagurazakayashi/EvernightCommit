@@ -146,6 +146,32 @@ constexpr std::wstring_view kTipPush =
     L"命令窗口报告结束后，还会向确认框上列出的那些**发布目标**逐个发只读 ls-remote，核对那条引用"
     L"到底停在哪：推送成功与否以那份实况为准，本地引用看起来一致不算数；命令报成功却没核上时，"
     L"结论写「已推送但未核实」或「与预期不符」，不会自动重推。";
+constexpr std::wstring_view kTipEnterSubmodule =
+    L"把界面绑定的仓库换成所选子模块自己的工作区（git 状态、最近提交、作者默认值都按那个仓库读）。\r\n"
+    L"点下去先在后台只读核对三件事：那个目录在不在、Git 认不认它是**当前这个**父仓库登记的子模块"
+    L"（--show-superproject-working-tree 答的必须是现在这个父仓库）、父索引里那条记录是不是 160000 gitlink。\r\n"
+    L"任何一条不过就明确拒绝并说清原因：\r\n"
+    L"  · 目录不存在 → 说“不见了”，不替你把东西找回来；\r\n"
+    L"  · 目录在但 Git 沿它往上找到的是父仓库本身 → 那是子模块还没有初始化；初始化会联网并改动"
+    L"工作区，绝不在点导航时隐式触发；\r\n"
+    L"  · 那是一个独立仓库、或父仓库对不上（被移动过、另一份克隆）→ 来历不同，不进去；\r\n"
+    L"  · 裸仓库 / .git 内部 / 识别问不成 → 照实拒绝。\r\n"
+    L"父仓库界面上那份未提交的表单草稿会在切换前收进代管（按工作区根记），回到那个仓库时原样交还；"
+    L"交还前若界面上又写了新东西，会先问一句，两份都不会被悄悄覆盖。\r\n"
+    L"这一步不改父仓库索引、不产生提交、不访问远端，也不会递归处理任何子模块。\r\n"
+    L"提醒：提交子模块内部的内容与提交父仓库的指针是两个不同仓库里的两个操作；"
+    L"父仓库显示干净不证明子模块那次提交已经发布。";
+constexpr std::wstring_view kTipReturnToParent =
+    L"把界面绑定的仓库退回刚才那个父仓库（嵌套子模块就一层一层退）。\r\n"
+    L"只有当前绑定的确实是栈顶记下的那个子模块时才允许返回，否则一句拒绝——"
+    L"把父仓库那份草稿交到一个不相干的仓库上，比不返回更糟；代管内容一律原样留着。\r\n"
+    L"回去之后自动做一次只读核对：父索引里那条 gitlink、父提交里记的那一份、"
+    L"以及子模块自己现在的 HEAD，然后按结果提示下一步该由谁做：\r\n"
+    L"  · 三者一致 → 父仓库这一条显示干净（同时提醒：干净不等于已发布）；\r\n"
+    L"  · 索引与子模块一致、父提交还旧 → 指针已暂存，等的是在父仓库创建提交；\r\n"
+    L"  · 索引与子模块不一致 → 该由你选中那一条点“加入暂存区”，本程序不替你 add；\r\n"
+    L"  · 问不成、或那条记录已经不是 gitlink → 说“没问全”，不猜也不说干净。\r\n"
+    L"整个过程不 add、不 commit、不 push、不联网，也不递归处理别的子模块。";
 constexpr std::wstring_view kTipUnstagedList =
     L"未暂存的更改来自只读的 git status（porcelain v2，机器可读格式）：\r\n"
     L"包含已跟踪文件的修改/删除/重命名、未跟踪文件（目录已展开为单个文件），以及待解决的冲突项。\r\n"
@@ -376,6 +402,8 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(actionBar_.createCommitButton(), kTipCreateCommit);
   tooltips_.Add(actionBar_.undoCommitButton(), kTipUndoCommit);
   tooltips_.Add(actionBar_.pushButton(), kTipPush);
+  tooltips_.Add(changesPane_.enterSubmoduleButton(), kTipEnterSubmodule);
+  tooltips_.Add(changesPane_.returnToParentButton(), kTipReturnToParent);
 }
 
 void MainWindow::UpdateCommandAvailability() {
@@ -404,6 +432,14 @@ void MainWindow::UpdateCommandAvailability() {
       (state_.GitUsable() && state_.RepoUsable() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
   ::EnableWindow(changesPane_.stageAddButton(), stagingReady);
   ::EnableWindow(changesPane_.stageRemoveButton(), stagingReady);
+  // 子模块导航的两个按钮同理：不拿「选没选中子模块」「栈里有没有来路」去禁用按钮——
+  // 灰掉让人以为功能坏了，点下去得到那句具体说明才知道下一步该做什么。
+  // 只有一条硬性条件：Git 可用（导航全靠只读查询），而且这一次导航本身没有在途
+  // （两次切换叠在一起，先回来的那份就会被后一次的识别抢掉仓库绑定）。
+  const BOOL navigationReady =
+      (state_.GitUsable() && !submoduleFlow_.Active() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
+  ::EnableWindow(changesPane_.enterSubmoduleButton(), navigationReady);
+  ::EnableWindow(changesPane_.returnToParentButton(), navigationReady);
   // 刷新是内部只读重读，不占用命令窗口、也不写仓库，因此在有操作在跑时依然可用：
   // 外部终端改了仓库、或某个操作的输出看不清时，用户总要能恢复真实状态。
   // 上一次识别失败也保持可用：仓库在外部被修好（或改回原样）后，点刷新就能恢复，
@@ -582,6 +618,16 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStageRemoveButton:
       if (notifyCode == BN_CLICKED) {
         UnstageSelectedStaged(window);
+      }
+      break;
+    case kIdEnterSubmoduleButton:
+      if (notifyCode == BN_CLICKED) {
+        EnterSubmodule(window);
+      }
+      break;
+    case kIdReturnToParentButton:
+      if (notifyCode == BN_CLICKED) {
+        ReturnToParent(window);
       }
       break;
     case kIdSummaryEdit:
@@ -900,6 +946,9 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   refreshCycleActive_ = false;
   ClearWorkspace();
   state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
+  // 目标目录连识别都没过（路径不存在、不是目录、safe.directory 拦截等）：导航同样没有落地，
+  // 控制器要放弃它的阶段标记并把代管内容原样留着。
+  submoduleFlow_.OnRepositoryArrivalFailed(*this, CaptureOperationContext());
   // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
   state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
                                               : message);
@@ -931,6 +980,9 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
     commitFlow_.ReleaseAttempt(true);
     ClearWorkspace();
     state_.SetAuthor(app::AuthorState{});
+    // 导航发起的那一次切换如果没有工作区落地，控制器要收好自己的阶段标记：
+    // 代管里的草稿原样留着（那是用户写的字），一句说明写进状态栏。
+    submoduleFlow_.OnRepositoryArrivalFailed(*this, CaptureOperationContext());
     UpdateCommandAvailability();
     RefreshTexts(window);
     return;
@@ -951,6 +1003,10 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
   ResolveFormOnRepositorySwitch(window, FormRepositoryKey());
   // 作者默认值与摘要、列表共用这一次刷新：识别成功后一起重读，不另建触发机制。
   RequestAuthorConfig(window);
+  // 导航落地点：只有「这次识别正是某次导航发起的」才会被控制器认下（它按等待中的根目录核对），
+  // 用户自己改路径或普通刷新都会被告知不是导航的一站而直接忽略。认下时交还代管的表单草稿，
+  // 返回父仓库那一站还要接着核那三份位置。
+  submoduleFlow_.OnRepositoryArrived(*this, CaptureOperationContext());
   UpdateCommandAvailability();
   StartWorkspaceRead(window);
   RefreshTexts(window);
@@ -2089,6 +2145,96 @@ void MainWindow::RequestPush(HWND window) {
   RefreshTexts(window);
 }
 
+bool MainWindow::CapturedSubmoduleSelection(git::ChangeItem* item, std::wstring* refusal) const {
+  *refusal = {};
+  if (item == nullptr) {
+    return false;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  HWND list = nullptr;
+  std::vector<int> rows;
+  git::ChangeSide side = git::ChangeSide::unstaged;
+  const std::vector<git::ChangeItem>* items = nullptr;
+  const std::vector<int> unstagedRows = changesPane_.SelectedUnstagedRows();
+  const std::vector<int> stagedRows = changesPane_.SelectedStagedRows();
+  if (!unstagedRows.empty()) {
+    list = changesPane_.unstagedList();
+    rows = unstagedRows;
+    side = git::ChangeSide::unstaged;
+    items = &model.unstaged;
+  } else if (!stagedRows.empty()) {
+    list = changesPane_.stagedList();
+    rows = stagedRows;
+    side = git::ChangeSide::staged;
+    items = &model.staged;
+  } else {
+    *refusal = L"先在「未暂存的更改」或「已暂存的更改」里点选一条子模块记录，再按这个按钮。"
+               L"父仓库对子模块只有一条 gitlink 记录，别的条目不是可进入的仓库。";
+    return false;
+  }
+  if (rows.size() != 1) {
+    *refusal = L"一次只能进入一个子模块（现在选了 " + std::to_wstring(rows.size()) +
+               L" 条）。导航是把界面绑定的仓库整个换掉，不是一批换好几个。";
+    return false;
+  }
+  // 行号与条目的对应关系只在「最后一次显示落地」的内容上成立，因此仍走暂存那套逐行核对：
+  // 显示的行数、行对应的条目、路径与类别都要和模型一致，否则宁可拒绝也不进错目录。
+  std::wstring selectionRefusal;
+  const std::vector<git::ChangeItem> picked =
+      CaptureCheckedSelection(list, rows, *items, side, L"子模块", L"进入子模块", &selectionRefusal);
+  if (picked.size() != 1) {
+    *refusal = selectionRefusal;
+    return false;
+  }
+  if (picked[0].kind != git::ChangeKind::submodule) {
+    *refusal = L"选中的这一条不是子模块条目（它的状态列不是「子模块」）。"
+               L"没有换绑任何仓库，也没有执行任何命令。";
+    return false;
+  }
+  *item = picked[0];
+  return true;
+}
+
+void MainWindow::EnterSubmodule(HWND window) {
+  // 导航不写任何东西（不改父索引、不提交、不联网），但它会把界面绑定的仓库整个换掉：
+  // 因此任何在途的被编排操作都得先结束，措辞与被编排操作的互斥同源（app/operation_gate）。
+  app::GitFlowActivity activity{
+      /*commit=*/commitFlow_.Active(),
+      /*undo=*/undoFlow_.Active(),
+      /*fetch=*/fetchFlow_.Active(),
+      /*pull=*/pullFlow_.Active(),
+      /*push=*/pushFlow_.Active(),
+  };
+  app::WritePrerequisites prereq;
+  prereq.gitUsable = state_.GitUsable();
+  prereq.repoUsable = state_.RepoUsable();
+  prereq.commandWindowBusy = tasks_.OperationInFlight();
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  prereq.workspaceStillBound = !repositoryRoot.empty() &&
+                               git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot);
+  const std::wstring refusal =
+      app::DescribeNavigationRefusal(prereq, activity, L"进入子模块");
+  if (!refusal.empty()) {
+    state_.SetStatusNote(refusal);
+    RefreshTexts(window);
+    return;
+  }
+  git::ChangeItem item;
+  std::wstring selectionRefusal;
+  if (!CapturedSubmoduleSelection(&item, &selectionRefusal)) {
+    state_.SetStatusNote(selectionRefusal);
+    RefreshTexts(window);
+    return;
+  }
+  submoduleFlow_.Enter(*this, CaptureOperationContext(), item);
+  RefreshTexts(window);
+}
+
+void MainWindow::ReturnToParent(HWND window) {
+  submoduleFlow_.ReturnToParent(*this, CaptureOperationContext());
+  RefreshTexts(window);
+}
+
 void MainWindow::SetStatus(std::wstring note) {
   state_.SetStatusNote(std::move(note));
   RefreshTexts(window_.get());
@@ -2204,6 +2350,90 @@ void MainWindow::RememberOperationConclusion(std::wstring_view conclusion) {
   tasks_.RememberOperationConclusion(conclusion);
 }
 
+bool MainWindow::NavigateRepository(std::wstring_view directory, std::wstring_view statusNote) {
+  // 换绑定的仓库走的就是「用户自己填路径」那条既有链路：绝对化 → 后台识别 → 绑定/作废 →
+  // 重读。这里只是把目录代填进去，不另开第二套换绑逻辑，也不在这上面加任何写操作。
+  if (directory.empty()) {
+    state_.SetStatusNote(L"导航没有发起：这次要去的那个子模块没有可用的目录路径。"
+                         L"父索引、表单与代管内容都没有动。");
+    UpdateCommandAvailability();
+    RefreshTexts(window_.get());
+    return false;
+  }
+  if (!state_.GitUsable()) {
+    state_.SetStatusNote(L"导航没有发起：Git 程序当前不可用，没有可识别的落点。请先确认路径并点“刷新”。");
+    UpdateCommandAvailability();
+    RefreshTexts(window_.get());
+    return false;
+  }
+  const std::wstring target = std::wstring(directory);
+  {
+    const SuppressRepoEditNotify guard(suppressRepoEditNotify_);
+    SetControlText(repoBar_.repoEdit(), target);
+  }
+  state_.SetRepoPath(target);
+  RequestRepoDetection(window_.get(), target, RepoDetectMode::initial);
+  // 导航那句说明排在识别提示之后：识别那条是既有链路的固定文字，这句才是「为什么仓库突然变了」。
+  state_.SetStatusNote(std::wstring(statusNote));
+  RefreshTexts(window_.get());
+  return true;
+}
+
+bool MainWindow::CommitFormHasUserContent() const {
+  return formSession_.HasUserContent();
+}
+
+void MainWindow::ClearFormForNavigation(std::wstring_view note) {
+  // 内容已由导航控制器收进代管（按当前工作区根存键），这里把界面倒空只是「让位」，不是丢弃。
+  {
+    const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+    commitForm_.ClearFields();
+    const SYSTEMTIME now = platform::CurrentLocalTime();
+    commitForm_.SetTimes(now, now);
+  }
+  formSession_.Reset();
+  state_.SetFormNote(std::wstring(note));
+  RefreshTimeControlsState(window_.get());
+}
+
+void MainWindow::ApplyHeldFormForNavigation(const app::HeldForm& held, std::wstring_view note) {
+  // 交还的是用户当时写的字：全部以「用户内容」的身份落回控件，并把这些记号一并标上。
+  // 这样随后到达的「这个仓库的默认作者」不会把它悄悄盖掉——身份串用就是这么来的。
+  {
+    const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+    commitForm_.SetSummaryText(held.form.subject);
+    commitForm_.SetDescriptionText(held.form.description);
+    commitForm_.SetAuthorText(held.form.author);
+    std::vector<std::wstring> coauthors = held.form.coauthors;
+    commitForm_.SetCoauthors(std::move(coauthors));
+    const SYSTEMTIME authorTime = platform::SystemTimeFromCivil(held.authorWall);
+    const SYSTEMTIME committerTime = platform::SystemTimeFromCivil(held.committerWall);
+    commitForm_.SetTimes(authorTime, committerTime);
+    commitForm_.SetTimeSyncChecked(held.timesSynced);
+    if (held.timesUserEdited) {
+      // SetTimes 自己会撤掉「用户改过时间」的记号，而这份草稿的时间恰恰是用户挑过的：
+      // 记号必须补回去，否则下一次提交会悄悄改用此刻的时间，把当时那份时间意图抹掉。
+      commitForm_.NoteTimesUserEdited();
+    }
+  }
+  using Field = app::CommitFormSession::Field;
+  if (!held.form.subject.empty()) {
+    formSession_.NoteUserEdit(Field::subject);
+  }
+  if (!held.form.description.empty()) {
+    formSession_.NoteUserEdit(Field::description);
+  }
+  if (!held.form.coauthors.empty()) {
+    formSession_.NoteUserEdit(Field::coauthors);
+  }
+  if (!held.form.author.empty()) {
+    formSession_.NoteUserEdit(Field::author);
+  }
+  state_.SetFormNote(std::wstring(note));
+  RefreshTimeControlsState(window_.get());
+  RunFormValidation(window_.get());
+}
+
 CommitFormSnapshot MainWindow::CaptureCommitForm() const {
   CommitFormSnapshot snapshot;
   snapshot.data = commitForm_.Capture();
@@ -2252,6 +2482,7 @@ void MainWindow::BeginStopAllBackgroundWorkers() {
   fetchFlow_.BeginStop();
   pullFlow_.BeginStop();
   pushFlow_.BeginStop();
+  submoduleFlow_.BeginStop();
 }
 
 void MainWindow::JoinAllBackgroundWorkers() {
@@ -2264,6 +2495,7 @@ void MainWindow::JoinAllBackgroundWorkers() {
   fetchFlow_.JoinWorkers();
   pullFlow_.JoinWorkers();
   pushFlow_.JoinWorkers();
+  submoduleFlow_.JoinWorkers();
 }
 
 LRESULT CALLBACK MainWindow::Thunk(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -2419,6 +2651,14 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kFirstPushProbeCompleted:
       pushFlow_.OnFirstPushProbeCompleted(*this, CaptureOperationContext(),
                                           static_cast<uint64_t>(wParam));
+      return 0;
+    case kSubmoduleEntryProbeCompleted:
+      submoduleFlow_.OnEntryProbeCompleted(*this, CaptureOperationContext(),
+                                           static_cast<uint64_t>(wParam));
+      return 0;
+    case kSubmodulePointerProbeCompleted:
+      submoduleFlow_.OnPointerProbeCompleted(*this, CaptureOperationContext(),
+                                             static_cast<uint64_t>(wParam));
       return 0;
     case kCommitProbeCompleted:
       commitFlow_.OnProbeCompleted(*this, CaptureOperationContext(), state_.WorkspaceModel(),

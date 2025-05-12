@@ -44,6 +44,9 @@ add_executable(gc_tests
   subprocess_capture_tests.cpp
   staging_plan_fixture_tests.cpp
   staging_plan_tests.cpp
+  submodule_journey_tests.cpp
+  submodule_navigation_fixture_tests.cpp
+  submodule_navigation_tests.cpp
   task_coordinator_tests.cpp
   ui_metrics_tests.cpp
   pull_plan_tests.cpp
