@@ -23,4 +23,13 @@ namespace gc::app {
 // Git 报告成功不等于远端收到了那一份提交，真正的「送到没送到」以核实为准。
 [[nodiscard]] std::wstring DescribePushCommandConclusion(bool succeeded);
 
+// 冲突流程「继续」成功的结论（失败侧不在这里：那份要以现场读回来的实况为准，
+// 由界面的冲突流程控制器在后台读取回来后另行组织）。成功只按退出码说话，
+// 「痕迹清没清、还剩几个未合并文件」交给紧随其后的重读，不在这里替 Git 打保票。
+[[nodiscard]] std::wstring DescribeConflictContinueSuccessConclusion();
+
+// 冲突流程「中止」成功的结论。同样只写「那条命令按退出码成了」与本程序没做的事：
+// 工作区与索引被 Git 改成什么样，以命令窗口里的输出与重读结果为准。
+[[nodiscard]] std::wstring DescribeConflictAbortSuccessConclusion();
+
 }  // namespace gc::app

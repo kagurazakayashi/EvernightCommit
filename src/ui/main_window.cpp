@@ -100,7 +100,8 @@ constexpr std::wstring_view kTipCreateCommit =
     L"作者身份、作者时间与提交者时间只覆盖这一次 Git 子进程：不写你的环境变量，也不碰任何配置文件；"
     L"提交者身份仍由这个仓库的有效 Git 配置决定。\r\n"
     L"命令里没有 --no-verify：仓库的 hooks 与签名设置照常生效，需要口令时由命令窗口自己提问。\r\n"
-    L"正在合并／变基／拣选等流程没走完时本程序不做提交，也不会替你终止那种流程。";
+    L"正在合并／变基／拣选等流程没走完时本程序不做提交，也不在提交这一步里替你终止那种流程"
+    L"（要看清或收尾那个流程，用的是「查看冲突状态」「继续该流程」「中止该流程」，每一步都要你确认）。";
 constexpr std::wstring_view kTipUndoCommit =
     L"把当前分支引用挪回最近一次提交的父提交：只移动你确认的那一个完整分支引用（refs/heads/…），"
     L"索引与工作区一个字节都不动，原提交的改动会表现为“已暂存的更改”。\r\n"
@@ -146,6 +147,50 @@ constexpr std::wstring_view kTipPush =
     L"命令窗口报告结束后，还会向确认框上列出的那些**发布目标**逐个发只读 ls-remote，核对那条引用"
     L"到底停在哪：推送成功与否以那份实况为准，本地引用看起来一致不算数；命令报成功却没核上时，"
     L"结论写「已推送但未核实」或「与预期不符」，不会自动重推。";
+constexpr std::wstring_view kTipConflictView =
+    L"只读地看清这个仓库此刻停在什么状态：Git 目录里的流程痕迹（MERGE_HEAD、rebase-merge\\、"
+    L"rebase-apply\\、CHERRY_PICK_HEAD、REVERT_HEAD、BISECT_LOG、SQUASH_MSG、index.lock 等）、"
+    L"索引里还有哪些未合并条目、当前分支与 HEAD 现在在哪（git diff --diff-filter=U、symbolic-ref、"
+    L"rev-parse，全部后台只读查询，不弹命令窗口、不改动仓库）。\r\n"
+    L"展示的是：流程类型、当前分支与目标（合并进来哪一份提交、变基要把哪条分支落到哪、走到第几步）、"
+    L"未合并的文件（超过 8 个只报个数并列前 8 个）、继续的前提，以及「继续」「中止」现在各自"
+    L"可用还是不可用、为什么。\r\n"
+    L"认不出或不一致的形态一律明说：多种痕迹并排、只有 rebase-apply\\ 却读不回 head-name/onto"
+    L"（分不清是变基还是 git am）、只有 SQUASH_MSG 没有 MERGE_HEAD、停在二分定位——"
+    L"这些都只报告看到了什么，不猜一种「大概能恢复」的做法，也不发任何命令。\r\n"
+    L"没探到 Git 目录时说的是「问不到」，绝不把「看不见」当成「没有流程停着」。";
+constexpr std::wstring_view kTipConflictContinue =
+    L"把已经停着的那个流程的 git --continue 交进命令窗口：merge / rebase / cherry-pick / revert "
+    L"按刚才读回的痕迹选那一个，本程序不猜该用哪一个。\r\n"
+    L"这一步是「由 Git 建立提交」的那一步：Git 文档写明 merge --continue 会先确认真有中断中的合并，"
+    L"然后调用 git commit，提交内容就是你当前暂存区里的那一份树。\r\n"
+    L"没有 --no-verify，也没有 --no-edit 或 -m：钩子（按文档这一步跑的是 pre-commit 与 commit-msg，"
+    L"prepare-commit-msg 本来也不受 --no-verify 影响）、提交签名（commit.gpgsign）与是否打开编辑器，"
+    L"全部按 Git 自己的规则与你的配置生效；钩子失败或取消编辑器都会让这一步以非 0 收场，"
+    L"流程痕迹原样留着。变基的合并后端按文档会在 --continue 时打开编辑器让你改提交说明。\r\n"
+    L"索引里还有未合并条目时不发这条命令，也不谎称可以继续——先把它们解决并暂存"
+    L"（解决内容由你自己写：本程序没有内置合并器，不替你选 ours/theirs，也不替你 add 任何文件）。\r\n"
+    L"点击后的顺序：后台读现场 → 判读成方案 → 确认框（写明由 Git 建立提交与上述后果）→ "
+    L"点头之后再把同一组只读查询原样重发一遍核对现场 → 对得上才启动命令窗口。"
+    L"现场变了就取消并刷新；外部终端已经把那个流程走完或中止时，会明说「已经没有痕迹」，"
+    L"不会把一条对着空气的 --continue 发出去。\r\n"
+    L"命令没做成时：现场原样留着并读回来如实说明——不 reset --hard、不 clean、不 stash、"
+    L"不删锁、不自动重试，你写在提交表单里的字一个字不动。";
+constexpr std::wstring_view kTipConflictAbort =
+    L"把已经停着的那个流程的 git --abort 交进命令窗口：merge / rebase / cherry-pick / revert "
+    L"按刚才读回的痕迹选那一个。\r\n"
+    L"这一步会改动你的工作区与索引，不是只读操作：按 Git 文档，merge --abort 是「终止当前的冲突"
+    L"解决过程，试图重建合并开始前的状态」（MERGE_HEAD 存在时等同于 git reset --merge，"
+    L"有 MERGE_AUTOSTASH 时改为把那份自动 stash 应用回工作区），文档还明确写着合并开始前就存在的"
+    L"未提交改动在某些情况下无法重建；rebase --abort 把 HEAD 复位回原来的分支，已经重放出来的那些"
+    L"提交不再被那条引用指向；cherry-pick/revert 的 --abort 取消整条序列并回到序列开始前的状态。\r\n"
+    L"你在冲突文件里已经写好的解决内容会随之丢弃。因此这一条走「风险确认」框，逐条写明之后必须由"
+    L"你亲手点确认：绝不后台自动执行，也不作为任何失败之后的「自动恢复」——"
+    L"本程序不 stash、不 clean、不 reset --hard、不删 index.lock。\r\n"
+    L"只想撤掉流程痕迹而保住工作区里已经写好的东西，Git 那边另有 --quit（文档写明它留下索引与"
+    L"工作区不动）；那不是这个按钮做的事，本程序不代为执行。\r\n"
+    L"仓库里没有流程痕迹时不会生成任何 --abort 命令（那种命令只会被 Git 当场拒绝，"
+    L"本程序不拿它去试）；不一致或认不出的形态同样拒绝，只报告看到了什么。";
 constexpr std::wstring_view kTipEnterSubmodule =
     L"把界面绑定的仓库换成所选子模块自己的工作区（git 状态、最近提交、作者默认值都按那个仓库读）。\r\n"
     L"点下去先在后台只读核对三件事：那个目录在不在、Git 认不认它是**当前这个**父仓库登记的子模块"
@@ -402,6 +447,9 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(actionBar_.createCommitButton(), kTipCreateCommit);
   tooltips_.Add(actionBar_.undoCommitButton(), kTipUndoCommit);
   tooltips_.Add(actionBar_.pushButton(), kTipPush);
+  tooltips_.Add(actionBar_.conflictViewButton(), kTipConflictView);
+  tooltips_.Add(actionBar_.conflictContinueButton(), kTipConflictContinue);
+  tooltips_.Add(actionBar_.conflictAbortButton(), kTipConflictAbort);
   tooltips_.Add(changesPane_.enterSubmoduleButton(), kTipEnterSubmodule);
   tooltips_.Add(changesPane_.returnToParentButton(), kTipReturnToParent);
 }
@@ -421,6 +469,17 @@ void MainWindow::UpdateCommandAvailability() {
   ::EnableWindow(actionBar_.undoCommitButton(), readyFor(app::AppState::kUndoCommitImplemented));
   ::EnableWindow(repoBar_.fetchButton(), readyFor(app::AppState::kFetchImplemented));
   ::EnableWindow(repoBar_.pullButton(), readyFor(app::AppState::kPullImplemented));
+  // 冲突与暂停流程的三个入口：与前面那几个同一套条件（功能已接通 + Git/仓库可用 + 命令窗口空闲）。
+  // 刻意不拿「仓库里此刻有没有流程停着」去灰掉「继续/中止」：灰掉会让人以为功能坏了，
+  // 而「没有流程」本来就是一句该由点下去之后给出的具体说明（子模块导航那两个按钮的既有做法相同）。
+  // 判据仍然只有两份：准入判定看阶段，命令看不看得到痕迹由现场读取与方案层决定——
+  // 没有痕迹时不会出现任何 --abort，还有未合并条目时不会出现任何 --continue。
+  ::EnableWindow(actionBar_.conflictViewButton(),
+                 readyFor(app::AppState::kConflictHandlingImplemented));
+  ::EnableWindow(actionBar_.conflictContinueButton(),
+                 readyFor(app::AppState::kConflictHandlingImplemented));
+  ::EnableWindow(actionBar_.conflictAbortButton(),
+                 readyFor(app::AppState::kConflictHandlingImplemented));
   // 合作者的增刪改只動表單文字，不碰倉庫、也不需要 Git 可用，因此常開。
   // （真正的規則檢查在 git/commit_identity 裡，在這裡點按鈕不會發出任何命令。）
   ::EnableWindow(commitForm_.CoauthorAdd(), TRUE);
@@ -603,6 +662,21 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdPullButton:
       if (notifyCode == BN_CLICKED) {
         RequestPull(window);
+      }
+      break;
+    case kIdConflictViewButton:
+      if (notifyCode == BN_CLICKED) {
+        ShowConflictState(window);
+      }
+      break;
+    case kIdConflictContinueButton:
+      if (notifyCode == BN_CLICKED) {
+        ContinueConflictFlow(window);
+      }
+      break;
+    case kIdConflictAbortButton:
+      if (notifyCode == BN_CLICKED) {
+        AbortConflictFlow(window);
       }
       break;
     case kIdRefreshButton:
@@ -1176,7 +1250,9 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.pullFetchOperation,
                                      options.pullIntegrateOperation,
                                      options.pushOperation,
-                                     options.upstreamWriteStep};
+                                     options.upstreamWriteStep,
+                                     options.conflictContinueOperation,
+                                     options.conflictAbortOperation};
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -1208,7 +1284,7 @@ void MainWindow::LaunchStatusOperation(HWND window) {
 
 bool MainWindow::RequireWritePrerequisites(HWND window, std::wstring_view actionLabel) {
   // 判定与文案收在 app/operation_gate：暂存/查看类只走共同前提这一层
-  // （它们不与被编排的五个操作互斥——这是既有行为的原样保留）。
+  // （它们不与被编排的六个操作互斥——这是既有行为的原样保留）。
   app::WritePrerequisites prereq;
   prereq.gitUsable = state_.GitUsable();
   prereq.repoUsable = state_.RepoUsable();
@@ -1227,7 +1303,7 @@ bool MainWindow::RequireWritePrerequisites(HWND window, std::wstring_view action
 
 bool MainWindow::AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_view actionLabel) {
   // AdmitWriteFlow 自带共同前提裁决（与 RequireWritePrerequisites 同一份实现），这里不再叠一遍。
-  // 五个被编排的操作各自还占着「预检/复核/核实」这类不碰命令窗口槽位的中间阶段；
+  // 六个被编排的操作各自还占着「预检/复核/核实」这类不碰命令窗口槽位的中间阶段；
   // 谁拦谁、怎么解释，全在 app/operation_gate（有纯逻辑测试钉住）。
   const app::GitFlowActivity activity{
       /*commit=*/commitFlow_.Active(),
@@ -1235,6 +1311,7 @@ bool MainWindow::AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_
       /*fetch=*/fetchFlow_.Active(),
       /*pull=*/pullFlow_.Active(),
       /*push=*/pushFlow_.Active(),
+      /*conflict=*/conflictFlow_.Active(),
   };
   app::WritePrerequisites prereq;
   prereq.gitUsable = state_.GitUsable();
@@ -1890,6 +1967,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const bool pullIntegrateOperation = activeOperation_.pullIntegrateOperation;
   const bool pushOperation = activeOperation_.pushOperation;
   const int upstreamWriteStep = activeOperation_.upstreamWriteStep;
+  const bool conflictContinueOperation = activeOperation_.conflictContinueOperation;
+  const bool conflictAbortOperation = activeOperation_.conflictAbortOperation;
   const std::wstring restoreHint = activeOperation_.restoreHint;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
@@ -1948,6 +2027,28 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
       pullFlow_.BeginIntegrationFailedReport(*this, CaptureOperationContext(), std::move(conclusion),
                                              result.completion, result.exitCode,
                                              result.environmentNotice);
+      RefreshTexts(window);
+      return;
+    }
+  }
+  if (conflictContinueOperation || conflictAbortOperation) {
+    if (outcome.succeeded) {
+      // 成功那句只按退出码说话：那一步由 Git 建立提交（或按它自己的规则中止），
+      // 这个仓库现在还剩什么，交给紧随其后的重读，不在这里替 Git 打保票。
+      conclusion += conflictContinueOperation ? app::DescribeConflictContinueSuccessConclusion()
+                                              : app::DescribeConflictAbortSuccessConclusion();
+    } else {
+      // 那条流程命令没做成（含「窗口被提前关掉」「超过观察期限仍没有结果」这类结果未知）：
+      // 结论要以「现场读回来的实况」为准。现场读取走后台任务，这条结论的补完、说明框与
+      // 收尾重读一并交给冲突流程控制器；这里直接返回，槽位释放后不碰 Remember/ScheduleRefresh。
+      // 绝不在这里顺手补一条 abort/reset——现场怎么处理由用户决定。
+      commandRunner_.ClearAllResults();
+      UpdateCommandAvailability();
+      conflictFlow_.BeginFailedReport(*this, CaptureOperationContext(),
+                                      conflictContinueOperation ? ConflictFlow::Entry::continueFlow
+                                                                : ConflictFlow::Entry::abortFlow,
+                                      std::move(conclusion), result.completion, result.exitCode,
+                                      result.environmentNotice);
       RefreshTexts(window);
       return;
     }
@@ -2100,7 +2201,7 @@ void MainWindow::ResetCommitTimesToNow(HWND window) {
   RefreshTexts(window);
 }
 
-// ---- 五个被编排操作的入口与控制器桥 ----
+// ---- 六个被编排操作的入口与控制器桥 ----
 // 入口只做三件事：准入裁决（app/operation_gate）→ 采集只读快照 → 把流程交给控制器；
 // 下面的 OperationHost/CommitOperationHost 实现则是控制器对界面的唯一接触面：
 // 每个方法只呈现给定的内容或对整界面做一次重画，不返回任何可变引用。
@@ -2193,6 +2294,32 @@ bool MainWindow::CapturedSubmoduleSelection(git::ChangeItem* item, std::wstring*
   }
   *item = picked[0];
   return true;
+}
+
+void MainWindow::ShowConflictState(HWND window) {
+  // 三个入口共用一台控制器，因此准入用的是同一个流程位（app::GitFlow::conflict）：
+  // 「查看」本身只读，但它与「继续/中止」等的是同一份现场读取，两条并跑只会互相作废结果。
+  if (!AdmitGitFlow(window, app::GitFlow::conflict, L"查看冲突与暂停流程")) {
+    return;
+  }
+  conflictFlow_.Start(*this, CaptureOperationContext(), ConflictFlow::Entry::view);
+  RefreshTexts(window);
+}
+
+void MainWindow::ContinueConflictFlow(HWND window) {
+  if (!AdmitGitFlow(window, app::GitFlow::conflict, L"继续该流程")) {
+    return;
+  }
+  conflictFlow_.Start(*this, CaptureOperationContext(), ConflictFlow::Entry::continueFlow);
+  RefreshTexts(window);
+}
+
+void MainWindow::AbortConflictFlow(HWND window) {
+  if (!AdmitGitFlow(window, app::GitFlow::conflict, L"中止该流程")) {
+    return;
+  }
+  conflictFlow_.Start(*this, CaptureOperationContext(), ConflictFlow::Entry::abortFlow);
+  RefreshTexts(window);
 }
 
 void MainWindow::EnterSubmodule(HWND window) {
@@ -2482,6 +2609,7 @@ void MainWindow::BeginStopAllBackgroundWorkers() {
   fetchFlow_.BeginStop();
   pullFlow_.BeginStop();
   pushFlow_.BeginStop();
+  conflictFlow_.BeginStop();
   submoduleFlow_.BeginStop();
 }
 
@@ -2495,6 +2623,7 @@ void MainWindow::JoinAllBackgroundWorkers() {
   fetchFlow_.JoinWorkers();
   pullFlow_.JoinWorkers();
   pushFlow_.JoinWorkers();
+  conflictFlow_.JoinWorkers();
   submoduleFlow_.JoinWorkers();
 }
 
@@ -2659,6 +2788,17 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kSubmodulePointerProbeCompleted:
       submoduleFlow_.OnPointerProbeCompleted(*this, CaptureOperationContext(),
                                              static_cast<uint64_t>(wParam));
+      return 0;
+    case kConflictProbeCompleted:
+      conflictFlow_.OnProbeCompleted(*this, CaptureOperationContext(),
+                                     static_cast<uint64_t>(wParam));
+      return 0;
+    case kConflictRecheckCompleted:
+      conflictFlow_.OnRecheckCompleted(*this, CaptureOperationContext(),
+                                       static_cast<uint64_t>(wParam));
+      return 0;
+    case kConflictAftermathCompleted:
+      conflictFlow_.OnAftermathCompleted(*this, static_cast<uint64_t>(wParam));
       return 0;
     case kCommitProbeCompleted:
       commitFlow_.OnProbeCompleted(*this, CaptureOperationContext(), state_.WorkspaceModel(),

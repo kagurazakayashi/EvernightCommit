@@ -13,6 +13,7 @@ constexpr std::wstring_view kTailFor[] = {
     /*fetch */ L" fetch",
     /*pull  */ L" pull",
     /*push  */ L"推送",
+    /*conflict*/ L"冲突处理",
 };
 
 // 「自己已经在走」的说明：各操作原本就有自己的措辞，逐字保留。
@@ -29,6 +30,9 @@ std::wstring SelfBusyNote(GitFlow requested) {
       return L"已经有一次 pull 在走流程（预检、获取或整合），请等它结束或先取消那一步。";
     case GitFlow::push:
       return L"已经有一次推送在走流程（预检、复核或核实），请等它结束或先取消那一步。";
+    case GitFlow::conflict:
+      return L"已经有一次冲突流程处理在走（现场读取、执行前复核或没做完的现场补报），"
+             L"请等它结束或先取消那一步。";
   }
   return {};
 }
@@ -46,6 +50,8 @@ std::wstring_view BlockerPhrase(GitFlow blocker) {
       return L"「pull」还在走它的预检、获取或整合，请先让那一步结束，再来";
     case GitFlow::push:
       return L"「推送」还在走它的预检、复核或核实，请先让那一步结束，再来";
+    case GitFlow::conflict:
+      return L"「冲突处理」还在走它的现场读取、执行前复核或现场补报，请先让那一步结束，再来";
   }
   return {};
 }
@@ -62,6 +68,8 @@ bool Active(const GitFlowActivity& activity, GitFlow flow) {
       return activity.pull;
     case GitFlow::push:
       return activity.push;
+    case GitFlow::conflict:
+      return activity.conflict;
   }
   return false;
 }
@@ -84,6 +92,10 @@ const BlockRule* RulesFor(GitFlow requested, size_t* count) {
                                         {GitFlow::commit}};
   static constexpr BlockRule kPush[] = {{GitFlow::pull}, {GitFlow::fetch}, {GitFlow::undo},
                                         {GitFlow::commit}};
+  // conflict：等全部五个。它自己发出去的是会改 HEAD/索引/工作区的命令，
+  // 与任何一条在途的写操作并起来都会让「确认过的现场」变成别人的现场（见头文件的说明）。
+  static constexpr BlockRule kConflict[] = {{GitFlow::push}, {GitFlow::pull}, {GitFlow::fetch},
+                                            {GitFlow::undo}, {GitFlow::commit}};
   switch (requested) {
     case GitFlow::commit:
       *count = 0;
@@ -100,6 +112,9 @@ const BlockRule* RulesFor(GitFlow requested, size_t* count) {
     case GitFlow::push:
       *count = std::size(kPush);
       return kPush;
+    case GitFlow::conflict:
+      *count = std::size(kConflict);
+      return kConflict;
   }
   *count = 0;
   return nullptr;
@@ -155,9 +170,9 @@ std::wstring DescribeNavigationRefusal(const WritePrerequisites& prerequisites,
   if (!prerequisiteRefusal.empty()) {
     return prerequisiteRefusal;
   }
-  // 五个流程逐个点名（顺序与被编排操作的常见轻重一致：命令窗口那条 → 核实那类 → 预检那类）。
-  static constexpr GitFlow kAll[] = {GitFlow::push, GitFlow::pull, GitFlow::fetch, GitFlow::undo,
-                                     GitFlow::commit};
+  // 六个流程逐个点名（顺序与被编排操作的常见轻重一致：命令窗口那条 → 核实那类 → 预检那类）。
+  static constexpr GitFlow kAll[] = {GitFlow::push,   GitFlow::conflict, GitFlow::pull,
+                                     GitFlow::fetch,  GitFlow::undo,     GitFlow::commit};
   for (const GitFlow flow : kAll) {
     if (Active(activity, flow)) {
       return std::wstring(BlockerPhrase(flow)) + std::wstring(actionLabel) +

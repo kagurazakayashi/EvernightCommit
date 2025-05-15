@@ -47,6 +47,7 @@
 | `pull_plan` | pull 两阶段判读与方案：阶段一/阶段二查询的构造与判读、前提拒绝、四种关系、按 Git 原生解析矩阵把策略与快进意愿翻译成显式命令行参数、风险清单、执行前复核 `DescribePullChange`、未合并清单解析 |
 | `push_plan` | push 判读与方案：预检查询构造与判读（含 `config --list --null` 三种记录形态与三态布尔判读、`remote get-url --push --all` 逐条展开发布地址）、发布远端优先序裁定、命令形态与条件中和、前提拒绝、风险清单、执行前复核 `DescribePushChange`、推送后逐目标核实与四种结论、URL 内嵌凭据掩码 |
 | `first_push_plan` | 首次推送（分支还没有上游）判读与方案：向导可用性裁决、候选远端与逐远端发布地址的判读（与 `push_plan` 共用 `ResolvePushUrls`／`InspectPushScopeConfig`／形态判定）、目标分支名交给 `check-ref-format` 的裁定、逐发布地址 `ls-remote` 的「没有／问不到」三态聚合、可选的非快进关系查询、把「推送」与「两条 `git config` 上游写入」分成各自有结果的方案、执行前复核 `DescribeFirstPushChange` |
+| `conflict_state` | 冲突与暂停流程判读：Git 目录痕迹（存在性 + 限长内容）判出停着的到底是哪一种流程（变基目录优先，`CHERRY_PICK_HEAD` 等同伴痕迹不算并存；认不出/不一致/`BISECT_LOG`/只有 `SQUASH_MSG` 一律拒绝且不猜恢复方式），未合并清单与分支/HEAD 的三态判读（与 `pull_plan` 共用那条 `diff --diff-filter=U` 查询），「继续前提」与「中止风险」两套确认文字、`-c submodule.recurse=false <子命令> --continue/--abort` 的命令形态（不传 `--no-verify`/`--no-edit`/`-m`），以及确认前后两份现场的执行前复核 `DescribeConflictStateChange` |
 | `submodule_navigation` | 子模块导航判读：`ls-files -s -z -- :(literal)<路径>` / `rev-parse --verify --quiet HEAD:<路径>` / 子模块自己 HEAD 三条只读查询的参数构造，gitlink 记录（`160000` + 完整对象 ID）判读，「索引 / 父提交 / 子模块 HEAD」三份位置合成六种结论，进入前的身份裁决（目录形态、父仓库是否同一个、未初始化与独立仓库分开拒绝），返回后的提示措辞与「不 add、不提交、不联网」声明 |
 
 ## src/app/
@@ -57,7 +58,7 @@
 | `task_coordinator` | 仓库身份版本、刷新合并槽、外部操作单槽、成败以 Git 退出码为准、状态栏文案拼接 |
 | `list_view_memory` | 按条目身份记忆/映射多选（更改列表按仓库相对路径，提交历史按完整对象 ID） |
 | `commit_form_session` | 区分「默认值填的」与「用户写的」、换仓库时要不要问保留/放弃、提交成功后只清正文栏位 |
-| `operation_gate` | 写操作准入门：哪个编排流程可以开始、其余流程按何种顺序拒绝、拒绝文案原文；另含仓库导航（进入子模块/返回父仓库）的准入 `DescribeNavigationRefusal`——它不写任何东西，但会整个换掉绑定的仓库，因此在途流程一律先结束 |
+| `operation_gate` | 写操作准入门（六个被编排流程，冲突处理是第六个：它等全部五个，五个不因它额外被拦——提交/撤回/pull 本来就在方案层按流程痕迹拒绝，命令窗口一占槽位都会互斥；导航则一律等它）：哪个编排流程可以开始、其余流程按何种顺序拒绝、拒绝文案原文；另含仓库导航（进入子模块/返回父仓库）的准入 `DescribeNavigationRefusal`——它不写任何东西，但会整个换掉绑定的仓库，因此在途流程一律先结束 |
 | `submodule_journey` | 父仓库⇄子模块导航的状态保管：来路栈（嵌套逐层退、同一条父→子不重复压）、按工作区根代管的表单草稿（空内容不存、交还即除号）、返回前的身份核对、`PlanDraftSwap` 四种交还场合与交还说明文字 |
 | `operation_conclusions` | 各操作的终端结论文字 |
 
@@ -86,7 +87,9 @@ Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调�
 预检编排（执行依赖全部回调注入，均提供按序号作废旧结果的后台控制器别名）：
 `git_toolchain`、`repo_detect`、`workspace_status`、`author_config`、`commit_probe`
 （确认前预检与确认后复核走同一份查询路径）、`undo_probe`、`fetch_probe`、
-`pull_probe`（含整合失败后的只读取证）、`push_probe`（预检 + 逐发布 URL 的核实链）、`submodule_probe`（进入前的目录形态 + 识别 + 父索引 gitlink，返回后的三份位置；全程只读）。
+`pull_probe`（含整合失败后的只读取证）、
+`conflict_probe`（流程痕迹的存在性与限长内容读取 + 未合并条目/分支/HEAD 三条只读查询，
+预检与执行前复核、失败后的现场读取共用同一个函数，全程不写任何东西）、`push_probe`（预检 + 逐发布 URL 的核实链）、`submodule_probe`（进入前的目录形态 + 识别 + 父索引 gitlink，返回后的三份位置；全程只读）。
 
 界面辅助：`path_picker`、`remote_choice_dialog`（模态单选，也复用为 pull 的
 合并/变基选择）、`identity_prompt`（合作者输入框，校验不过不关闭）、
@@ -96,8 +99,12 @@ Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调�
 
 `main_window`（窗口与消息循环）、`repo_bar`、`changes_pane`、`action_bar`、
 `commit_form`、`controls`、`layout`、`ui_metrics`、`splitter`、`resource_ids`、
-`commands`，以及六个操作控制器：`commit_flow`、`undo_flow`、`fetch_flow`、
-`pull_flow`、`push_flow`、`submodule_flow`（子模块导航：探测阶段、来路与代管的交还、返回后的指针核对）。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
+`commands`，以及七个操作控制器：`commit_flow`、`undo_flow`、`fetch_flow`、
+`pull_flow`、`push_flow`、`conflict_flow`（冲突与暂停流程的三个入口：一次只读现场读取按
+阶段分流成「展示」「方案确认」与「执行前复核」，`--abort` 走风险确认框，命令没做成时再读回
+现场补完结论；「没有痕迹不生成 `--abort`」「还有未合并条目不生成 `--continue`」都在
+`git/conflict_state` 里裁好，控制器只按结论行动）、
+`submodule_flow`（子模块导航：探测阶段、来路与代管的交还、返回后的指针核对）。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
 
 ## tests/
 

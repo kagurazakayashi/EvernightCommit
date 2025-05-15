@@ -39,4 +39,17 @@ std::wstring DescribePushCommandConclusion(bool succeeded) {
   return text;
 }
 
+std::wstring DescribeConflictContinueSuccessConclusion() {
+  return L"｜继续这一步按 Git 的退出码（0）判为成功：那条命令是由 Git 建立提交的，"
+         L"提交内容、钩子、签名与是否打开编辑器都按它自己的结果算。"
+         L"这个仓库现在是否还停在流程里、还剩几个未合并文件，以下面这次重读的结果为准——"
+         L"本程序没替你选任何一边的内容，也没替你暂存或退回任何文件。";
+}
+
+std::wstring DescribeConflictAbortSuccessConclusion() {
+  return L"｜中止这一步按退出码（0）判为成功：Git 说它已经中止了这个流程。"
+         L"工作区与索引被改成什么，以刚才命令窗口里的输出与下面的重读为准——"
+         L"除那一条 --abort 命令外本程序什么都没做（没 stash、没 clean、没 reset --hard、没删锁）。";
+}
+
 }  // namespace gc::app

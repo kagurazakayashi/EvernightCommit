@@ -90,6 +90,7 @@ constexpr const char* kPureFiles[] = {
     "commit_identity_tests.cpp",
     "commit_message_tests.cpp",
     "commit_plan_tests.cpp",
+    "conflict_state_tests.cpp",
     "diff_view_tests.cpp",
     "environment_block_tests.cpp",  // 仅在本进程内改环境并 RAII 复原；串行运行前提见 docs/testing.md
     "fetch_plan_tests.cpp",
@@ -129,6 +130,7 @@ constexpr const char* kWindowsFiles[] = {
 constexpr const char* kFixtureFiles[] = {
     "author_config_fixture_tests.cpp",
     "command_window_fixture_tests.cpp",
+    "conflict_fixture_tests.cpp",
     "commit_history_fixture_tests.cpp",
     "commit_plan_fixture_tests.cpp",
     "diff_view_fixture_tests.cpp",
@@ -220,6 +222,11 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // （写文件/建目录）：不建提交、不推送、不动索引（2026-10-08 子模块导航任务逐行核实）。
     "submodule_navigation_queries_fixture_are_accepted_by_real_git",
     "submodule_entry_probe_fixture_refuses_paths_that_are_not_gitlinks",
+    // conflict_fixture_tests.cpp —— 只有 init、只读查询与在临时目录里造物（建目录/写痕迹档案/
+    // 写工作区文件但不 add）：不建提交、不推送、不动索引、不改任何配置（逐行核实于 2026-10-08
+    // 「冲突处理入口」任务；文件里其余用例都要提交图，归 git-mutating 由维护者运行）。
+    "conflict_probe_fixture_accepts_the_query_shapes_on_a_fresh_repository",
+    "conflict_probe_fixture_separates_unreadable_git_dir_from_no_markers",
 };
 
 bool InTable(const char* const* table, size_t count, std::string_view value) {

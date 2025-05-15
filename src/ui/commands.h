@@ -1,5 +1,9 @@
 #pragma once
 
+#include <windows.h>
+
+#include "platform/windows/command_window_runner.h"  // 只用它的 kCompletionMessage 做一句编译期防撞
+
 namespace gc::ui {
 
 // 子控件命令 ID。仅用于 WM_COMMAND / WM_NOTIFY 路由，值本身无外部含义。
@@ -66,6 +70,11 @@ enum ControlId : int {
   // 子模块导航的两个按钮：只对状态列写着「子模块」的那一条起作用，返回的可用性由导航栈决定。
   kIdEnterSubmoduleButton = 196,
   kIdReturnToParentButton = 197,
+  // 冲突与暂停流程的三个入口：查看（只读展示现场）、继续（--continue，由 Git 建立提交）、
+  // 中止（--abort，会改动工作区）。三个入口共用一台控制器，可用性由现场痕迹决定。
+  kIdConflictViewButton = 198,
+  kIdConflictContinueButton = 199,
+  kIdConflictAbortButton = 200,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
@@ -116,6 +125,19 @@ inline constexpr UINT kFirstPushProbeCompleted = WM_APP + 16;
 inline constexpr UINT kSubmoduleEntryProbeCompleted = WM_APP + 17;
 // 「返回父仓库」之后那三份位置的只读核对（父索引 / 父提交 / 子模块 HEAD）完成通知；wParam 为请求序号。
 inline constexpr UINT kSubmodulePointerProbeCompleted = WM_APP + 18;
+// 「冲突与暂停流程」的现场读取（Git 目录里的痕迹 + 未合并条目 + 当前分支/HEAD，全部只读）
+// 完成通知；wParam 为请求序号。「查看」的展示、「继续」与「中止」的预检共用这一条，
+// 回来给谁用由冲突控制器自己的阶段标记分辨。命令本身在命令窗口里跑，不走这条通知。
+inline constexpr UINT kConflictProbeCompleted = WM_APP + 19;
+// 注意：WM_APP + 20 归命令窗口执行器的完成通知（platform::CommandWindowRunner::kCompletionMessage），
+// 它不在本文件里定义，历史上就差点与这里的序号撞车（撞了会表现为「终态回调把预检通知当成
+// 操作完成」这类极难查的错乱）。因此这一段从 19 直接跳到 21，文件末尾有一条 static_assert 兜底。
+// 点头之后、发出 --continue/--abort 之前的执行前复核完成通知；wParam 为请求序号。
+// 这一核对走后台（GUI 线程绝不同步等子进程）：没回来之前不发命令。
+inline constexpr UINT kConflictRecheckCompleted = WM_APP + 21;
+// 那条流程命令没做成之后的「现场读取」完成通知；wParam 为请求序号。
+// 读回来才补完那句结论并请求重读——与 pull 整合失败那一步同一套做法。
+inline constexpr UINT kConflictAftermathCompleted = WM_APP + 22;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -173,5 +195,18 @@ inline constexpr unsigned long kSubmoduleProbeTimeoutMs = 8000;
 // 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、
 // 命令不发，绝不退回用早前那一份事实继续，也不自动重试。
 inline constexpr unsigned long kCommitProbeTimeoutMs = 20000;
+// 「冲突与暂停流程」的现场读取里最慢的一条是 `git diff --name-only -z --diff-filter=U`
+// （大仓库要扫完整棵树），与 git status 同一量级，沿用工作区读取的 20 秒放宽值。
+// 「点头之后、发命令之前」的复核原样重发同一组查询，因此用同一个超时——两面对得上，
+// 才允许把「复核不过」解释成「现场变了」而不是「这一轮没读完」。超时一律按「这份现场没读回来」
+// 放弃这次执行：确认框不重弹、命令不发，也绝不退回用早前那一份事实继续。
+inline constexpr unsigned long kConflictProbeTimeoutMs = 20000;
+
+// 编译期防撞：本文件里定义的每一条完成通知都不许等于执行器那条完成消息。
+// 新增通知时先核对这一段，别指望 switch 的重复 case 一定会报错（两条消息分属两个函数时就漏了）。
+static_assert(kSplitterDragged != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kConflictProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kConflictRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kConflictAftermathCompleted != platform::CommandWindowRunner::kCompletionMessage);
 
 }  // namespace gc::ui
