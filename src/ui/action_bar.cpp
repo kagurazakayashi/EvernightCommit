@@ -20,6 +20,10 @@ constexpr RECT Box(int left, int top, int width, int height) noexcept {
 
 }  // namespace
 
+std::array<HWND, 7> ActionBar::Buttons() const noexcept {
+  return {refresh_, createCommit_, undoCommit_, push_, conflictView_, conflictContinue_, conflictAbort_};
+}
+
 int ActionBar::MinimumHeight(const UiMetrics& metrics) noexcept {
   return metrics.ControlHeight();
 }
@@ -27,7 +31,7 @@ int ActionBar::MinimumHeight(const UiMetrics& metrics) noexcept {
 int ActionBar::MinimumWidth(const UiMetrics& metrics) const {
   const int gap = metrics.ColGap();
   int width = metrics.LabelWidth(GetControlText(status_));
-  for (HWND button : {refresh_, createCommit_, undoCommit_, push_}) {
+  for (HWND button : Buttons()) {
     width += metrics.ButtonWidth(GetControlText(button)) + gap;
   }
   return width + gap;
@@ -38,6 +42,9 @@ void ActionBar::Create(HWND parent) {
   createCommit_ = CreatePushButton(parent, L"创建提交", kIdCreateCommitButton);
   undoCommit_ = CreatePushButton(parent, L"撤回最近提交", kIdUndoCommitButton);
   push_ = CreatePushButton(parent, L"推送", kIdPushButton);
+  conflictView_ = CreatePushButton(parent, L"查看冲突状态", kIdConflictViewButton);
+  conflictContinue_ = CreatePushButton(parent, L"继续该流程", kIdConflictContinueButton);
+  conflictAbort_ = CreatePushButton(parent, L"中止该流程", kIdConflictAbortButton);
   status_ = CreateLabel(parent, L"未执行任何操作。", kIdBottomStatusLabel);
 }
 
@@ -52,7 +59,7 @@ void ActionBar::Layout(const RECT& area, const UiMetrics& metrics) {
   const int labelTop = area.top + ((area.bottom - area.top) - metrics.LabelHeight()) / 2;
 
   int x = area.left;
-  for (HWND button : {refresh_, createCommit_, undoCommit_, push_}) {
+  for (HWND button : Buttons()) {
     const int width = metrics.ButtonWidth(GetControlText(button));
     Place(button, Box(x, top, width, rowHeight));
     x += width + gap;

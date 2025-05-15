@@ -95,6 +95,7 @@ add_library(gc_core STATIC
   src/git/commit_identity.cpp
   src/git/commit_message.cpp
   src/git/commit_plan.cpp
+  src/git/conflict_state.cpp
   src/git/diff_view.cpp
   src/git/fetch_plan.cpp
   src/git/fetch_scope.cpp
@@ -120,6 +121,7 @@ add_library(gc_platform STATIC
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp
   src/platform/windows/commit_probe.cpp
+  src/platform/windows/conflict_probe.cpp
   src/platform/windows/environment_block.cpp
   src/platform/windows/fetch_probe.cpp
   src/platform/windows/git_query_result.cpp
@@ -151,6 +153,7 @@ add_library(gc_ui STATIC
   src/ui/commit_flow.cpp
   src/ui/commit_form.cpp
   src/ui/controls.cpp
+  src/ui/conflict_flow.cpp
   src/ui/fetch_flow.cpp
   src/ui/layout.cpp
   src/ui/main_window.cpp

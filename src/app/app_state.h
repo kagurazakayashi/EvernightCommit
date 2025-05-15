@@ -83,6 +83,11 @@ public:
   // 不带 --force / --mirror / --all，也不推标签；推送后另向发布目标核实那条引用的实际位置。
   static constexpr bool kPushImplemented = true;
 
+  // 「冲突与暂停流程」那三个入口是否已接通：只管自己这三个按钮。
+  // 它接通的是「看清停着的流程 + 把 Git 自己的 --continue/--abort 交进命令窗口」，
+  // 不代表本程序会替用户解决冲突内容（那从来不在范围内）。
+  static constexpr bool kConflictHandlingImplemented = true;
+
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }
   void SetGitExePath(std::wstring path) { info_.gitExePath = std::move(path); }
   void SetStatusNote(std::wstring note) { statusNote_ = std::move(note); }

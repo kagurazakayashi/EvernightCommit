@@ -56,6 +56,12 @@ struct CommandLaunchOptions {
   // 2 = branch.<分支>.merge）。0 表示不是这一步。终态要交回推送控制器决定下一条与最终结论：
   // 「推送成功」与「配置写成没有」是两件事，各自有退出码，绝不合并成一句「推送并设置上游成功」。
   int upstreamWriteStep = 0;
+  // 这次是「冲突流程 继续」（某一种流程的 --continue）或「冲突流程 中止」（对应的 --abort）。
+  // 两者都必须把终态交回 ConflictFlow：成功时只追加一句按退出码说话的范围承诺；
+  // 没做成时要把现场交回控制器做后台读取与结案（「结果未知」与「Git 返回非 0」不合并成一句话）。
+  // 两个位互斥：一次操作只能是其中一种，控制器据此认出该用哪一种措辞补完结论。
+  bool conflictContinueOperation = false;
+  bool conflictAbortOperation = false;
 };
 
 // 决策点一次性取用的仓库与界面只读快照。操作控制器全程只能用这里的值——不允许回头读

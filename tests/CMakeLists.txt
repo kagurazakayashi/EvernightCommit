@@ -16,6 +16,8 @@ add_executable(gc_tests
   commit_message_tests.cpp
   commit_plan_fixture_tests.cpp
   commit_plan_tests.cpp
+  conflict_fixture_tests.cpp
+  conflict_state_tests.cpp
   diff_view_fixture_tests.cpp
   diff_view_tests.cpp
   environment_block_tests.cpp

@@ -25,6 +25,7 @@
 #include "ui/changes_pane.h"
 #include "ui/commit_flow.h"
 #include "ui/commit_form.h"
+#include "ui/conflict_flow.h"
 #include "ui/controls.h"
 #include "ui/fetch_flow.h"
 #include "ui/layout.h"
@@ -43,7 +44,7 @@ inline constexpr const wchar_t* kMainWindowWindowClass = L"EvernightCommit.MainW
 inline constexpr const wchar_t* kWindowTitle = L"Git 提交工具";
 
 // 主窗口：窗口过程分发、子面板装配与布局、基础设施读取（Git 验证/仓库识别/工作区/作者身份）、
-// 命令窗口执行器；五个被编排的 Git 操作（创建提交/撤回/fetch/pull/推送）各由一个操作控制器
+// 命令窗口执行器；六个被编排的 Git 操作（创建提交/撤回/fetch/pull/推送/冲突与暂停流程）各由一个操作控制器
 // 负责编排，本类通过 OperationHost 接口只提供「呈现确认与结果、启动命令窗口、请求刷新」这些
 // 服务，不再在成员里保存这些操作的中间状态。
 class MainWindow : private CommitOperationHost {
@@ -113,7 +114,7 @@ private:
   // 外部命令窗口执行器（步骤 5）：用户主动执行的 Git 操作在 cmd 窗口里运行。
   void InitializeCommandWatching(HWND window);
   // 提交一次命令窗口操作：状态登记、槽位占用与失败结案都在这里，
-  // status 按钮、“双击查看差异”与五个操作控制器的启动共用同一条路径，入口不同行为完全一致。
+  // status 按钮、“双击查看差异”与六个操作控制器的启动共用同一条路径，入口不同行为完全一致。
   [[nodiscard]] bool LaunchCommandWindowOperation(HWND window,
                                                  const git::CommandWindowOperation& operation,
                                                  const CommandLaunchOptions& options);
@@ -140,7 +141,7 @@ private:
   // 写操作共同的执行前提核对：Git 与仓库可用、没有别的命令窗口操作在跑、
   // 界面显示的工作区根仍然是协调器绑定的那一个。不通过时写好状态栏并返回 false。
   // （判定规则与文案在 app/operation_gate；暂存/查看类只走这一层，
-  //   五个被编排的操作另有 AdmitGitFlow 的流程互斥裁决。）
+  //   六个被编排的操作另有 AdmitGitFlow 的流程互斥裁决。）
   [[nodiscard]] bool RequireWritePrerequisites(HWND window, std::wstring_view actionLabel);
   // 被编排操作的统一入口裁决：共同前提 + 「谁正走在自己的流程里」。拒绝时写好状态栏并返回 false。
   [[nodiscard]] bool AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_view actionLabel);
@@ -197,7 +198,7 @@ private:
   // 编程式改写「作者」输入框：期间抑制 EN_CHANGE，免得把程序填的值记成用户输入。
   void SetAuthorField(HWND window, const std::wstring& text);
 
-  // ---- 五个被编排操作的按钮入口 ----
+  // ---- 六个被编排操作的按钮入口 ----
   // 每个入口只做三件事：准入裁决（app/operation_gate）→ 采集只读快照 → 把流程交给对应控制器。
   // 之后的预检、确认、复核、启动、完成、验证与清理都在各控制器的文件里。
   void CreateCommit(HWND window);
@@ -205,6 +206,14 @@ private:
   void RequestFetch(HWND window);
   void RequestPull(HWND window);
   void RequestPush(HWND window);
+
+  // ---- 冲突与暂停流程的三个入口 ----
+  // 三个入口共用一台控制器（ui/conflict_flow）与同一份现场读取：
+  // 「查看」只读地把现场展示出来；「继续」与「中止」各自规划、预检、确认、复核之后
+  // 才把那一条 Git 命令交进命令窗口。没有流程时不生成 --abort，还有未合并文件时不生成 --continue。
+  void ShowConflictState(HWND window);
+  void ContinueConflictFlow(HWND window);
+  void AbortConflictFlow(HWND window);
 
   // ---- 子模块导航的两个入口 ----
   // 两个入口都做同一套准入（app/DescribeNavigationRefusal：导航不写任何东西，但它会把界面
@@ -298,6 +307,11 @@ private:
     // 终态交回 push 控制器：成功才发下一条，失败就把「推送已成的那部分」和「配置只写了一半」
     // 分开说完——两条各自有退出码，绝不合并成一句成功。
     int upstreamWriteStep = 0;
+    // 这次是「冲突流程 继续」或「冲突流程 中止」（两者互斥）。终态一律交回 conflictFlow_：
+    // 成功只追加一句按退出码说话的范围承诺；没做成（含「结果未知」）时把现场读取与结案
+    // 交给那台控制器，与 pull 整合失败同一套做法——绝不把「Git 返回非 0」与「没拿到退出码」合并。
+    bool conflictContinueOperation = false;
+    bool conflictAbortOperation = false;
   };
 
   platform::UniqueWindow window_;
@@ -305,12 +319,15 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
-  // 五个被编排操作的控制器：各自的后台预检器、阶段标记、方案与复核基准都由控制器自己保管。
+  // 六个被编排操作的控制器：各自的后台预检器、阶段标记、方案与复核基准都由控制器自己保管。
   CommitFlow commitFlow_;
   UndoFlow undoFlow_;
   FetchFlow fetchFlow_;
   PullFlow pullFlow_;
   PushFlow pushFlow_;
+  // 冲突与暂停流程：现场读取、判读成的方案、复核基准与「没做完时把现场读回来补结论」
+  // 都在这台控制器里（三个入口共用它，因此同一时刻只有一条在走自己的阶段）。
+  ConflictFlow conflictFlow_;
   // 子模块导航：进来路、代管各仓库的表单草稿、两条只读探测都在这台控制器里。
   SubmoduleFlow submoduleFlow_;
   platform::CommandWindowRunner commandRunner_;
