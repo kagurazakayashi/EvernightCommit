@@ -11,6 +11,7 @@
 #include "app/app_state.h"
 #include "app/commit_form_session.h"
 #include "app/operation_gate.h"
+#include "app/persistent_state.h"
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
 #include "git/staging_plan.h"
@@ -18,6 +19,7 @@
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
+#include "platform/windows/persistent_store.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
 #include "platform/windows/workspace_status.h"
@@ -189,7 +191,29 @@ private:
   // 表单内容属于哪一个工作区（按折叠后的工作区根比较，换 Git 程序不算换仓库）。
   [[nodiscard]] std::wstring FormRepositoryKey() const;
   // 切换仓库时对已有表单内容的处理：有用户内容就问「保留还是放弃」，程序不替人猜。
+  // 换绑定的这一刻也是「旧仓库那份草稿必须落账」的最后一瞬：先把屏幕内容记到旧作用域，
+  // 再问，再按新仓库的记录决定恢复。
   void ResolveFormOnRepositorySwitch(HWND window, const std::wstring& key);
+
+  // ---- 持久化（可选新增功能：最近仓库 / 选定 Git / 窗口布局 / 提交草稿）----
+  // 数据模型与合并规则在 app/persistent_state（纯逻辑），文件与目录在
+  // platform/windows/persistent_store；这里只做「界面上的事」：首次说明、开关、
+  // 保存时机、恢复落地，以及把保存结果如实说给用户。全部 IO 在 GUI 线程上做
+  // 一次有界的小文件写入（不启动任何子进程）；防抖定时器把连打合并成一次。
+  void LoadPersistedPreferences();                       // CreateWindowEx 之前调用
+  [[nodiscard]] bool PersistenceApplicable() const;      // 用户同意过且总开关开着、文件没被更高版本占着
+  [[nodiscard]] bool DraftSavingApplicable() const;      // 上一项 + 草稿开关
+  void SchedulePersistentSave();                         // 置防抖定时器
+  void RunPersistentSave(HWND window);                   // 立刻执行一次「合并+原子写」
+  void CaptureDraftIntoPreferences();                    // 把屏幕上的表单记到当前草稿作用域
+  void TryApplyPersistedDraft(HWND window);              // 绑定成功后：屏幕上没有用户内容才恢复
+  void NoteGitPathForPreferences(const std::wstring& verifiedPath);
+  void NoteRecentRepository(const std::wstring& root);
+  void NoteLayoutForPreferences(bool geometry, bool columns);
+  void ShowPersistentConsentPrompt(HWND window);
+  void OnPersistenceCheckClicked(HWND window, int controlId, bool checked);
+  void ClearPersistedRecords(HWND window);
+  [[nodiscard]] std::wstring PreferencesStorageLine() const;  // 「保存位置：…」一句（只有路径，没有正文）
 
   // 「作者」初值：向 Git 问这个仓库的有效身份配置（user.name / user.email），
   // 优先序完全交给 Git；本程序只读，绝不写回任何配置。
@@ -319,6 +343,23 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
+  // ---- 持久化成员（可选新增功能）----
+  // 数据与合并规则都在 app/persistent_state；这里只持有「本窗口的这一份」与写入意图。
+  platform::PersistentStorePaths prefsPaths_;
+  app::PersistentState prefs_;
+  // 路径可解析、盘上文件没被更高版本占着：还「写得动」。具体写不写仍由开关与防抖决定。
+  bool prefsWritable_ = false;
+  bool prefsConsentPending_ = false;  // 首次说明待展示（WM_CREATE 之后用一条消息补上）
+  bool prefsSavePending_ = false;     // 防抖定时器在跑
+  app::PersistentWriteIntents prefsIntents_;
+  std::wstring prefsLoadNote_;        // 读取带回的一句状态说明（OnCreate 里显示）
+  // 屏幕上的表单此刻属于哪份工作区：绑定成功时更新，识别失败时清空。
+  // 换绑定的瞬间要先按「旧作用域」记草稿，再换成新的，两个 worktree 才永远不会互相盖。
+  std::wstring draftScopeRoot_;
+  std::wstring draftScopeKey_;
+  // 子模块导航发起的那一次换绑定：落地时不叠加草稿恢复（交还由旅程做），用完即清。
+  bool suppressDraftRestoreOnce_ = false;
+  std::wstring gitPathInvalidNotice_;  // 「上次保存的 Git 路径失效」一句，等验证结论回来时带上
   // 六个被编排操作的控制器：各自的后台预检器、阶段标记、方案与复核基准都由控制器自己保管。
   CommitFlow commitFlow_;
   UndoFlow undoFlow_;

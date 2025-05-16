@@ -105,6 +105,7 @@ constexpr const char* kPureFiles[] = {
     "machine_output_completeness_tests.cpp",
     "operation_conclusions_tests.cpp",
     "operation_gate_tests.cpp",
+    "persistent_state_tests.cpp",
     "pull_plan_tests.cpp",
     "push_plan_tests.cpp",
     "repository_tests.cpp",
@@ -123,6 +124,7 @@ constexpr const char* kPureFiles[] = {
 // 真实 Win32 子进程/文件系统，但逐文件核实过不启动 git.exe。
 constexpr const char* kWindowsFiles[] = {
     "command_window_directory_tests.cpp",
+    "persistent_store_file_tests.cpp",  // 真实文件读写/锁，全部在测试自己的临时根里；不启动 Git、不碰用户 %APPDATA%。
     "subprocess_capture_fixture_tests.cpp",
 };
 

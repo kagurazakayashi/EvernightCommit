@@ -284,6 +284,43 @@ constexpr std::wstring_view kTipTimeReset =
     L"没人改过时间时，创建提交用的就是提交那一刻的时间（不是程序启动时的时刻）；"
     L"手动改过之后，那份时间会一直保留到点这个按钮或提交成功为止。";
 
+// ---- 持久化（可选新增功能）的界面文字 ----
+// 这三句都要把「存了什么、存在哪、怎么删」说全：草稿可能含私人内容，位置必须问得出。
+constexpr std::wstring_view kTipPersistRecords =
+    L"总开关：保存最近打开的仓库、验证过的 Git 程序路径、窗口位置大小与列宽，"
+    L"以及（若“保存草稿”也开着）每个仓库一份未提交的提交表单草稿。\r\n"
+    L"保存位置在当前用户的应用数据目录（%APPDATA%\\EvernightCommit\\state.prefs），"
+    L"不写进项目目录、不写 Git 配置、不写任何口令或环境变量。\r\n"
+    L"取消勾选后程序不再读写这些记录（已有文件保留，可用“清除已存记录”删掉）。";
+constexpr std::wstring_view kTipPersistDrafts =
+    L"只管提交表单草稿（标题/描述/作者/合作者与挑选的时间）这一类内容。\r\n"
+    L"草稿是你自己写的文字，可能存在私人内容；取消勾选会立刻把已保存的草稿从记录文件里删掉"
+    L"（屏幕上的字不动）。按仓库的工作区身份分开保存，同一项目的不同 worktree 互不覆盖。";
+constexpr std::wstring_view kTipClearPrefs =
+    L"删除记录文件里的全部用户内容：最近仓库、Git 程序路径、窗口布局与所有草稿，"
+    L"对这台机器上所有 EvernightCommit 窗口生效。两个开关的选择会保留。\r\n"
+    L"不改动 Git 仓库、你的 Git 配置或屏幕上正在输入的内容。";
+
+// 首次使用说明：把保存内容、存储位置、不含之物与反悔入口一次说清。
+constexpr std::wstring_view kConsentTitle = L"EvernightCommit：是否保存使用记录？";
+constexpr std::wstring_view kConsentBodyHead =
+    L"EvernightCommit 想把下面几类信息保存到当前用户的应用数据目录，用来减少重复输入、"
+    L"并在程序异常退出后找回没提交的草稿：\r\n"
+    L"  · 最近打开的仓库（工作区目录）\r\n"
+    L"  · 验证过的 Git 程序路径\r\n"
+    L"  · 窗口位置、大小与两个列宽比例\r\n"
+    L"  · 每个仓库一份未提交的提交表单草稿（标题、描述、作者、合作者与所选时间）\r\n"
+    L"\r\n";
+constexpr std::wstring_view kConsentBodyTail =
+    L"\r\n"
+    L"不会保存：口令、令牌、带凭据的 URL、进程环境变量。草稿是你自己写的文字，"
+    L"可能存在私人内容——界面右下角有“保存记录”“保存草稿”两个开关和“清除已存记录”按钮，"
+    L"也可以随时手动删除上面那个文件。\r\n"
+    L"\r\n"
+    L"是：全部保存（含草稿）\r\n"
+    L"否：只保存仓库、Git 程序与窗口布局，不保存草稿\r\n"
+    L"取消：这次运行什么都不保存（下次启动会再问一次）\r\n";
+
 // 切換倉庫時表單內容的去留：只有明確選「否」才會丟棄使用者打過的字，
 // 「取消」與關窗口都按保留處理——丟棄是不可逆的，預設值必須落在安全的那一邊。
 constexpr std::wstring_view kFormSwitchTitle = L"切换仓库：提交表单里已有你输入的内容";
@@ -375,22 +412,51 @@ bool MainWindow::Create(HINSTANCE instance, int showCommand) {
   if (!RegisterWindowClass(instance) || !Splitter::RegisterWindowClass(instance)) {
     return false;
   }
-  HWND created = ::CreateWindowExW(0, kMainWindowWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                   CW_USEDEFAULT, metrics_.Scale(kInitialWindowWidth),
-                                   metrics_.Scale(kInitialWindowHeight), nullptr, nullptr, instance, this);
+  // 先读记录再建窗口：窗口几何要按上次的位置出现，不能建完再跳一下。
+  // 读取本身不写任何东西（目录都没创建），首次使用因此完全无痕。
+  LoadPersistedPreferences();
+  int x = CW_USEDEFAULT;
+  int y = CW_USEDEFAULT;
+  int width = metrics_.Scale(kInitialWindowWidth);
+  int height = metrics_.Scale(kInitialWindowHeight);
+  if (PersistenceApplicable() && prefs_.window.valid &&
+      platform::IsWindowRectReachable(prefs_.window.x, prefs_.window.y, prefs_.window.width,
+                                      prefs_.window.height)) {
+    // 恢复上次位置只是「摆在哪」，不是任何授权；可达性（还落在某台显示器上）不成立就回退默认。
+    x = prefs_.window.x;
+    y = prefs_.window.y;
+    width = prefs_.window.width;
+    height = prefs_.window.height;
+  }
+  HWND created = ::CreateWindowExW(0, kMainWindowWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW, x, y, width,
+                                   height, nullptr, nullptr, instance, this);
   if (created == nullptr) {
     return false;
   }
   window_.Reset(created);
   ::ShowWindow(created, showCommand);
+  if (PersistenceApplicable() && prefs_.window.valid && prefs_.window.maximized &&
+      (showCommand == SW_SHOWDEFAULT || showCommand == SW_SHOWNORMAL)) {
+    ::ShowWindow(created, SW_SHOWMAXIMIZED);  // 上次是最大化关的，这次也按最大化出现
+  }
   ::UpdateWindow(created);
   return true;
 }
 
 void MainWindow::OnCreate(HWND window) {
   metrics_.UpdateForDpi(DpiForWindowOrSystem(window));
-  ::SetWindowPos(window, nullptr, 0, 0, metrics_.Scale(kInitialWindowWidth), metrics_.Scale(kInitialWindowHeight),
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  const bool restoredGeometry = PersistenceApplicable() && prefs_.window.valid &&
+                                platform::IsWindowRectReachable(prefs_.window.x, prefs_.window.y,
+                                                                prefs_.window.width, prefs_.window.height);
+  if (!restoredGeometry) {
+    ::SetWindowPos(window, nullptr, 0, 0, metrics_.Scale(kInitialWindowWidth),
+                   metrics_.Scale(kInitialWindowHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  // 上次拖过的两列宽度直接接进布局参数（UpdateLayoutSpecs 只改 DPI 尺寸、不动比例）。
+  if (PersistenceApplicable() && prefs_.columns.valid) {
+    changesSpec_.leftRatio = static_cast<double>(prefs_.columns.leftPermille) / 1000.0;
+    changesSpec_.middleRatio = static_cast<double>(prefs_.columns.middlePermille) / 1000.0;
+  }
 
   repoBar_.Create(window);
   infoBar_.Create(window);
@@ -411,12 +477,22 @@ void MainWindow::OnCreate(HWND window) {
   ApplyFonts(window);
   tooltips_.Create(window, metrics_.Font());
   RegisterTooltips();
+  // 两个开关按读回来的策略显示（BM_SETCHECK 不发 BN_CLICKED，不会被当成用户刚点过）。
+  actionBar_.SetPreferenceChecks(prefs_.persistenceEnabled, prefs_.draftSavingEnabled);
   UpdateCommandAvailability();
   InitializeRepoInput(window);
   RefreshTexts(window);
   ApplyWorkspaceLists();  // 首屏的空状态说明：列表不在 RefreshTexts 里重建，这里显式填一次。
   InitializeGitDetection(window);
   InitializeCommandWatching(window);
+  if (!prefsLoadNote_.empty()) {
+    state_.SetStatusNote(prefsLoadNote_);
+    RefreshTexts(window);
+  }
+  if (prefsConsentPending_) {
+    // WM_CREATE 里不弹模态框：创建完成、控件都就位之后再问。
+    ::PostMessageW(window, kPersistentConsentNotice, 0, 0);
+  }
 }
 
 void MainWindow::RegisterTooltips() {
@@ -452,6 +528,9 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(actionBar_.conflictAbortButton(), kTipConflictAbort);
   tooltips_.Add(changesPane_.enterSubmoduleButton(), kTipEnterSubmodule);
   tooltips_.Add(changesPane_.returnToParentButton(), kTipReturnToParent);
+  tooltips_.Add(actionBar_.persistRecordsCheck(), kTipPersistRecords);
+  tooltips_.Add(actionBar_.persistDraftsCheck(), kTipPersistDrafts);
+  tooltips_.Add(actionBar_.clearPrefsButton(), kTipClearPrefs);
 }
 
 void MainWindow::UpdateCommandAvailability() {
@@ -741,10 +820,30 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
         ResetCommitTimesToNow(window);
       }
       break;
+    case kIdPersistRecordsCheck:
+      if (notifyCode == BN_CLICKED) {
+        const bool checked = ::SendMessageW(actionBar_.persistRecordsCheck(), BM_GETCHECK, 0, 0) ==
+                             BST_CHECKED;
+        OnPersistenceCheckClicked(window, commandId, checked);
+      }
+      break;
+    case kIdPersistDraftsCheck:
+      if (notifyCode == BN_CLICKED) {
+        const bool checked = ::SendMessageW(actionBar_.persistDraftsCheck(), BM_GETCHECK, 0, 0) ==
+                             BST_CHECKED;
+        OnPersistenceCheckClicked(window, commandId, checked);
+      }
+      break;
+    case kIdClearPrefsButton:
+      if (notifyCode == BN_CLICKED) {
+        ClearPersistedRecords(window);
+      }
+      break;
     case kIdTimeSyncCheck:
       if (notifyCode == BN_CLICKED) {
         // 勾选状态由控件自己翻转，这里只负责把联动规则跟上（置灰哪一半、说明怎么写）。
         RefreshTimeControlsState(window);
+        CaptureDraftIntoPreferences();
         state_.SetFormNote(commitForm_.TimeSyncChecked()
                                ? L"“时间同步修改”已勾选：提交者时间跟着作者时间，"
                                  L"上面那两块提交者时间控件已置灰。"
@@ -812,8 +911,14 @@ void MainWindow::BrowseRepoPath(HWND window) {
 }
 
 void MainWindow::InitializeRepoInput(HWND /*window*/) {
-  // 初值取应用启动时的工作目录（只读取，不改变进程工作目录）。
-  const std::wstring startupDirectory = platform::CurrentWorkingDirectory();
+  // 初值：用户同意保存且记着最近仓库时用最近的那一个；否则退回启动工作目录（只读，不改进程目录）。
+  // 注意这只是「填进输入框等待识别」：识别照样走完整的后台只读查询，上次有效不等于这次可用。
+  std::wstring startupDirectory;
+  if (PersistenceApplicable() && !prefs_.recentRepositories.empty()) {
+    startupDirectory = prefs_.recentRepositories.front();
+  } else {
+    startupDirectory = platform::CurrentWorkingDirectory();
+  }
   const std::wstring absolute = platform::ToAbsolutePath(startupDirectory);
   const std::wstring initial = absolute.empty() ? startupDirectory : absolute;
   {
@@ -854,8 +959,28 @@ void MainWindow::BrowseGitPath(HWND window) {
 }
 
 void MainWindow::InitializeGitDetection(HWND window) {
-  // 启动即按当前进程 PATH 发现候选（等价 `where git` 的搜索意图，不扫盘）。
-  const std::vector<std::wstring> candidates = platform::DiscoverGitCandidates();
+  // 启动即按当前进程 PATH 发现候选（效果对应 `where git` 的搜索意图，不扫盘、不读注册表）。
+  std::vector<std::wstring> candidates = platform::DiscoverGitCandidates();
+  // 上次验证过的 Git 路径放在最前——但「放在最前」不等于「直接当本次授权」：
+  // 它照样要经过同一次后台 git --version 验证；文件已经不在原位置时明说并退回自动发现。
+  if (PersistenceApplicable() && !prefs_.gitExecutablePath.empty()) {
+    const std::wstring saved = prefs_.gitExecutablePath;
+    if (platform::IsExistingRegularFile(saved)) {
+      candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                      [&](const std::wstring& c) {
+                                        return gc::git::PathsEqualFolded(c, saved);
+                                      }),
+                       candidates.end());
+      candidates.insert(candidates.begin(), saved);
+      repoBar_.SetGitCandidates(candidates);
+      SetControlText(repoBar_.gitCombo(), saved);
+      RequestGitVerification(window, saved);
+      return;
+    }
+    state_.SetStatusNote(L"上次保存的 Git 程序路径已失效：" + saved +
+                         L"。已退回按 PATH 自动发现，验证通过后会重新记住新路径。");
+    gitPathInvalidNotice_ = saved;  // 验证结论回来时把这句话带上，不被「正在验证」淹没
+  }
   repoBar_.SetGitCandidates(candidates);
   if (candidates.empty()) {
     const std::wstring message = L"当前进程 PATH 中未找到 git.exe，请手动输入路径或用“浏览…”选择。";
@@ -922,10 +1047,21 @@ void MainWindow::OnGitProbeCompleted(HWND window, uint64_t completionSerial) {
   tool.path = verification.path;
   tool.version = verification.version;
   tool.message = verification.message;
+  if (!gitPathInvalidNotice_.empty() && verification.outcome == git::GitProbeOutcome::verified) {
+    // 失效的那条旧路径要说完整句再展示：验证消息本身会被刷新成「正在/已验证 新路径」。
+    tool.message += L"｜上次保存的 Git 路径已失效：" + gitPathInvalidNotice_ + L"，本条已取代它。";
+    gitPathInvalidNotice_.clear();
+  }
   tool.status = verification.outcome == git::GitProbeOutcome::verified ? app::GitExeStatus::verified
                                                                        : app::GitExeStatus::invalid;
+  const std::wstring statusLine = tool.message;  // 带着失效说明一起进状态行，不被「正在验证」刷掉
   state_.SetGitTool(std::move(tool));
-  state_.SetStatusNote(verification.message);
+  state_.SetStatusNote(statusLine);
+  if (verification.outcome == git::GitProbeOutcome::verified) {
+    NoteGitPathForPreferences(verification.path);  // 只记「这次真的验证过」的路径
+  } else {
+    gitPathInvalidNotice_.clear();  // 这次验证也没过：那句失效提示不再有意义
+  }
   UpdateCommandAvailability();
   const bool switchedGit = verification.outcome == git::GitProbeOutcome::verified &&
                            !previousGitPath.empty() && previousGitPath != verification.path &&
@@ -1020,6 +1156,11 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   refreshCycleActive_ = false;
   ClearWorkspace();
   state_.SetAuthor(app::AuthorState{});  // 没有可用工作区就没有可信的身份查询落点。
+  // 草稿作用域同样随身份消失：没有可用的工作区根，屏幕内容就不知道该记到哪一名下，
+  // 宁可什么都不记，也绝不猜一个键。
+  draftScopeRoot_.clear();
+  draftScopeKey_.clear();
+  suppressDraftRestoreOnce_ = false;  // 导航没落地：抑制标记到此为止，不留挂
   // 目标目录连识别都没过（路径不存在、不是目录、safe.directory 拦截等）：导航同样没有落地，
   // 控制器要放弃它的阶段标记并把代管内容原样留着。
   submoduleFlow_.OnRepositoryArrivalFailed(*this, CaptureOperationContext());
@@ -1075,6 +1216,11 @@ void MainWindow::OnRepoDetectCompleted(HWND window, uint64_t completionSerial) {
   // 表单内容属于「哪一个工作区」在这里定案：换了仓库而表单里已有用户输入时，
   // 由用户当场决定保留还是放弃，程序不替人猜，也不会让旧作者悄悄变成新仓库的默认值。
   ResolveFormOnRepositorySwitch(window, FormRepositoryKey());
+  if (identityChanged) {
+    // 换到新绑定的工作区就把「最近仓库」记到账：这是识别成功（Git 亲口答出的根）之后才记的，
+    // 认不出的路径不会进列表。
+    NoteRecentRepository(state_.Repo().detection.root);
+  }
   // 作者默认值与摘要、列表共用这一次刷新：识别成功后一起重读，不另建触发机制。
   RequestAuthorConfig(window);
   // 导航落地点：只有「这次识别正是某次导航发起的」才会被控制器认下（它按等待中的根目录核对），
@@ -1539,6 +1685,7 @@ void MainWindow::OnCommitFormEdit(HWND window, int controlId) {
         // 作者欄被清空＝「我要用倉庫配置裡的默認值」。不給這條退路，
         // 用過一次作者欄就再也拿不到默認值，使用者只能反覆手打同一個身份。
         formSession_.NoteAuthorCleared();
+        CaptureDraftIntoPreferences();
         RunFormValidation(window, L"作者栏空着：下次读到这个仓库的有效配置时会自动填上，也可以直接写「姓名 <邮箱>」。");
         return;
       }
@@ -1548,6 +1695,7 @@ void MainWindow::OnCommitFormEdit(HWND window, int controlId) {
     default:
       return;  // 表單裡其它控件的通知與本函數無關（時間控件不構成本表單的正文）。
   }
+  CaptureDraftIntoPreferences();  // 每次改动都记下这份屏幕内容（防抖后才落盘）
   RunFormValidation(window);
 }
 
@@ -1635,6 +1783,7 @@ void MainWindow::AddCoauthor(HWND window) {
   entries.push_back(parsed.Format());
   commitForm_.SetCoauthors(std::move(entries));
   formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  CaptureDraftIntoPreferences();
   RunFormValidation(window);
 }
 
@@ -1656,6 +1805,7 @@ void MainWindow::RemoveSelectedCoauthors(HWND window) {
   }
   commitForm_.SetCoauthors(std::move(entries));
   formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  CaptureDraftIntoPreferences();
   RunFormValidation(window, L"已删除选中的合作者条目。");
 }
 
@@ -1685,6 +1835,7 @@ void MainWindow::EditCoauthorAt(HWND window, int row) {
   commitForm_.SetCoauthors(std::move(entries));
   commitForm_.SelectCoauthorRows({row});  // 重建列表會丟掉選中項，改完還讓它停在原來那一行。
   formSession_.NoteUserEdit(app::CommitFormSession::Field::coauthors);
+  CaptureDraftIntoPreferences();
   RunFormValidation(window);
 }
 
@@ -1702,33 +1853,504 @@ void MainWindow::ResolveFormOnRepositorySwitch(HWND window, const std::wstring& 
   if (key.empty()) {
     return;  // 沒有可用的工作區根（識別失敗那條路已經把身份清掉），不動表單狀態。
   }
+  if (!draftScopeKey_.empty() && key == draftScopeKey_) {
+    return;  // 还是同一个工作区（刷新重识别也会走到这里）：不记、不问、不恢复。
+  }
+  // 1) 屏幕上的内容先按「旧作用域」落进草稿——这是它还算旧仓库内容的最后一步。
+  const bool hasPreviousScope = !draftScopeKey_.empty();
+  if (hasPreviousScope && formSession_.HasUserContent()) {
+    CaptureDraftIntoPreferences();
+  }
+  // 2) 既有的会话决定流程。这里一定要让用户当场选：悄悄沿用会把旧仓库的默认作者带进新仓库，
+  //    悄悄清空会把用户打了几百字的标题与描述丢掉——两者都不可逆，程序无权取舍。
   if (!formSession_.NeedsSwitchDecision(key)) {
     formSession_.BindRepository(key);
-    return;
-  }
-  // 這裡一定要讓使用者當場選：悄悄沿用會把舊倉庫的默認作者帶進新倉庫，
-  // 悄悄清空會把使用者打了幾百字的標題與描述丟掉——兩者都不可逆，程序無權取捨。
-  const int answer = ::MessageBoxW(window, std::wstring(kFormSwitchQuestion).c_str(),
-                                   std::wstring(kFormSwitchTitle).c_str(),
-                                   MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
-  if (answer == IDNO) {
-    {
-      const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
-      commitForm_.ClearFields();
-      const SYSTEMTIME now = platform::CurrentLocalTime();
-      commitForm_.SetTimes(now, now);
-    }
-    formSession_.ChooseDiscard(key);
-    state_.SetFormNote(L"已放弃原来输入的表单内容；作者改用这个仓库的有效 Git 配置。");
   } else {
-    // 「是」與「取消」都走保留：只有明確選「否」才丟棄。關閉對話框（等取消）不得吃掉使用者的字。
-    formSession_.ChooseKeep(key);
-    state_.SetFormNote(answer == IDYES
+    const int answer = ::MessageBoxW(window, std::wstring(kFormSwitchQuestion).c_str(),
+                                     std::wstring(kFormSwitchTitle).c_str(),
+                                     MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON1);
+    if (answer == IDNO) {
+      {
+        const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+        commitForm_.ClearFields();
+        const SYSTEMTIME now = platform::CurrentLocalTime();
+        commitForm_.SetTimes(now, now);
+      }
+      formSession_.ChooseDiscard(key);
+      state_.SetFormNote(L"已放弃原来输入的表单内容；作者改用这个仓库的有效 Git 配置。");
+    } else {
+      // 「是」与「取消」都走保留：只有明确选「否」才丢弃。关闭对话框不得吃掉用户的字。
+      formSession_.ChooseKeep(key);
+      state_.SetFormNote(answer == IDYES
                              ? L"已保留你输入的表单内容；这里的作者保留下来后不再被新仓库的默认值覆盖。"
                              : L"表单内容一律没动。想改用新仓库的默认作者，清空“作者”那一栏即可。");
+    }
+  }
+  // 3) 作用域换到新工作区根：之后的每一次草稿记录都算新仓库的。
+  draftScopeRoot_ = state_.Repo().detection.root;
+  draftScopeKey_ = key;
+  // 4) 这个仓库上次保存过的草稿能否恢复：屏幕上已经有用户内容就不动它（另行提醒），
+  //    导航在途/导航落地的那一次一律不动——交还与恢复两套动作互相踩必出串仓库。
+  if (suppressDraftRestoreOnce_) {
+    suppressDraftRestoreOnce_ = false;  // 导航发起的换绑定：那份内容归旅程代管
+  } else {
+    TryApplyPersistedDraft(window);
   }
   RefreshTexts(window);
 }
+
+// ---- 持久化：读取、保存、恢复（界面与 app/platform 两层在这里汇合）----
+
+std::wstring MainWindow::PreferencesStorageLine() const {
+  if (!prefsPaths_.valid) {
+    return prefsPaths_.failureReason.empty() ? std::wstring(L"（记录目录尚未解析）")
+                                             : prefsPaths_.failureReason;
+  }
+  return app::DescribeStoragePath(prefsPaths_.directory, platform::kPersistentStateFileName);
+}
+
+bool MainWindow::PersistenceApplicable() const {
+  // 三个条件缺一不可：文件写得动、用户对「是否保存」做过明确选择、总开关开着。
+  // 「上次有效」从来不是本次的授权：这条判断只管「用不用旧记录」，用之前每样内容照样重新验证。
+  return prefsWritable_ && prefs_.consentRecorded && prefs_.persistenceEnabled;
+}
+
+bool MainWindow::DraftSavingApplicable() const {
+  return PersistenceApplicable() && prefs_.draftSavingEnabled;
+}
+
+void MainWindow::LoadPersistedPreferences() {
+  prefsPaths_ = platform::ResolvePersistentStorePaths();
+  prefsWritable_ = prefsPaths_.valid;
+  if (!prefsPaths_.valid) {
+    prefsWritable_ = false;
+    prefsLoadNote_ = L"无法使用应用数据目录，记录功能停用：" + prefsPaths_.failureReason;
+    return;
+  }
+  const platform::PersistentReadResult read = platform::ReadPersistentStateFile(prefsPaths_.stateFile);
+  switch (read.kind) {
+    case platform::PersistentReadKind::absent:
+      prefsConsentPending_ = true;  // 首次使用：先说明、后动笔；读取本身到现在都没写过任何东西。
+      return;
+    case platform::PersistentReadKind::unreadable:
+      // 读不成不等于没有内容：这次既不使用也不覆盖，免得把可能完好的记录踩掉。
+      prefsWritable_ = false;
+      prefsLoadNote_ = read.detail + L"本次运行不使用也不会覆盖这份记录文件。";
+      return;
+    case platform::PersistentReadKind::oversized:
+    case platform::PersistentReadKind::invalidUtf8:
+      // 形态不成立：不使用；第一次保存时由保存侧先把原件改名保留、再重新开始（损坏恢复）。
+      prefsConsentPending_ = true;
+      prefsLoadNote_ = read.detail + L"第一次保存时会把原件改名保留在旁边，再重新开始记录。";
+      return;
+    case platform::PersistentReadKind::loaded:
+      break;
+  }
+  const app::PersistentLoadResult parsed = app::ParsePersistentState(read.text);
+  switch (parsed.status) {
+    case app::PersistentLoadStatus::empty:
+      prefsConsentPending_ = true;
+      return;
+    case app::PersistentLoadStatus::corrupt:
+      // 读不出的内容连同「是否保存过」的选择一起作废：宁可重新问一次，也不替用户猜策略。
+      prefsConsentPending_ = true;
+      prefsLoadNote_ = L"记录文件读不成立（" + parsed.reason +
+                       L"）。第一次保存时会把原件改名保留，再从头开始；本次不使用其中的内容。";
+      return;
+    case app::PersistentLoadStatus::tooNew:
+      // 更高版本写下的字段没有判读依据：整份不应用，也绝不写回一个降级版本。
+      prefsWritable_ = false;
+      prefsLoadNote_ = L"盘上的记录文件由更新版本的程序写出（版本 " +
+                       std::to_wstring(parsed.detectedVersion) +
+                       L"），本次不读取、不覆盖。用那个版本打开，或手动删除记录文件后再回来。";
+      return;
+    case app::PersistentLoadStatus::migrated:
+      prefsLoadNote_ = parsed.reason + L"；内容照用，首次说明会再出现一次以确认你的保存选择。";
+      [[fallthrough]];
+    case app::PersistentLoadStatus::loaded:
+      prefs_ = parsed.state;
+      if (!prefs_.consentRecorded) {
+        prefsConsentPending_ = true;
+      }
+      return;
+  }
+}
+
+void MainWindow::SchedulePersistentSave() {
+  if (!prefsWritable_ || window_.get() == nullptr) {
+    return;
+  }
+  prefsSavePending_ = true;
+  // 连打、连续拖分隔条都只重排同一个定时器；关窗时 RunPersistentSave 会把还挂着的一次补掉。
+  ::KillTimer(window_.get(), kPrefsSaveTimer);
+  ::SetTimer(window_.get(), kPrefsSaveTimer, kPrefsSaveDebounceMs, nullptr);
+}
+
+void MainWindow::RunPersistentSave(HWND window) {
+  static_cast<void>(window);
+  prefsSavePending_ = false;
+  if (window_.get() != nullptr) {
+    ::KillTimer(window_.get(), kPrefsSaveTimer);
+  }
+  app::PersistentWriteIntents intents = prefsIntents_;
+  prefsIntents_ = app::PersistentWriteIntents{};  // 先清；写不成再原样放回，脏意不丢
+  const bool anything = intents.policy || intents.replaceAll || intents.gitPath ||
+                        intents.windowGeometry || intents.columns || intents.recentList ||
+                        intents.drafts;
+  if (!anything) {
+    return;
+  }
+  if (!prefsWritable_ || !prefs_.consentRecorded) {
+    return;  // 没同意过就一个字节都不写（取消首次说明的场合）
+  }
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  const platform::PersistentSaveOutcome outcome =
+      platform::SavePersistentState(prefsPaths_, prefs_, intents, epoch);
+  switch (outcome.status) {
+    case platform::PersistentSaveStatus::saved:
+    case platform::PersistentSaveStatus::recoveredCorrupt: {
+      prefs_ = outcome.merged;  // 盘上现在就是这一份：下一次合并以它为基准
+      if (!outcome.detail.empty()) {
+        state_.SetStatusNote(outcome.detail);
+      }
+      if (!outcome.report.newerDraftsKeptFromDisk.empty()) {
+        // 明确报告「谁的草稿更新」，绝不静默丢屏幕内容：这正是不做最后写入者通吃的地方。
+        std::wstring note = L"另一个窗口保存了更晚的草稿（";
+        size_t shown = 0;
+        for (const std::wstring& root : outcome.report.newerDraftsKeptFromDisk) {
+          if (shown != 0) {
+            note += L"、";
+          }
+          if (shown >= 3) {
+            note += L"……共 " + std::to_wstring(outcome.report.newerDraftsKeptFromDisk.size()) +
+                    L" 个仓库";
+            break;
+          }
+          note += root;
+          ++shown;
+        }
+        note += L"）；本次保留盘上更新的那份，本窗口没有把它盖掉——"
+                L"屏幕上的内容一个字没动，确认以哪份为准后再继续。";
+        state_.SetFormNote(note);
+      }
+      return;
+    }
+    case platform::PersistentSaveStatus::busy: {
+      // 另一个实例正持锁：把本次的脏意原样放回，交给下一次防抖/关窗重试；文件没被碰过。
+      prefsIntents_.policy = prefsIntents_.policy || intents.policy;
+      prefsIntents_.replaceAll = prefsIntents_.replaceAll || intents.replaceAll;
+      prefsIntents_.gitPath = prefsIntents_.gitPath || intents.gitPath;
+      prefsIntents_.windowGeometry = prefsIntents_.windowGeometry || intents.windowGeometry;
+      prefsIntents_.columns = prefsIntents_.columns || intents.columns;
+      prefsIntents_.recentList = prefsIntents_.recentList || intents.recentList;
+      prefsIntents_.drafts = prefsIntents_.drafts || intents.drafts;
+      SchedulePersistentSave();
+      state_.SetStatusNote(outcome.detail);
+      return;
+    }
+    case platform::PersistentSaveStatus::refusedTooNew:
+      prefsWritable_ = false;
+      state_.SetStatusNote(outcome.detail);
+      return;
+    case platform::PersistentSaveStatus::failed:
+      prefsIntents_.policy = prefsIntents_.policy || intents.policy;
+      prefsIntents_.replaceAll = prefsIntents_.replaceAll || intents.replaceAll;
+      prefsIntents_.gitPath = prefsIntents_.gitPath || intents.gitPath;
+      prefsIntents_.windowGeometry = prefsIntents_.windowGeometry || intents.windowGeometry;
+      prefsIntents_.columns = prefsIntents_.columns || intents.columns;
+      prefsIntents_.recentList = prefsIntents_.recentList || intents.recentList;
+      prefsIntents_.drafts = prefsIntents_.drafts || intents.drafts;
+      state_.SetStatusNote(L"使用记录没有保存：" + outcome.detail +
+                           L"（屏幕与内存里的内容都原样保留，稍后会再试。）");
+      return;
+  }
+}
+
+void MainWindow::CaptureDraftIntoPreferences() {
+  if (!DraftSavingApplicable() || draftScopeKey_.empty()) {
+    return;  // 没有可用的工作区身份就没有归属：宁可什么都不记，也绝不猜一个键。
+  }
+  if (submoduleFlow_.Active()) {
+    return;  // 导航在途：屏幕那份由旅程代管，交还时会再落一次账；这里插一脚就是两套恢复互相踩。
+  }
+  app::PersistentDraft draft;
+  draft.repositoryRoot = draftScopeRoot_;
+  draft.repositoryKey = draftScopeKey_;
+  draft.form = commitForm_.Capture();
+  draft.authorWall = commitForm_.AuthorWallTime();
+  draft.committerWall = commitForm_.CommitterWallTime();
+  draft.timesSynced = commitForm_.TimeSyncChecked();
+  draft.timesUserEdited = commitForm_.TimesUserEdited();
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  draft.savedAtEpoch = now.valid ? now.utcEpochSeconds : 0;
+  std::wstring refusal;
+  app::RecordPersistentDraftSnapshot(&prefs_, std::move(draft), &refusal);
+  if (!refusal.empty()) {
+    state_.SetFormNote(refusal);
+  }
+  prefsIntents_.drafts = true;
+  SchedulePersistentSave();
+}
+
+void MainWindow::TryApplyPersistedDraft(HWND window) {
+  if (!DraftSavingApplicable()) {
+    return;
+  }
+  if (submoduleFlow_.Active()) {
+    return;  // 与上面同理：导航在途时交还那份归旅程管，不在这里重复恢复
+  }
+  const app::PersistentDraft* draft = app::FindPersistentDraft(prefs_, draftScopeKey_);
+  if (draft == nullptr || app::PersistentDraftBodyIsEmpty(*draft)) {
+    return;
+  }
+  if (formSession_.HasUserContent()) {
+    // 屏幕上已经写着这次的字：两份都在，程序无权替人挑，所以不动屏幕、只把另一份的存在说出来。
+    state_.SetFormNote(L"这个仓库还存着一份未提交的草稿（保存于 " +
+                       (draft->savedAtEpoch > 0
+                            ? platform::FormatLocalEpochSeconds(draft->savedAtEpoch)
+                            : std::wstring(L"时间不明")) +
+                       L"），但表单里已有你正在输入的内容，没有自动覆盖。想恢复那一份：先清空标题、"
+                       L"描述与合作者（清空会被记成新草稿），再重新进入这个仓库。");
+    return;
+  }
+  // 落回控件的整套记号与「旅程代管交还」同一语义：恢复的是用户写的字，全部按用户内容登记，
+  // 之后到达的仓库默认作者不能悄悄盖掉它（身份配置变了也不沿用错身份）。
+  {
+    const SuppressCommitFormNotify guard(suppressCommitFormNotify_);
+    commitForm_.SetSummaryText(draft->form.subject);
+    commitForm_.SetDescriptionText(draft->form.description);
+    commitForm_.SetAuthorText(draft->form.author);
+    std::vector<std::wstring> coauthors = draft->form.coauthors;
+    commitForm_.SetCoauthors(std::move(coauthors));
+    if (draft->timesUserEdited) {
+      const SYSTEMTIME authorTime = platform::SystemTimeFromCivil(draft->authorWall);
+      const SYSTEMTIME committerTime = platform::SystemTimeFromCivil(draft->committerWall);
+      commitForm_.SetTimes(authorTime, committerTime);
+      // SetTimes 自己会撤掉「用户改过时间」的记号，而这份草稿的时间恰恰是用户挑过的：
+      // 记号必须补回去，否则下一次提交会悄悄改用此刻的时间，把当时那份时间意图抹掉。
+      commitForm_.NoteTimesUserEdited();
+    } else {
+      // 没人动过时间：回到此刻。上次保存时的那个时刻属于上一次运行，不能伪装成这次的时间意图。
+      const SYSTEMTIME now = platform::CurrentLocalTime();
+      commitForm_.SetTimes(now, now);
+    }
+    commitForm_.SetTimeSyncChecked(draft->timesSynced);
+  }
+  using Field = app::CommitFormSession::Field;
+  if (!draft->form.subject.empty()) {
+    formSession_.NoteUserEdit(Field::subject);
+  }
+  if (!draft->form.description.empty()) {
+    formSession_.NoteUserEdit(Field::description);
+  }
+  if (!draft->form.coauthors.empty()) {
+    formSession_.NoteUserEdit(Field::coauthors);
+  }
+  if (!draft->form.author.empty()) {
+    formSession_.NoteUserEdit(Field::author);
+  }
+  RefreshTimeControlsState(window);
+  RunFormValidation(window);
+  state_.SetFormNote(L"已恢复这个仓库上次未提交的草稿（保存于 " +
+                     (draft->savedAtEpoch > 0 ? platform::FormatLocalEpochSeconds(draft->savedAtEpoch)
+                                              : std::wstring(L"时间不明")) +
+                     L"）。作者那一栏按你输入的内容对待，不会被仓库默认身份盖掉；"
+                     L"想改回默认身份就手动清空作者栏。");
+}
+
+void MainWindow::NoteGitPathForPreferences(const std::wstring& verifiedPath) {
+  if (!PersistenceApplicable() || verifiedPath.empty()) {
+    return;
+  }
+  if (prefs_.gitExecutablePath == verifiedPath) {
+    return;  // 同一个路径不重复记账（每次刷新验证都会走到这里）。
+  }
+  prefs_.gitExecutablePath = verifiedPath;
+  prefsIntents_.gitPath = true;
+  SchedulePersistentSave();
+}
+
+void MainWindow::NoteRecentRepository(const std::wstring& root) {
+  if (!PersistenceApplicable() || root.empty()) {
+    return;
+  }
+  app::TouchPersistentRecent(&prefs_, root);
+  prefsIntents_.recentList = true;
+  SchedulePersistentSave();
+}
+
+void MainWindow::NoteLayoutForPreferences(bool geometry, bool columns) {
+  if (!PersistenceApplicable()) {
+    return;
+  }
+  bool changed = false;
+  if (geometry) {
+    RECT rc{};
+    if (::GetWindowRect(window_.get(), &rc) != 0) {
+      prefs_.window.valid = true;
+      prefs_.window.x = rc.left;
+      prefs_.window.y = rc.top;
+      prefs_.window.width = rc.right - rc.left;
+      prefs_.window.height = rc.bottom - rc.top;
+      prefs_.window.maximized = ::IsZoomed(window_.get()) != FALSE;
+      prefsIntents_.windowGeometry = true;
+      changed = true;
+    }
+  }
+  if (columns) {
+    const int leftPermille =
+        static_cast<int>(changesSpec_.leftRatio * app::kPersistentColumnPermilleBase + 0.5);
+    const int middlePermille =
+        static_cast<int>(changesSpec_.middleRatio * app::kPersistentColumnPermilleBase + 0.5);
+    if (leftPermille > 0 && middlePermille > 0 &&
+        leftPermille + middlePermille < app::kPersistentColumnPermilleBase) {
+      prefs_.columns.valid = true;
+      prefs_.columns.leftPermille = leftPermille;
+      prefs_.columns.middlePermille = middlePermille;
+      prefsIntents_.columns = true;
+      changed = true;
+    }
+  }
+  if (changed) {
+    SchedulePersistentSave();
+  }
+}
+
+void MainWindow::ShowPersistentConsentPrompt(HWND window) {
+  prefsConsentPending_ = false;
+  const std::wstring body = std::wstring(kConsentBodyHead) + L"保存位置：" +
+                            PreferencesStorageLine() + L"\r\n" + std::wstring(kConsentBodyTail);
+  const int answer = ::MessageBoxW(window, body.c_str(), std::wstring(kConsentTitle).c_str(),
+                                   MB_YESNOCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON1);
+  if (answer != IDYES && answer != IDNO) {
+    // 取消＝这次运行一个字节都不写；选择本身也不落盘（下次启动重新问）。
+    // 右下角的开关仍然是现成的入口：用户主动点它，就是明确同意保存。
+    state_.SetStatusNote(L"好：这次运行什么都不保存。右下角的「保存记录」「保存草稿」随时可以改主意，"
+                         L"点下去的那一刻才开始保存。");
+    RefreshTexts(window);
+    return;
+  }
+  prefs_.consentRecorded = true;
+  prefs_.persistenceEnabled = true;
+  prefs_.draftSavingEnabled = (answer == IDYES);
+  actionBar_.SetPreferenceChecks(true, prefs_.draftSavingEnabled);
+  prefsIntents_.policy = true;
+  // 同意之后，本次会话已经发生的事实（验证过的 Git、绑上的仓库、当前窗口布局）
+  // 一并补记；然后一次落盘——「他同意了什么」当场生效，不留悬挂状态。
+  if (state_.GitUsable()) {
+    NoteGitPathForPreferences(state_.Git().path);
+  }
+  if (state_.RepoUsable()) {
+    NoteRecentRepository(state_.Repo().detection.root);
+  }
+  NoteLayoutForPreferences(/*geometry=*/true, /*columns=*/true);
+  RunPersistentSave(window);
+  std::wstring note = prefs_.draftSavingEnabled
+                          ? L"开始保存使用记录与提交草稿。位置："
+                          : L"开始保存使用记录（不含草稿）：最近仓库、Git 程序与窗口布局。位置：";
+  note += PreferencesStorageLine();
+  if (!prefsWritable_) {
+    note = L"位置当前不可写，本次运行没有保存任何东西：" + PreferencesStorageLine();
+  }
+  if (!prefsLoadNote_.empty()) {
+    note = prefsLoadNote_ + L"｜" + note;
+  }
+  state_.SetStatusNote(note);
+  RefreshTexts(window);
+}
+
+void MainWindow::OnPersistenceCheckClicked(HWND window, int controlId, bool checked) {
+  // 主动点开关＝对「是否保存」做过明确选择：首次说明视为已展示（含当初点取消的场合），
+  // 排队里的说明也不再补弹——用户已经用行动回答过了。
+  prefs_.consentRecorded = true;
+  prefsConsentPending_ = false;
+  if (!prefsWritable_) {
+    state_.SetStatusNote(L"当前没有可写的记录位置（" + PreferencesStorageLine() +
+                         L"），开关只记录了你的选择，本次运行不会写盘。");
+  }
+  if (controlId == kIdPersistRecordsCheck) {
+    prefs_.persistenceEnabled = checked;
+    if (checked) {
+      state_.SetStatusNote(L"已开始保存记录：最近仓库、Git 程序、窗口布局" +
+                           (prefs_.draftSavingEnabled ? std::wstring(L"与草稿") : std::wstring()) +
+                           L"。位置：" + PreferencesStorageLine());
+      // 重新打开：把当前屏幕的草稿与此刻的布局立刻补进账（不丢正在写的字）。
+      CaptureDraftIntoPreferences();
+      NoteLayoutForPreferences(/*geometry=*/true, /*columns=*/true);
+    } else {
+      state_.SetStatusNote(L"已停止使用与保存记录：这个开关的状态会被记住，盘上已有的内容保留不动；"
+                           L"想删干净点「清除已存记录」。");
+    }
+    prefsIntents_.policy = true;
+    RunPersistentSave(window);  // 开关本身要落地，即使总开关刚被关掉
+  } else {
+    prefs_.draftSavingEnabled = checked;
+    prefsIntents_.policy = true;
+    prefsIntents_.drafts = true;  // 关闭时合并表会连盘上的草稿一起清掉；打开时这份当前草稿要落账
+    if (checked) {
+      CaptureDraftIntoPreferences();
+      state_.SetStatusNote(L"已恢复保存草稿：未提交的表单按仓库保存（同一项目的不同 worktree 各自独立）。");
+    } else {
+      state_.SetStatusNote(L"已停止保存草稿：记录文件里的草稿已删除（屏幕上的字没有动）。"
+                           L"其余记录照常保存。");
+    }
+    RunPersistentSave(window);
+  }
+  RefreshTexts(window);
+}
+
+void MainWindow::ClearPersistedRecords(HWND window) {
+  const std::wstring body =
+      L"将删除记录文件里的全部用户内容：\r\n"
+      L"  · 最近仓库（最多 " + std::to_wstring(app::kMaxRecentRepositories) + L" 条）\r\n"
+      L"  · Git 程序路径\r\n"
+      L"  · 窗口位置、大小与列宽\r\n"
+      L"  · 所有仓库保存的提交草稿（草稿可能含私人内容）\r\n\r\n"
+      L"位置：" + PreferencesStorageLine() + L"\r\n"
+      L"对这台机器上所有 EvernightCommit 窗口同时生效；"
+      L"不会改动 Git 仓库、你的 Git 配置，也不会动屏幕上正在输入的文字。\r\n\r\n确定清除吗？";
+  if (::MessageBoxW(window, body.c_str(), L"清除已存记录",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+    state_.SetStatusNote(L"没有清除任何记录。");
+    RefreshTexts(window);
+    return;
+  }
+  if (!prefsPaths_.valid) {
+    state_.SetStatusNote(L"没有可清除的记录：" + prefsPaths_.failureReason);
+    RefreshTexts(window);
+    return;
+  }
+  if (!prefsWritable_) {
+    // 盘上那份本版本判读不了（更高版本、读不成）：不保证能安全合并就不碰它，
+    // 把「怎么手动删」说清楚，由用户处理。
+    state_.SetStatusNote(L"盘上的记录文件本版本不能安全处理（见上一条说明），没有动它。"
+                         L"要删除请手动移除这个文件：" +
+                         PreferencesStorageLine());
+    RefreshTexts(window);
+    return;
+  }
+  if (!prefs_.consentRecorded) {
+    std::wstring reason;
+    if (platform::DeletePersistentStateFile(prefsPaths_, &reason)) {
+      state_.SetStatusNote(L"还没有保存过任何记录；没有新建文件，也没有写入你的选择。");
+    } else {
+      state_.SetStatusNote(L"没有清除成功：" + reason);
+    }
+    RefreshTexts(window);
+    return;
+  }
+  app::ClearPersistedUserData(&prefs_);
+  prefsIntents_ = app::PersistentWriteIntents{};
+  prefsIntents_.replaceAll = true;
+  prefsIntents_.policy = true;
+  RunPersistentSave(window);  // 立即写出（不防抖）：清除的结果必须当场可验证
+  state_.SetStatusNote(L"已清除保存的最近仓库、Git 程序、窗口布局与全部草稿"
+                       L"（屏幕上的内容没有动）。记录文件现在只剩开关与策略：" +
+                       PreferencesStorageLine());
+  RefreshTexts(window);
+}
+
 
 void MainWindow::RequestAuthorConfig(HWND window) {
   if (!state_.GitUsable() || !state_.RepoUsable()) {
@@ -2162,6 +2784,7 @@ void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
   const int index = (splitterId == kSplitterLeftId) ? 0 : 1;
   RatioFromMouseX(changesArea_, changesSpec_, index, parentX, &changesSpec_.leftRatio, &changesSpec_.middleRatio);
   DoLayout(window);
+  NoteLayoutForPreferences(/*geometry=*/false, /*columns=*/true);
 }
 
 void MainWindow::RefreshTimeControlsState(HWND window) {
@@ -2198,6 +2821,7 @@ void MainWindow::ResetCommitTimesToNow(HWND window) {
   }
   note += L"。“恢复当前时间”就是改错之后的退路；没人改过时间时，提交用的就是提交那一刻。";
   state_.SetFormNote(note);
+  CaptureDraftIntoPreferences();  // 时间回到此刻也是草稿内容的变化
   RefreshTexts(window);
 }
 
@@ -2499,6 +3123,7 @@ bool MainWindow::NavigateRepository(std::wstring_view directory, std::wstring_vi
     SetControlText(repoBar_.repoEdit(), target);
   }
   state_.SetRepoPath(target);
+  suppressDraftRestoreOnce_ = true;  // 这次换绑定由旅程发起：落地时不叠加草稿恢复
   RequestRepoDetection(window_.get(), target, RepoDetectMode::initial);
   // 导航那句说明排在识别提示之后：识别那条是既有链路的固定文字，这句才是「为什么仓库突然变了」。
   state_.SetStatusNote(std::wstring(statusNote));
@@ -2559,6 +3184,7 @@ void MainWindow::ApplyHeldFormForNavigation(const app::HeldForm& held, std::wstr
   state_.SetFormNote(std::wstring(note));
   RefreshTimeControlsState(window_.get());
   RunFormValidation(window_.get());
+  CaptureDraftIntoPreferences();  // 交还回来的那份同样按当前仓库落账
 }
 
 CommitFormSnapshot MainWindow::CaptureCommitForm() const {
@@ -2597,6 +3223,10 @@ void MainWindow::ApplyCommittedFormCleanup(const app::CommittedFormCleanup& clea
     commitForm_.SetTimes(now, now);
     RefreshTimeControlsState(window_.get());
   }
+  // 草稿与屏幕同步收尾：提交用掉的那部分从盘上也得消失（空正文会留删除墓碑），
+  // 用户在命令窗口跑的那段时间里新写的部分原样进新草稿——绝不因为「提交成功」
+  // 就顺手抹掉他后来写的字；失败与结果未知根本走不到这里，草稿一个字不动。
+  CaptureDraftIntoPreferences();
 }
 
 void MainWindow::BeginStopAllBackgroundWorkers() {
@@ -2674,6 +3304,16 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case WM_COMMAND:
       OnCommand(window, wParam);
       return 0;
+    case WM_EXITSIZEMOVE:
+      // 拖动/缩放结束才记一次几何：WM_SIZE 每像素都来，不该每来一次就重排保存。
+      NoteLayoutForPreferences(/*geometry=*/true, /*columns=*/false);
+      return 0;
+    case kPersistentConsentNotice:
+      // 队列里等到现在可能已经被「用户直接点了开关」顶掉了：只在还挂着时才问。
+      if (prefsConsentPending_) {
+        ShowPersistentConsentPrompt(window);
+      }
+      return 0;
     case WM_NOTIFY: {
       // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认两块更改列表、提交历史列表
       // 与合作者列表，其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
@@ -2715,6 +3355,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
           commitForm_.MirrorCommitterTime();
         }
         RefreshTimeControlsState(window);
+        CaptureDraftIntoPreferences();  // 挑过的时间属于草稿的一部分（恢复时要分清“谁改的”）
         RefreshTexts(window);
         return 0;
       }
@@ -2732,6 +3373,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       } else if (wParam == kRefreshTimer) {
         ::KillTimer(window, kRefreshTimer);
         RunRefreshCycle(window);
+      } else if (wParam == kPrefsSaveTimer) {
+        ::KillTimer(window, kPrefsSaveTimer);
+        RunPersistentSave(window);
       }
       return 0;
     case kGitProbeCompleted:
@@ -2814,6 +3458,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       return 0;
     case WM_CLOSE:
       if (ConfirmCloseWithActiveOperations(window)) {
+        // 关窗前把防抖里没来得及写的记录补上：小文件、本线程、有界等待（锁占用最多约 0.6 秒），
+        // 不启动任何子进程。写不成也只说明「这次没保存」，绝不阻塞退出。
+        RunPersistentSave(window);
         ::DestroyWindow(window);
       }
       return 0;
@@ -2828,6 +3475,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       ::KillTimer(window, kGitVerifyTimer);
       ::KillTimer(window, kRepoDetectTimer);
       ::KillTimer(window, kGitOperationTimer);
+      ::KillTimer(window, kPrefsSaveTimer);
       window_.Disown();
       ::PostQuitMessage(0);
       return 0;

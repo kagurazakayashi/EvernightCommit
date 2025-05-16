@@ -86,6 +86,7 @@ add_library(gc_core STATIC
   src/app/list_view_memory.cpp
   src/app/operation_conclusions.cpp
   src/app/operation_gate.cpp
+  src/app/persistent_state.cpp
   src/app/submodule_journey.cpp
   src/app/task_coordinator.cpp
   src/git/author_config.cpp
@@ -131,6 +132,7 @@ add_library(gc_platform STATIC
   src/platform/windows/locale_text.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp
+  src/platform/windows/persistent_store.cpp
   src/platform/windows/platform_init.cpp
   src/platform/windows/pull_probe.cpp
   src/platform/windows/push_probe.cpp

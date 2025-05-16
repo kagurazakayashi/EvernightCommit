@@ -60,6 +60,7 @@
 | `commit_form_session` | 区分「默认值填的」与「用户写的」、换仓库时要不要问保留/放弃、提交成功后只清正文栏位 |
 | `operation_gate` | 写操作准入门（六个被编排流程，冲突处理是第六个：它等全部五个，五个不因它额外被拦——提交/撤回/pull 本来就在方案层按流程痕迹拒绝，命令窗口一占槽位都会互斥；导航则一律等它）：哪个编排流程可以开始、其余流程按何种顺序拒绝、拒绝文案原文；另含仓库导航（进入子模块/返回父仓库）的准入 `DescribeNavigationRefusal`——它不写任何东西，但会整个换掉绑定的仓库，因此在途流程一律先结束 |
 | `submodule_journey` | 父仓库⇄子模块导航的状态保管：来路栈（嵌套逐层退、同一条父→子不重复压）、按工作区根代管的表单草稿（空内容不存、交还即除号）、返回前的身份核对、`PlanDraftSwap` 四种交还场合与交还说明文字 |
+| `persistent_state` | 可选持久化的数据模型与版本化文本格式（最近仓库/Git 路径/窗口布局/按 worktree 身份分的提交草稿）：严格转义与整份判读、超限与损坏/更高版本判定、未分版本老文件的迁移、多实例合并（盘上更新的草稿保留并报告、写入意图门控、删除墓碑传播、关闭草稿即清空、replaceAll）。纯逻辑，不碰文件系统与时钟 |
 | `operation_conclusions` | 各操作的终端结论文字 |
 
 ## src/platform/windows/
@@ -75,6 +76,11 @@
 编码与本机：`utf_text`（读入用宽松、说明书写出用严格，非法码元与 CESU 三字节代理项
 一律失败，不用替代字符冒充原值）、`local_time`（墙上时间→UTC 瞬间与该刻实际生效
 偏移，含夏令时；Unix 秒→本机时区展示文本）、`locale_text`。
+
+持久化：`persistent_store`（当前用户应用数据目录 `%APPDATA%\EvernightCommit` 的解析、
+限长且严格 UTF-8 判读的读取、`state.prefs.lock` 独占句柄租约写的保存锁、损坏原件改名保留、
+临时文件独占创建 + 刷新 + 原子替换发布；更高版本文件拒绝读写；窗口几何恢复前的显示器可达性
+验证。数据与合并语义全在 `app/persistent_state`，这一层只搬字节）。
 
 命令窗口：`command_window_helper`（辅助入口：自己开控制台、按操作目录里的说明书执行
 Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调用方给的可执行文件或参数）、
@@ -104,7 +110,10 @@ Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调�
 阶段分流成「展示」「方案确认」与「执行前复核」，`--abort` 走风险确认框，命令没做成时再读回
 现场补完结论；「没有痕迹不生成 `--abort`」「还有未合并条目不生成 `--continue`」都在
 `git/conflict_state` 里裁好，控制器只按结论行动）、
-`submodule_flow`（子模块导航：探测阶段、来路与代管的交还、返回后的指针核对）。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
+`submodule_flow`（子模块导航：探测阶段、来路与代管的交还、返回后的指针核对）。
+`action_bar` 右下角另有记录开关区（`保存记录`/`保存草稿` 复选框与 `清除已存记录`），
+主窗口据 `persistent_state` + `persistent_store` 做首次说明、防抖保存、恢复与关窗前 flush；
+它不属于六个被编排的 Git 操作，不占用命令窗口槽位。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
 
 ## tests/
 

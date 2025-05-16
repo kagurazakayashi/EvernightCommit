@@ -75,6 +75,12 @@ enum ControlId : int {
   kIdConflictViewButton = 198,
   kIdConflictContinueButton = 199,
   kIdConflictAbortButton = 200,
+  // 持久化（可选功能）：两个开关与一个清除入口。「保存记录」是总开关（最近仓库/Git 程序/
+  // 窗口布局/草稿），「保存草稿」只管提交表单草稿；这两个开关的状态连同记录内容都保存在
+  // 当前用户应用数据目录的记录文件里，不碰 Git 配置。「清除已存记录」删掉全部用户内容记录。
+  kIdPersistRecordsCheck = 201,
+  kIdPersistDraftsCheck = 202,
+  kIdClearPrefsButton = 203,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
@@ -129,6 +135,8 @@ inline constexpr UINT kSubmodulePointerProbeCompleted = WM_APP + 18;
 // 完成通知；wParam 为请求序号。「查看」的展示、「继续」与「中止」的预检共用这一条，
 // 回来给谁用由冲突控制器自己的阶段标记分辨。命令本身在命令窗口里跑，不走这条通知。
 inline constexpr UINT kConflictProbeCompleted = WM_APP + 19;
+// 「首次使用」持久化说明的弹出通知：WM_CREATE 里不弹模态框，创建完成后由这条消息补上。
+inline constexpr UINT kPersistentConsentNotice = WM_APP + 23;
 // 注意：WM_APP + 20 归命令窗口执行器的完成通知（platform::CommandWindowRunner::kCompletionMessage），
 // 它不在本文件里定义，历史上就差点与这里的序号撞车（撞了会表现为「终态回调把预检通知当成
 // 操作完成」这类极难查的错乱）。因此这一段从 19 直接跳到 21，文件末尾有一条 static_assert 兜底。
@@ -143,6 +151,11 @@ inline constexpr UINT kConflictAftermathCompleted = WM_APP + 22;
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
 inline constexpr UINT_PTR kRefreshTimer = 0x4714;
 inline constexpr UINT kRefreshDebounceMs = 300;
+
+// 持久化保存的防抖：草稿编辑、开关切换、布局改动都只重排这一个定时器；
+// 到点在本线程做一次「拿锁→重读→合并→原子写」的小文件写入（不启动任何子进程）。
+inline constexpr UINT_PTR kPrefsSaveTimer = 0x4717;
+inline constexpr UINT kPrefsSaveDebounceMs = 1500;
 
 // “Git 程序”输入防抖：连续键入只在停顿后验证一次。
 inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;
@@ -208,5 +221,6 @@ static_assert(kSplitterDragged != platform::CommandWindowRunner::kCompletionMess
 static_assert(kConflictProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictAftermathCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kPersistentConsentNotice != platform::CommandWindowRunner::kCompletionMessage);
 
 }  // namespace gc::ui
