@@ -84,6 +84,15 @@ void PullFlow::HandleFetchProbe(OperationHost& host, const OperationContext& ctx
                         plan.remoteName + L" → " + plan.trackingRef + L"），等待 Git 退出码…";
   options.scopeNotice = plan.notice;
   options.pullFetchOperation = true;
+  // 操作历史：获取步与 fetch 同边界，不动本地引用，恢复类别为 none。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::pull;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = plan.displayName;
+  options.history.remoteName = plan.remoteName;
+  options.history.restoreKind = app::HistoryRestoreKind::none;
+  options.history.restoreNote =
+      L"pull 的获取步与 fetch 同边界：只更新远端跟踪引用，不移动 HEAD/分支/索引/工作区。";
   stage_ = Stage::fetching;
   if (!host.LaunchCommandWindow(operation, options)) {
     host.SetStatus(L"这次 pull 停在第一步：命令窗口未能打开，或启动失败（原因见上一行状态）。"
@@ -241,6 +250,17 @@ void PullFlow::LaunchIntegrate(OperationHost& host, const OperationContext& ctx,
                         ctx.detection.root + L"），等待 Git 退出码…";
   options.scopeNotice = plan.notice;
   options.pullIntegrateOperation = true;
+  // 操作历史：整合会移动 HEAD/分支并重写索引/工作区，是多提交合并/重放，不是单条能安全
+  // 「挪回」的本地引用；恢复类别为 none，本程序不自动撤销。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::pull;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = plan.displayName;
+  options.history.targetObjectId = plan.targetObjectId;
+  options.history.restoreKind = app::HistoryRestoreKind::none;
+  options.history.restoreNote =
+      L"pull 的整合步会移动 HEAD/分支并改索引与工作区：那是合并或多提交重放，不是一条能安全"
+      L"「挪回」的本地引用。本程序不自动撤销；若需要退回，请按分支 reflog 自行判断。";
   stage_ = Stage::integrating;
   const bool hadFetch = fetchAlreadyRan_;
   if (!host.LaunchCommandWindow(operation, options)) {

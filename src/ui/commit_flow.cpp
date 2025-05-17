@@ -295,6 +295,18 @@ void CommitFlow::Launch(CommitOperationHost& host, const git::CommitPlan& plan,
   options.messageFile = plan.identity.messageFilePath;
   options.commitOperation = true;
   options.committedForm = committedForm;
+  // 操作历史：记下这次提交「确认时到底是哪一份」——分支与提交前 HEAD 都取自复核过的那份身份。
+  // 新提交的对象 ID 此刻还没生成（由 Git 造），因此不做引用级自动回退；反悔交给「撤回最近提交」。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::commit;
+  options.history.workTreeRoot = plan.identity.repositoryDirectory;
+  options.history.operationLabel = plan.displayName;
+  options.history.sourceRef = plan.identity.branchRef;
+  options.history.sourceObjectId = plan.identity.headObjectId;
+  options.history.restoreKind = app::HistoryRestoreKind::none;
+  options.history.restoreNote =
+      L"如需反悔：若这条提交仍是该分支的最新提交，可用「撤回最近提交」把分支挪回提交前的 HEAD（" +
+      plan.identity.headObjectId + L"）。本程序不自动撤销任何东西。";
   // 信息文件的所有权在这里转交给 ActiveOperation：只有拿到终态（或启动失败由执行路径回收）才删，
   // 命令窗口里的 Git 可能还在读它。
   ReleaseAttempt(false);

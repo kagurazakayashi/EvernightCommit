@@ -16,6 +16,7 @@
 #include "git/staging_plan.h"
 #include "git/workspace_model.h"
 #include "app/operation_conclusions.h"
+#include "platform/windows/clipboard.h"
 #include "platform/windows/commit_message_file.h"
 #include "platform/windows/git_toolchain.h"
 #include "platform/windows/identity_prompt.h"
@@ -36,6 +37,25 @@ constexpr int kSplitterRightId = 902;
 
 constexpr int kInitialWindowWidth = 1100;
 constexpr int kInitialWindowHeight = 780;
+
+// 命令窗口的一种终态 → 历史记录里分立的结果。绝不把「结果未知 / 启动失败 / Git 未创建」
+// 混进「成功 / 失败」：那几种各有措辞，恢复入口对「未知」一律拒绝照记录执行、只重新核实。
+app::HistoryOutcome DescribeHistoryOutcome(git::CommandCompletion completion, bool succeeded) {
+  switch (completion) {
+    case git::CommandCompletion::launchFailed:
+      return app::HistoryOutcome::launchFailed;
+    case git::CommandCompletion::gitNotStarted:
+    case git::CommandCompletion::helperNeverStarted:
+      return app::HistoryOutcome::gitNotStarted;
+    case git::CommandCompletion::terminated:
+    case git::CommandCompletion::stillUnknown:
+      return app::HistoryOutcome::unknown;
+    case git::CommandCompletion::finished:
+      return succeeded ? app::HistoryOutcome::succeeded : app::HistoryOutcome::failed;
+    default:
+      return app::HistoryOutcome::unknown;
+  }
+}
 
 constexpr std::wstring_view kTipBrowseRepo =
     L"选择本地仓库目录；也可在输入框直接键入路径（停顿后自动识别）。支持仓库的子目录，识别时会上溯到工作区根。";
@@ -415,6 +435,8 @@ bool MainWindow::Create(HINSTANCE instance, int showCommand) {
   // 先读记录再建窗口：窗口几何要按上次的位置出现，不能建完再跳一下。
   // 读取本身不写任何东西（目录都没创建），首次使用因此完全无痕。
   LoadPersistedPreferences();
+  // 操作历史与偏好各自独立成文件；同样在创建窗口之前读，读取本身不写任何东西（首次完全无痕）。
+  LoadOperationHistory();
   int x = CW_USEDEFAULT;
   int y = CW_USEDEFAULT;
   int width = metrics_.Scale(kInitialWindowWidth);
@@ -479,6 +501,9 @@ void MainWindow::OnCreate(HWND window) {
   RegisterTooltips();
   // 两个开关按读回来的策略显示（BM_SETCHECK 不发 BN_CLICKED，不会被当成用户刚点过）。
   actionBar_.SetPreferenceChecks(prefs_.persistenceEnabled, prefs_.draftSavingEnabled);
+  // 历史开关按读回来的策略显示（默认关；BM_SETCHECK 不发 BN_CLICKED，不会被当成用户刚点过）。
+  ::SendMessageW(actionBar_.historyCheck(), BM_SETCHECK,
+                 historyLog_.historyEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
   UpdateCommandAvailability();
   InitializeRepoInput(window);
   RefreshTexts(window);
@@ -487,6 +512,10 @@ void MainWindow::OnCreate(HWND window) {
   InitializeCommandWatching(window);
   if (!prefsLoadNote_.empty()) {
     state_.SetStatusNote(prefsLoadNote_);
+    RefreshTexts(window);
+  }
+  if (!historyLoadNote_.empty()) {
+    state_.SetStatusNote(historyLoadNote_);
     RefreshTexts(window);
   }
   if (prefsConsentPending_) {
@@ -531,6 +560,17 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(actionBar_.persistRecordsCheck(), kTipPersistRecords);
   tooltips_.Add(actionBar_.persistDraftsCheck(), kTipPersistDrafts);
   tooltips_.Add(actionBar_.clearPrefsButton(), kTipClearPrefs);
+  tooltips_.Add(
+      actionBar_.historyCheck(),
+      L"记录操作历史（可选，默认关）：勾选后才把这台机器上本程序对仓库做过的写操作留一条本地记录"
+      L"（唯一 ID、时间、仓库工作区、操作类型、已确认的分支/引用与完整对象 ID、启动与终态、逐目标核实结果、"
+      L"引用级恢复线索）。存在当前用户的 %APPDATA%\\EvernightCommit\\history.prefs，不进项目、不进 Git 配置。"
+      L"不记文件内容、提交正文、凭据 URL、令牌、环境与原始输出。关上不删已有内容，要清空用「操作历史…」里的清除。");
+  tooltips_.Add(
+      actionBar_.historyBrowseButton(),
+      L"操作历史…：查看这些记录，导出脱敏副本、查看存储位置、清除、调整保留期限/条数；"
+      L"选中一条「引用级可回退」的记录可重新预检现状后确认恢复（走命令窗口、带预期旧值、只动一个本地引用）。"
+      L"涉及已推送的远端历史只解释协作影响与复制命令，绝不自动 force push / hard reset / clean / 批量撤销。");
 }
 
 void MainWindow::UpdateCommandAvailability() {
@@ -837,6 +877,18 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdClearPrefsButton:
       if (notifyCode == BN_CLICKED) {
         ClearPersistedRecords(window);
+      }
+      break;
+    case kIdHistoryCheck:
+      if (notifyCode == BN_CLICKED) {
+        const bool checked =
+            ::SendMessageW(actionBar_.historyCheck(), BM_GETCHECK, 0, 0) == BST_CHECKED;
+        OnHistoryCheckClicked(window, checked);
+      }
+      break;
+    case kIdHistoryBrowseButton:
+      if (notifyCode == BN_CLICKED) {
+        ShowOperationHistory(window);
       }
       break;
     case kIdTimeSyncCheck:
@@ -1376,6 +1428,18 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
     if (!failure.environmentNotice.empty()) {
       note += L"｜" + failure.environmentNotice;
     }
+    if (options.history.record) {
+      // 启动失败也是一种终态：命令窗口没打开、Git 一个字都没跑，落一条明确「启动失败」的记录。
+      const platform::LocalInstant now = platform::CurrentLocalInstant();
+      const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+      app::HistoryTerminalInfo terminal;
+      terminal.outcome = app::HistoryOutcome::launchFailed;
+      terminal.startedEpoch = epoch;
+      terminal.terminalEpoch = epoch;
+      terminal.completionLabel = std::wstring(git::CommandCompletionLabel(failure.completion));
+      terminal.conclusion = note;
+      CommitHistoryRecord(options.history, terminal);
+    }
     state_.SetStatusNote(note);
     UpdateCommandAvailability();
     RefreshTexts(window);
@@ -1398,7 +1462,14 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.pushOperation,
                                      options.upstreamWriteStep,
                                      options.conflictContinueOperation,
-                                     options.conflictAbortOperation};
+                                     options.conflictAbortOperation,
+                                     options.history};
+  // 记下启动时刻：终态落账时用「启动→终态」这对时间，而不是让 startedEpoch 空着。
+  if (options.history.record) {
+    const platform::LocalInstant now = platform::CurrentLocalInstant();
+    activeOperation_.historyStartedEpoch =
+        now.valid ? static_cast<unsigned long long>(now.utcEpochSeconds) : 0ULL;
+  }
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
   RefreshTexts(window);
@@ -2592,6 +2663,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const bool conflictContinueOperation = activeOperation_.conflictContinueOperation;
   const bool conflictAbortOperation = activeOperation_.conflictAbortOperation;
   const std::wstring restoreHint = activeOperation_.restoreHint;
+  const app::HistoryCapture historyCapture = activeOperation_.history;
+  const unsigned long long historyStartedEpoch = activeOperation_.historyStartedEpoch;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
   // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/helperNeverStarted 里
@@ -2610,6 +2683,26 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (!outcome.recognised) {
     return;
   }
+  // 一次写操作拿到终态就落一条历史（没勾「记录操作历史」时 CommitHistoryRecord 返回空、不写盘）。
+  // pull 整合失败、conflict 命令失败这两条提前结案的路径也各自调用它，绝不漏记某一种终态。
+  auto settleHistory = [&](const std::wstring& concl) {
+    if (!historyCapture.record) {
+      return;
+    }
+    app::HistoryTerminalInfo terminal;
+    terminal.outcome = DescribeHistoryOutcome(result.completion, outcome.succeeded);
+    terminal.startedEpoch = static_cast<long long>(historyStartedEpoch);
+    const platform::LocalInstant now = platform::CurrentLocalInstant();
+    terminal.terminalEpoch = now.valid ? now.utcEpochSeconds : 0;
+    terminal.exitCodeKnown = result.completion == git::CommandCompletion::finished;
+    terminal.exitCode = result.exitCode;
+    terminal.completionLabel = std::wstring(git::CommandCompletionLabel(result.completion));
+    terminal.conclusion = concl;
+    const std::wstring recordId = CommitHistoryRecord(historyCapture, terminal);
+    if (pushOperation) {
+      lastPushRecordId_ = recordId;
+    }
+  };
   // 「创建提交」的收尾只认 Git 的退出码：成功才清已提交的正文（先逐栏比对再清），
   // 失败时表单一个字都不动，用户可以直接改好再点一次（那种场合最不该丢的就是他刚写下来的东西）。
   if (commitOperation) {
@@ -2646,6 +2739,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
       // 一并交给 pull 控制器；这里直接返回，槽位释放后不碰 Remember/ScheduleRefresh。
       commandRunner_.ClearAllResults();
       UpdateCommandAvailability();
+      settleHistory(conclusion);
       pullFlow_.BeginIntegrationFailedReport(*this, CaptureOperationContext(), std::move(conclusion),
                                              result.completion, result.exitCode,
                                              result.environmentNotice);
@@ -2666,6 +2760,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
       // 绝不在这里顺手补一条 abort/reset——现场怎么处理由用户决定。
       commandRunner_.ClearAllResults();
       UpdateCommandAvailability();
+      settleHistory(conclusion);
       conflictFlow_.BeginFailedReport(*this, CaptureOperationContext(),
                                       conflictContinueOperation ? ConflictFlow::Entry::continueFlow
                                                                 : ConflictFlow::Entry::abortFlow,
@@ -2687,6 +2782,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     conclusion += L"｜" + result.environmentNotice;
   }
   tasks_.RememberOperationConclusion(conclusion);
+  settleHistory(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
   commandRunner_.ClearAllResults();
   UpdateCommandAvailability();
@@ -3241,6 +3337,7 @@ void MainWindow::BeginStopAllBackgroundWorkers() {
   pushFlow_.BeginStop();
   conflictFlow_.BeginStop();
   submoduleFlow_.BeginStop();
+  restoreFlow_.BeginStop();
 }
 
 void MainWindow::JoinAllBackgroundWorkers() {
@@ -3255,6 +3352,7 @@ void MainWindow::JoinAllBackgroundWorkers() {
   pushFlow_.JoinWorkers();
   conflictFlow_.JoinWorkers();
   submoduleFlow_.JoinWorkers();
+  restoreFlow_.JoinWorkers();
 }
 
 LRESULT CALLBACK MainWindow::Thunk(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -3376,6 +3474,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       } else if (wParam == kPrefsSaveTimer) {
         ::KillTimer(window, kPrefsSaveTimer);
         RunPersistentSave(window);
+      } else if (wParam == kHistorySaveTimer) {
+        ::KillTimer(window, kHistorySaveTimer);
+        RunHistorySave(window);
       }
       return 0;
     case kGitProbeCompleted:
@@ -3444,6 +3545,12 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kConflictAftermathCompleted:
       conflictFlow_.OnAftermathCompleted(*this, static_cast<uint64_t>(wParam));
       return 0;
+    case kRestoreProbeCompleted:
+      restoreFlow_.OnProbeCompleted(*this, CaptureOperationContext(), static_cast<uint64_t>(wParam));
+      return 0;
+    case kRestoreRecheckCompleted:
+      restoreFlow_.OnRecheckCompleted(*this, CaptureOperationContext(), static_cast<uint64_t>(wParam));
+      return 0;
     case kCommitProbeCompleted:
       commitFlow_.OnProbeCompleted(*this, CaptureOperationContext(), state_.WorkspaceModel(),
                                    static_cast<uint64_t>(wParam));
@@ -3461,6 +3568,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         // 关窗前把防抖里没来得及写的记录补上：小文件、本线程、有界等待（锁占用最多约 0.6 秒），
         // 不启动任何子进程。写不成也只说明「这次没保存」，绝不阻塞退出。
         RunPersistentSave(window);
+        // 操作历史同样是独立文件、独立锁：关窗前把防抖里没来得及落盘的最后一次记录也补上，
+        // 小文件、本线程、有界等待，不启动任何子进程；写不成只说明「这次没保存」，绝不阻塞退出。
+        RunHistorySave(window);
         ::DestroyWindow(window);
       }
       return 0;
@@ -3482,6 +3592,490 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     default:
       return ::DefWindowProcW(window, message, wParam, lParam);
   }
+}
+
+// ============================================================================
+// 操作历史与恢复入口（可选新增功能）
+// ============================================================================
+
+void MainWindow::LoadOperationHistory() {
+  historyPaths_ = platform::ResolveHistoryStorePaths();
+  historyWritable_ = historyPaths_.valid;
+  if (!historyPaths_.valid) {
+    return;  // 取不到用户应用数据目录：历史停用，绝不写到别处。
+  }
+  const platform::HistoryReadResult read = platform::ReadHistoryFile(historyPaths_.historyFile);
+  switch (read.kind) {
+    case platform::HistoryReadKind::absent:
+      return;  // 首次使用：没有历史可读，开关默认关。
+    case platform::HistoryReadKind::unreadable:
+      historyWritable_ = false;  // 读不成≠没有：这次不使用也不覆盖。
+      historyLoadNote_ = read.detail + L"本次运行不使用也不会覆盖这份历史文件。";
+      return;
+    case platform::HistoryReadKind::oversized:
+    case platform::HistoryReadKind::invalidUtf8:
+      historyLoadNote_ = read.detail + L"下一次保存时会把原件改名保留在旁边，再重新开始记录。";
+      return;
+    case platform::HistoryReadKind::loaded:
+      break;
+  }
+  const app::HistoryLoadResult parsed = app::ParseOperationLog(read.text);
+  switch (parsed.status) {
+    case app::HistoryLoadStatus::empty:
+      return;
+    case app::HistoryLoadStatus::corrupt:
+      historyLoadNote_ = L"历史文件读不成立（" + parsed.reason +
+                         L"）。下一次保存时会把原件改名保留，再从头开始。";
+      return;
+    case app::HistoryLoadStatus::tooNew:
+      historyWritable_ = false;
+      historyLoadNote_ = L"盘上的历史文件由更新版本的程序写出（版本 " +
+                         std::to_wstring(parsed.detectedVersion) + L"），本次不读取、不覆盖。";
+      return;
+    case app::HistoryLoadStatus::loaded:
+      historyLog_ = parsed.log;
+      return;
+  }
+}
+
+bool MainWindow::HistoryApplicable() const {
+  return historyWritable_ && historyLog_.historyEnabled;
+}
+
+std::wstring MainWindow::HistoryStorageLine() const {
+  if (!historyPaths_.valid) {
+    return historyPaths_.failureReason.empty() ? std::wstring(L"（历史目录尚未解析）")
+                                               : historyPaths_.failureReason;
+  }
+  return app::DescribeHistoryStoragePath(historyPaths_.directory, platform::kHistoryFileName);
+}
+
+std::wstring MainWindow::NextHistoryId() {
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  ++historyRecordCounter_;
+  return L"op-" + std::to_wstring(epoch < 0 ? 0 : epoch) + L"-" +
+         std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(historyRecordCounter_);
+}
+
+void MainWindow::ScheduleHistorySave() {
+  if (!HistoryApplicable()) {
+    return;
+  }
+  historyIntents_.append = true;
+  historySavePending_ = true;
+  if (window_.get() != nullptr) {
+    ::SetTimer(window_.get(), kHistorySaveTimer, kHistorySaveDebounceMs, nullptr);
+  }
+}
+
+std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
+                                             const app::HistoryTerminalInfo& terminal) {
+  if (!capture.record || !HistoryApplicable()) {
+    return {};  // 没勾「记录操作历史」就一个字节都不写，也不在内存里堆记录。
+  }
+  const std::wstring id = NextHistoryId();
+  app::OperationRecord record = app::ComposeHistoryRecord(id, capture.workTreeRoot, capture, terminal);
+  std::wstring refusal;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(record), &refusal)) {
+    state_.SetStatusNote(L"操作历史没有记录：" + refusal);
+    return {};
+  }
+  ScheduleHistorySave();
+  return id;
+}
+
+void MainWindow::RecordPushVerification(std::wstring_view verificationSummary) {
+  if (!HistoryApplicable() || lastPushRecordId_.empty()) {
+    return;
+  }
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  // 核实结果作为「追加证据」登记进最近那条推送记录：命令窗口退出码是各目标合计，
+  // 「哪一个真收到那一份」只有这份 ls-remote 能回答。追加，不改命令那一步的终态。
+  app::AppendHistoryReview(&historyLog_, lastPushRecordId_, epoch, verificationSummary);
+  ScheduleHistorySave();
+}
+
+void MainWindow::RunHistorySave(HWND window) {
+  static_cast<void>(window);
+  historySavePending_ = false;
+  if (window_.get() != nullptr) {
+    ::KillTimer(window_.get(), kHistorySaveTimer);
+  }
+  app::HistoryWriteIntents intents = historyIntents_;
+  historyIntents_ = app::HistoryWriteIntents{};  // 先清；写不成再原样放回，脏意不丢
+  const bool anything = intents.policy || intents.append || intents.replaceAll;
+  if (!anything || !historyWritable_) {
+    return;  // 目录不可写或没被更高版本占着时才写；关着也要能落「关」这个选择（policy intent）。
+  }
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  const platform::HistorySaveOutcome outcome =
+      platform::SaveOperationHistory(historyPaths_, historyLog_, intents, epoch);
+  const auto requeue = [&]() {
+    historyIntents_.append = historyIntents_.append || intents.append;
+    historyIntents_.policy = historyIntents_.policy || intents.policy;
+    historyIntents_.replaceAll = historyIntents_.replaceAll || intents.replaceAll;
+  };
+  switch (outcome.status) {
+    case platform::HistorySaveStatus::saved:
+    case platform::HistorySaveStatus::recoveredCorrupt:
+      historyLog_ = outcome.merged;  // 盘上现在就是这一份：下一次合并以它为基准
+      if (!outcome.report.keptFromDiskStrongerTerminal.empty()) {
+        state_.SetFormNote(L"另一个窗口已记下某些操作更确定的结果（" +
+                           std::to_wstring(outcome.report.keptFromDiskStrongerTerminal.size()) +
+                           L" 条）；本次以先记录到终态的那份为准，没有把较弱的信息盖上去。");
+      }
+      if (!outcome.detail.empty()) {
+        state_.SetStatusNote(outcome.detail);
+      }
+      return;
+    case platform::HistorySaveStatus::busy:
+      requeue();
+      ScheduleHistorySave();
+      return;
+    case platform::HistorySaveStatus::refusedTooNew:
+      historyWritable_ = false;
+      state_.SetStatusNote(outcome.detail);
+      return;
+    case platform::HistorySaveStatus::failed:
+      requeue();
+      return;
+  }
+}
+
+void MainWindow::OnHistoryCheckClicked(HWND window, bool checked) {
+  historyLog_.historyEnabled = checked;
+  if (!historyWritable_) {
+    state_.SetStatusNote(L"当前没有可写的历史位置（" + HistoryStorageLine() +
+                         L"），开关只记录了你的选择，本次运行不会写盘。");
+    RefreshTexts(window);
+    return;
+  }
+  if (checked) {
+    state_.SetStatusNote(L"已开始记录操作历史：本程序对仓库做过的写操作会留在 " + HistoryStorageLine() +
+                         L"。");
+  } else {
+    state_.SetStatusNote(L"已停止记录操作历史：不再新增记录，盘上已有的保留不动；要清空用「操作历史…」里的清除。");
+  }
+  historyIntents_.policy = true;
+  RunHistorySave(window);  // 开关本身要落地
+  RefreshTexts(window);
+}
+
+void MainWindow::ClearOperationHistory(HWND window) {
+  const std::wstring body =
+      L"将删除历史记录里的全部操作条目（唯一 ID、时间、仓库、引用与对象 ID、终态、逐目标核实与恢复线索）。\r\n"
+      L"这不会改动 Git 仓库、不会改你的 Git 配置，也不会撤销任何已经做过的操作。\r\n\r\n"
+      L"位置：" +
+      HistoryStorageLine() + L"\r\n对这台机器上所有 EvernightCommit 窗口同时生效。\r\n\r\n确定清除全部操作历史吗？";
+  if (::MessageBoxW(window, body.c_str(), L"清除操作历史", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) !=
+      IDYES) {
+    state_.SetStatusNote(L"没有清除任何历史。");
+    RefreshTexts(window);
+    return;
+  }
+  if (!historyPaths_.valid) {
+    state_.SetStatusNote(L"没有可清除的历史：" + historyPaths_.failureReason);
+    RefreshTexts(window);
+    return;
+  }
+  if (!historyWritable_) {
+    state_.SetStatusNote(
+        L"盘上的历史文件本版本不能安全处理（见上一条说明），没有动它。要删除请手动移除：" +
+        HistoryStorageLine());
+    RefreshTexts(window);
+    return;
+  }
+  historyLog_.records.clear();
+  historyIntents_ = app::HistoryWriteIntents{};
+  historyIntents_.replaceAll = true;
+  historyIntents_.policy = true;
+  RunHistorySave(window);
+  state_.SetStatusNote(L"已清除全部操作历史（开关与保留设置保留）。位置：" + HistoryStorageLine());
+  RefreshTexts(window);
+}
+
+void MainWindow::ExportOperationHistory(HWND window) {
+  if (!historyPaths_.valid) {
+    state_.SetStatusNote(L"没有可导出的历史位置：" + historyPaths_.failureReason);
+    RefreshTexts(window);
+    return;
+  }
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  std::wstring outPath;
+  std::wstring reason;
+  if (platform::ExportOperationHistoryFile(historyPaths_, historyLog_, epoch, &outPath, &reason)) {
+    state_.SetStatusNote(L"已导出脱敏的历史副本：" + outPath);
+  } else {
+    state_.SetStatusNote(L"导出失败：" + reason);
+  }
+  RefreshTexts(window);
+}
+
+// 一条记录的一行摘要（列表主列）与详情（次列）。只取元数据，绝不展开被排除的内容。
+namespace {
+std::wstring HistoryRowPrimary(const app::OperationRecord& record) {
+  const std::wstring time = record.startedEpoch > 0
+                                ? platform::FormatLocalEpochSeconds(record.startedEpoch)
+                                : std::wstring(L"时间未知");
+  return time + L"　" + std::wstring(app::HistoryFlowLabel(record.flow)) + L"　" +
+         std::wstring(app::HistoryTerminalLabel(record.terminal));
+}
+std::wstring HistoryRowDetail(const app::OperationRecord& record) {
+  std::wstring detail;
+  if (!record.workTreeRoot.empty()) {
+    detail += record.workTreeRoot;
+  }
+  if (!record.restoreBranchRef.empty()) {
+    detail += L"　引用 " + record.restoreBranchRef;
+  }
+  if (!record.sourceObjectId.empty()) {
+    detail += L"　" + git::ShortObjectId(record.sourceObjectId);
+  }
+  if (!record.restoreNote.empty()) {
+    detail += L"　" + record.restoreNote;
+  }
+  return detail;
+}
+}  // namespace
+
+void MainWindow::ShowOperationHistory(HWND window) {
+  RemoteChoiceLayoutHints hints;
+  hints.contentWidth = 620;
+  hints.listHeight = 260;
+
+  platform::RemoteChoiceSpec menu;
+  menu.title = L"操作历史";
+  menu.label = L"选择要对这份操作历史做的操作（取消不改动任何东西）。位置：" + HistoryStorageLine();
+  menu.items = {
+      {L"查看某条记录 / 恢复",
+       std::wstring(L"共 ") + std::to_wstring(historyLog_.records.size()) + L" 条记录"},
+      {L"导出脱敏副本", L"把当前历史写成一个导出文件（与存储同样脱敏）"},
+      {L"清除全部历史", L"删除全部操作条目（不撤销任何已做过的操作）"},
+      {L"查看存储位置", HistoryStorageLine()},
+      {L"调整保留期限与条数",
+       std::wstring(L"当前：保留 ") + std::to_wstring(historyLog_.retentionDays) +
+           L" 天（0＝不按天）、上限 " + std::to_wstring(historyLog_.maxRecords) + L" 条"},
+  };
+  menu.okText = L"继续";
+  menu.emptyItemDetail = L"";
+  menu.needSelectionHint = L"先选一项，再按确定。（取消不执行任何操作）";
+  hints.labelRows = 3;
+  const std::optional<size_t> choice = PromptRemoteChoice(menu, hints);
+  if (!choice.has_value()) {
+    return;
+  }
+  switch (*choice) {
+    case 1:
+      ExportOperationHistory(window);
+      return;
+    case 2:
+      ClearOperationHistory(window);
+      return;
+    case 3:
+      ShowInfo(L"操作历史存储位置", HistoryStorageLine());
+      return;
+    case 4: {
+      platform::IdentityPromptSpec spec;
+      spec.title = L"设置操作历史的保留期限与条数";
+      spec.label =
+          L"输入「保留天数,最大条数」，逗号分隔。保留天数 0＝不按天淘汰（上限 3650）；条数 1.." +
+          std::to_wstring(app::kMaxHistoryRecords) + L"。";
+      spec.initialValue = std::to_wstring(historyLog_.retentionDays) + L"," +
+                          std::to_wstring(historyLog_.maxRecords);
+      spec.okText = L"保存设置";
+      spec.validate = [](const std::wstring& text) -> std::wstring {
+        const auto parse = [](std::wstring_view piece, long long* out) {
+          if (piece.empty() || piece.size() > 10) {
+            return false;
+          }
+          long long value = 0;
+          for (const wchar_t c : piece) {
+            if (c < L'0' || c > L'9') {
+              return false;
+            }
+            value = value * 10 + static_cast<long long>(c - L'0');
+          }
+          *out = value;
+          return true;
+        };
+        const size_t comma = text.find(L',');
+        if (comma == std::wstring::npos) {
+          return L"格式应为「天数,条数」，两个都用非负整数。";
+        }
+        long long days = 0;
+        long long records = 0;
+        if (!parse(std::wstring_view(text).substr(0, comma), &days) ||
+            !parse(std::wstring_view(text).substr(comma + 1), &records)) {
+          return L"天数与条数都必须是非负整数。";
+        }
+        if (days > app::kMaxHistoryRetentionDays || records < 1 ||
+            records > static_cast<long long>(app::kMaxHistoryRecords)) {
+          return L"超出可接受范围（天数≤3650；条数 1.." +
+                 std::to_wstring(app::kMaxHistoryRecords) + L"）。";
+        }
+        return {};
+      };
+      TextInputLayoutHints textHints;
+      textHints.labelRows = 3;
+      textHints.noteRows = 2;
+      textHints.contentWidth = 460;
+      const std::optional<std::wstring> value = PromptForText(spec, textHints);
+      if (!value.has_value()) {
+        return;
+      }
+      const size_t comma = value->find(L',');
+      long long days = 0;
+      long long records = 0;
+      const auto toNumber = [](std::wstring_view piece) {
+        long long value = 0;
+        for (const wchar_t c : piece) {
+          value = value * 10 + static_cast<long long>(c - L'0');
+        }
+        return value;
+      };
+      days = toNumber(std::wstring_view(*value).substr(0, comma));
+      records = toNumber(std::wstring_view(*value).substr(comma + 1));
+      historyLog_.retentionDays = static_cast<int>(days);
+      historyLog_.maxRecords = static_cast<size_t>(records);
+      app::ApplyHistoryRetention(&historyLog_, platform::CurrentLocalInstant().utcEpochSeconds);
+      historyIntents_.policy = true;
+      historyIntents_.append = true;
+      RunHistorySave(window);
+      state_.SetStatusNote(L"已更新操作历史的保留期限（" + std::to_wstring(historyLog_.retentionDays) +
+                           L" 天）与条数上限（" + std::to_wstring(historyLog_.maxRecords) + L" 条）。");
+      RefreshTexts(window);
+      return;
+    }
+    case 0:
+    default:
+      break;
+  }
+
+  // 「查看某条记录 / 恢复」：列出现有记录。
+  if (historyLog_.records.empty()) {
+    ShowInfo(L"操作历史", L"还没有任何记录。勾上「记录操作历史」之后的写操作才会被记录下来。");
+    return;
+  }
+  platform::RemoteChoiceSpec list;
+  list.title = L"操作历史记录";
+  list.label = L"选中一条记录后，可按其恢复线索重新预检并确认恢复（仅引用级可回退者）；取消不执行任何操作。";
+  // 最新排在最前，便于查看；下标映射回真实记录。
+  for (auto it = historyLog_.records.rbegin(); it != historyLog_.records.rend(); ++it) {
+    list.items.push_back({HistoryRowPrimary(*it), HistoryRowDetail(*it)});
+  }
+  list.okText = L"处理选中记录";
+  list.emptyItemDetail = L"";
+  list.needSelectionHint = L"先在列表里点选一条记录，再按确定。（取消不执行任何操作）";
+  hints.listHeight = 320;
+  const std::optional<size_t> picked = PromptRemoteChoice(list, hints);
+  if (!picked.has_value()) {
+    return;
+  }
+  const size_t fromEnd = *picked;
+  if (fromEnd >= historyLog_.records.size()) {
+    return;
+  }
+  const app::OperationRecord& record =
+      historyLog_.records[historyLog_.records.size() - 1 - fromEnd];
+
+  if (record.restoreKind == app::HistoryRestoreKind::refMove) {
+    const int answer =
+        ::MessageBoxW(window,
+                      (L"这条记录支持「引用级恢复」：把分支 " + record.restoreBranchRef + L" 从 " +
+                       record.restoreExpectedCurrentId + L" 挪回 " + record.restoreUndoToObjectId +
+                       L"。\n\n恢复之前会先在后台重新预检现状、并要你确认；不改动索引与工作区，"
+                       L"也不自动撤销任何东西。\n\n是＝开始恢复流程；否＝只复制恢复命令；取消＝关闭。")
+                          .c_str(),
+                      L"恢复这条记录？", MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer == IDYES) {
+      BeginRestoreFromRecord(window, record);
+    } else if (answer == IDNO) {
+      CopyRestoreCommandForRecord(window, record);
+    }
+    return;
+  }
+  if (record.restoreKind == app::HistoryRestoreKind::manualRemote) {
+    const int answer = ::MessageBoxW(
+        window,
+        (L"这条记录涉及已推送到远端的历史：\n\n" + record.restoreNote +
+         L"\n\n本程序不会自动 force push / hard reset / clean。你可以复制那条命令、自行看清目标与风险后"
+         L"再决定执行。\n\n是＝复制命令；否＝关闭。")
+            .c_str(),
+        L"涉及远端历史：只解释与复制", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer == IDYES) {
+      CopyRestoreCommandForRecord(window, record);
+    }
+    return;
+  }
+  ShowInfo(L"这条记录没有引用级恢复",
+           record.restoreNote.empty()
+               ? std::wstring(L"这次操作不产生「把某个本地引用挪回去」的可审查恢复形态（例如抓取只更新"
+                              L"远端跟踪引用、拉取整合/冲突流程会重写多提交与工作区）。本程序不自动撤销，"
+                              L"也不提供 force push / hard reset / clean。")
+               : record.restoreNote);
+}
+
+void MainWindow::BeginRestoreFromRecord(HWND window, const app::OperationRecord& record) {
+  if (record.restoreKind != app::HistoryRestoreKind::refMove) {
+    return;
+  }
+  if (restoreFlow_.Active()) {
+    state_.SetStatusNote(L"已经有一次恢复预检在走，请等它的确认框出现或先取消那一次。");
+    RefreshTexts(window);
+    return;
+  }
+  const OperationContext ctx = CaptureOperationContext();
+  // 记录属于另一个仓库时绝不恢复：把别的仓库的引用挪走是纯粹的错。
+  if (!ctx.repoUsable || !git::PathsEqualFolded(ctx.detection.root, record.workTreeRoot)) {
+    state_.SetStatusNote(L"这条记录属于仓库 " + record.workTreeRoot + L"，当前绑定的是 " +
+                         (ctx.detection.root.empty() ? std::wstring(L"（没有可用仓库）")
+                                                     : ctx.detection.root) +
+                         L"。请先切回那个仓库，再选这条记录恢复。");
+    RefreshTexts(window);
+    return;
+  }
+  git::RestoreClues clues;
+  clues.valid = true;
+  clues.repositoryRoot = record.workTreeRoot;
+  clues.branchRef = record.restoreBranchRef;
+  clues.expectedCurrentOid = record.restoreExpectedCurrentId;
+  clues.moveToOid = record.restoreUndoToObjectId;
+  clues.isRootDeletion = record.restoreIsRoot;
+  clues.originalNote = record.restoreNote;
+  restoreFlow_.Start(*this, ctx, std::move(clues));
+}
+
+void MainWindow::CopyRestoreCommandForRecord(HWND window, const app::OperationRecord& record) {
+  std::wstring command;
+  if (record.restoreKind == app::HistoryRestoreKind::refMove) {
+    command = L"git -C \"" + record.workTreeRoot + L"\" ";
+    if (record.restoreIsRoot || record.restoreUndoToObjectId.empty()) {
+      command += L"update-ref -d -m \"EvernightCommit:restore\" " + record.restoreBranchRef + L" " +
+                 record.restoreExpectedCurrentId;
+    } else {
+      command += L"update-ref --create-reflog -m \"EvernightCommit:restore\" " +
+                 record.restoreBranchRef + L" " + record.restoreUndoToObjectId + L" " +
+                 record.restoreExpectedCurrentId;
+    }
+  } else {
+    command = record.restoreNote;
+  }
+  if (command.empty()) {
+    state_.SetStatusNote(L"这条记录没有可复制的恢复命令。");
+    RefreshTexts(window);
+    return;
+  }
+  std::wstring failure;
+  if (platform::CopyTextToClipboard(window, command, &failure)) {
+    state_.SetStatusNote(L"已复制恢复命令（未执行，也不代表已恢复远端）：请核对目标与风险后自行决定。");
+  } else {
+    state_.SetStatusNote(L"复制到剪贴板失败：" + failure);
+  }
+  RefreshTexts(window);
 }
 
 }  // namespace gc::ui

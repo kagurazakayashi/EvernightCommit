@@ -24,8 +24,8 @@ std::array<HWND, 7> ActionBar::Buttons() const noexcept {
   return {refresh_, createCommit_, undoCommit_, push_, conflictView_, conflictContinue_, conflictAbort_};
 }
 
-std::array<HWND, 3> ActionBar::PreferenceControls() const noexcept {
-  return {persistRecords_, persistDrafts_, clearPrefs_};
+std::array<HWND, 5> ActionBar::PreferenceControls() const noexcept {
+  return {persistRecords_, persistDrafts_, historyCheck_, clearPrefs_, historyBrowse_};
 }
 
 int ActionBar::PreferenceControlWidth(HWND control, const UiMetrics& metrics) const {
@@ -34,8 +34,8 @@ int ActionBar::PreferenceControlWidth(HWND control, const UiMetrics& metrics) co
   }
   const std::wstring text = GetControlText(control);
   // 复选框没有现成的「整控件宽度」度量：按「方框 + 文字」估算，与 Create 给的标题一致即可；
-  // 「清除已存记录」是按钮，走与其余按钮同一套字体度量。
-  const bool button = control == clearPrefs_;
+  // 「清除已存记录」与「操作历史…」是按钮，走与其余按钮同一套字体度量。
+  const bool button = control == clearPrefs_ || control == historyBrowse_;
   return button ? metrics.ButtonWidth(text) : metrics.Scale(20) + metrics.LabelWidth(text);
 }
 
@@ -68,6 +68,9 @@ void ActionBar::Create(HWND parent) {
   persistRecords_ = CreateCheckBox(parent, L"保存记录", kIdPersistRecordsCheck, true);
   persistDrafts_ = CreateCheckBox(parent, L"保存草稿", kIdPersistDraftsCheck, true);
   clearPrefs_ = CreatePushButton(parent, L"清除已存记录", kIdClearPrefsButton);
+  // 操作历史区（可选功能）：总开关默认关——没勾之前一个字节都不写；「操作历史…」是查看/导出/清除/恢复入口。
+  historyCheck_ = CreateCheckBox(parent, L"记录操作历史", kIdHistoryCheck, false);
+  historyBrowse_ = CreatePushButton(parent, L"操作历史…", kIdHistoryBrowseButton);
   status_ = CreateLabel(parent, L"未执行任何操作。", kIdBottomStatusLabel);
 }
 

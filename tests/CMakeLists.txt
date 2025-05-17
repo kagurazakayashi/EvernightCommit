@@ -38,11 +38,15 @@ add_executable(gc_tests
   machine_output_completeness_tests.cpp
   operation_conclusions_tests.cpp
   operation_gate_tests.cpp
+  operation_history_tests.cpp
+  operation_history_store_file_tests.cpp
   persistent_state_tests.cpp
   persistent_store_file_tests.cpp
   refresh_repository_tests.cpp
   repo_detect_fixture_tests.cpp
   repository_tests.cpp
+  restore_plan_tests.cpp
+  restore_plan_fixture_tests.cpp
   subprocess_command_line_tests.cpp
   subprocess_capture_fixture_tests.cpp
   subprocess_capture_tests.cpp

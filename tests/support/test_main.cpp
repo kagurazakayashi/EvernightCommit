@@ -105,10 +105,12 @@ constexpr const char* kPureFiles[] = {
     "machine_output_completeness_tests.cpp",
     "operation_conclusions_tests.cpp",
     "operation_gate_tests.cpp",
+    "operation_history_tests.cpp",
     "persistent_state_tests.cpp",
     "pull_plan_tests.cpp",
     "push_plan_tests.cpp",
     "repository_tests.cpp",
+    "restore_plan_tests.cpp",
     "staging_plan_tests.cpp",
     "submodule_journey_tests.cpp",
     "submodule_navigation_tests.cpp",
@@ -124,6 +126,7 @@ constexpr const char* kPureFiles[] = {
 // 真实 Win32 子进程/文件系统，但逐文件核实过不启动 git.exe。
 constexpr const char* kWindowsFiles[] = {
     "command_window_directory_tests.cpp",
+    "operation_history_store_file_tests.cpp",  // 真实历史文件读写/锁与剪贴板往返，全部在测试自己的临时根；不启动 Git、不碰用户 %APPDATA%。
     "persistent_store_file_tests.cpp",  // 真实文件读写/锁，全部在测试自己的临时根里；不启动 Git、不碰用户 %APPDATA%。
     "subprocess_capture_fixture_tests.cpp",
 };
@@ -144,6 +147,7 @@ constexpr const char* kFixtureFiles[] = {
     "pull_probe_fixture_tests.cpp",
     "push_fixture_tests.cpp",
     "refresh_repository_tests.cpp",
+    "restore_plan_fixture_tests.cpp",
     "repo_detect_fixture_tests.cpp",
     "staging_plan_fixture_tests.cpp",
     "submodule_navigation_fixture_tests.cpp",
@@ -195,6 +199,9 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // git_environment_fixture_tests.cpp —— 绑定探针与命令窗口 git add
     "git_env_binding_probe_reads_bind_selected_repo",
     "git_env_binding_command_window_add_binds_selected_repo",
+    // restore_plan_fixture_tests.cpp —— 只有 init + 一条只读 rev-parse 预检形态核对，
+    // 不建提交、不推送、不动任何引用（2026-10-09 操作历史任务逐行核实）。
+    "restore_branch_probe_accepts_the_query_shape_on_a_fresh_repository",
     // repo_detect_fixture_tests.cpp —— 无提交形态的识别
     "detect_empty_repository_as_without_commits",
     "detect_plain_directory_as_not_repository",

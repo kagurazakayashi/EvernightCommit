@@ -11,6 +11,7 @@
 #include "app/app_state.h"
 #include "app/commit_form_session.h"
 #include "app/operation_gate.h"
+#include "app/operation_history.h"
 #include "app/persistent_state.h"
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
@@ -19,6 +20,8 @@
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
+#include "platform/windows/path_picker.h"
+#include "platform/windows/operation_history_store.h"
 #include "platform/windows/persistent_store.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/repo_detect.h"
@@ -35,6 +38,7 @@
 #include "ui/pull_flow.h"
 #include "ui/push_flow.h"
 #include "ui/repo_bar.h"
+#include "ui/restore_flow.h"
 #include "ui/splitter.h"
 #include "ui/submodule_flow.h"
 #include "ui/undo_flow.h"
@@ -215,6 +219,31 @@ private:
   void ClearPersistedRecords(HWND window);
   [[nodiscard]] std::wstring PreferencesStorageLine() const;  // 「保存位置：…」一句（只有路径，没有正文）
 
+  // ---- 操作历史（可选新增功能：查看操作经过 + 引用级恢复入口，绝不自动撤销）----
+  // 数据与合并规则在 app/operation_history（纯逻辑），文件与目录在
+  // platform/windows/operation_history_store；这里只做「界面上的事」：加载、开关、逐操作终态
+  // 落账、推送核实回来后追加逐目标结果、以及查看/导出/清除/恢复入口。全部 IO 在 GUI 线程上做
+  // 一次有界的小文件写入（不启动任何子进程）；防抖把同一会话里的多次落账合并成一次写。
+  void LoadOperationHistory();                        // CreateWindowEx 之前调用
+  [[nodiscard]] bool HistoryApplicable() const;       // 目录写得动、用户勾过「记录操作历史」
+  void ScheduleHistorySave();                         // 置防抖定时器
+  void RunHistorySave(HWND window);                   // 立刻执行一次「合并+原子写」
+  void OnHistoryCheckClicked(HWND window, bool checked);
+  void ClearOperationHistory(HWND window);            // 确认之后清掉全部历史记录（保留开关）
+  void ExportOperationHistory(HWND window);           // 把当前历史脱敏导出到同目录的导出文件
+  [[nodiscard]] std::wstring HistoryStorageLine() const;
+  // 一次写操作拿到终态后，把「已确认事实 + 终态」装配成一条记录并落账（内部生成唯一 ID）。
+  // 返回落账记录的 ID（未开启记录或被拒时为空）；推送用它把核实结果回补到同一条记录。
+  std::wstring CommitHistoryRecord(const app::HistoryCapture& capture,
+                                   const app::HistoryTerminalInfo& terminal);
+  // 「操作历史…」入口：选操作（查看/导出/清除/位置/保留）或选一条记录后恢复/复制。
+  void ShowOperationHistory(HWND window);
+  // 从一条 refMove 记录发起恢复：交给 RestoreFlow 走后台预检 → 强制确认 → 复核 → 命令窗口。
+  void BeginRestoreFromRecord(HWND window, const app::OperationRecord& record);
+  // 复制某条记录的恢复命令（显示精确目标与风险，但不执行）。
+  void CopyRestoreCommandForRecord(HWND window, const app::OperationRecord& record);
+  [[nodiscard]] std::wstring NextHistoryId();
+
   // 「作者」初值：向 Git 问这个仓库的有效身份配置（user.name / user.email），
   // 优先序完全交给 Git；本程序只读，绝不写回任何配置。
   void RequestAuthorConfig(HWND window);
@@ -277,6 +306,8 @@ private:
                            const CommandLaunchOptions& options) override;
   void ScheduleRefresh() override;
   void RememberOperationConclusion(std::wstring_view conclusion) override;
+  // 推送核实回来后把逐目标结论作为「追加证据」登记进最近一条推送记录（单窗口内推送串行）。
+  void RecordPushVerification(std::wstring_view verificationSummary) override;
   // 导航用的仓库切换：把「本地仓库」那一栏改到给出的目录，然后走既有的那条识别链路
   // （后台识别 → 绑定 → 作废旧列表 → 重读 → 作者默认值重查）。不另开一套换绑逻辑。
   bool NavigateRepository(std::wstring_view directory, std::wstring_view statusNote) override;
@@ -336,6 +367,9 @@ private:
     // 交给那台控制器，与 pull 整合失败同一套做法——绝不把「Git 返回非 0」与「没拿到退出码」合并。
     bool conflictContinueOperation = false;
     bool conflictAbortOperation = false;
+    // 操作历史：这次写操作带走那份「用户已确认的结构化事实」，终态时装配成一条记录。
+    app::HistoryCapture history;
+    unsigned long long historyStartedEpoch = 0;
   };
 
   platform::UniqueWindow window_;
@@ -360,6 +394,19 @@ private:
   // 子模块导航发起的那一次换绑定：落地时不叠加草稿恢复（交还由旅程做），用完即清。
   bool suppressDraftRestoreOnce_ = false;
   std::wstring gitPathInvalidNotice_;  // 「上次保存的 Git 路径失效」一句，等验证结论回来时带上
+  // ---- 操作历史成员（可选新增功能）----
+  // 数据与合并规则都在 app/operation_history；这里持有「本窗口的这一份历史」与写入意图。
+  platform::HistoryStorePaths historyPaths_;
+  app::OperationLog historyLog_;
+  // 目录可解析、盘上历史文件没被更高版本占着：还「写得动」。具体写不写仍由开关决定。
+  bool historyWritable_ = false;
+  bool historySavePending_ = false;  // 防抖定时器在跑
+  app::HistoryWriteIntents historyIntents_;
+  std::wstring historyLoadNote_;     // 读取带回的一句状态说明（OnCreate 里显示）
+  // 唯一 ID = <epoch>-<pid>-<本窗口单调计数>：跨实例靠 pid 分、实例内靠计数分。
+  unsigned long long historyRecordCounter_ = 0;
+  // 最近落账的推送记录 ID：核实回来后按它把逐目标结果补进这一条（单窗口内推送串行，指向明确）。
+  std::wstring lastPushRecordId_;
   // 六个被编排操作的控制器：各自的后台预检器、阶段标记、方案与复核基准都由控制器自己保管。
   CommitFlow commitFlow_;
   UndoFlow undoFlow_;
@@ -371,6 +418,9 @@ private:
   ConflictFlow conflictFlow_;
   // 子模块导航：进来路、代管各仓库的表单草稿、两条只读探测都在这台控制器里。
   SubmoduleFlow submoduleFlow_;
+  // 按记录恢复引用的控制器：后台预检、判读成的恢复方案、执行前复核基准都在这台控制器里。
+  // 它是历史功能里唯一会真的改动仓库的入口，且只服务于引用级可回退（refMove）的记录。
+  RestoreFlow restoreFlow_;
   platform::CommandWindowRunner commandRunner_;
   app::TaskCoordinator tasks_;
   ActiveOperation activeOperation_;

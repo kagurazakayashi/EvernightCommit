@@ -35,6 +35,9 @@ public:
   [[nodiscard]] HWND persistRecordsCheck() const noexcept { return persistRecords_; }
   [[nodiscard]] HWND persistDraftsCheck() const noexcept { return persistDrafts_; }
   [[nodiscard]] HWND clearPrefsButton() const noexcept { return clearPrefs_; }
+  // 操作历史（可选功能）：总开关与「操作历史…」入口。它不碰仓库、不需要 Git 可用，任何时候都可点。
+  [[nodiscard]] HWND historyCheck() const noexcept { return historyCheck_; }
+  [[nodiscard]] HWND historyBrowseButton() const noexcept { return historyBrowse_; }
 
   // 程序改写开关状态（首次说明的选择、读回来的记录）：BM_SETCHECK 不会发 BN_CLICKED，
   // 不会被当成用户又点了一次。
@@ -44,8 +47,9 @@ private:
   // 单行摆放的全部操作按钮（顺序即从左到右的显示顺序）：MinimumWidth 与 Layout 共用这一份，
   // 免得两处各自维护一份列表而漏掉新按钮（新按钮因此不会在最小宽度里凭空少算一格）。
   [[nodiscard]] std::array<HWND, 7> Buttons() const noexcept;
-  // 持久化区的三个控件，同样只在这一处列名单。
-  [[nodiscard]] std::array<HWND, 3> PreferenceControls() const noexcept;
+  // 持久化区与操作历史区的控件（两个记录开关各管各的、一个清除入口、一个历史入口），
+  // 只在这一处列名单：MinimumWidth 与 Layout 共用它，新控件不会在最小宽度里凭空少算一格。
+  [[nodiscard]] std::array<HWND, 5> PreferenceControls() const noexcept;
   // 单个持久化控件的应占宽度（复选框按文字加方框、按钮按按钮宽度）。
   [[nodiscard]] int PreferenceControlWidth(HWND control, const UiMetrics& metrics) const;
 
@@ -59,6 +63,8 @@ private:
   HWND persistRecords_ = nullptr;
   HWND persistDrafts_ = nullptr;
   HWND clearPrefs_ = nullptr;
+  HWND historyCheck_ = nullptr;
+  HWND historyBrowse_ = nullptr;
   HWND status_ = nullptr;
 };
 

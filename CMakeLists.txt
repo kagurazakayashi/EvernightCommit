@@ -86,6 +86,7 @@ add_library(gc_core STATIC
   src/app/list_view_memory.cpp
   src/app/operation_conclusions.cpp
   src/app/operation_gate.cpp
+  src/app/operation_history.cpp
   src/app/persistent_state.cpp
   src/app/submodule_journey.cpp
   src/app/task_coordinator.cpp
@@ -107,6 +108,7 @@ add_library(gc_core STATIC
   src/git/pull_plan.cpp
   src/git/push_plan.cpp
   src/git/repository.cpp
+  src/git/restore_plan.cpp
   src/git/staging_plan.cpp
   src/git/submodule_navigation.cpp
   src/git/undo_commit_plan.cpp
@@ -118,6 +120,7 @@ target_link_libraries(gc_core PUBLIC gc_build_settings)
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
   src/platform/windows/author_config.cpp
+  src/platform/windows/clipboard.cpp
   src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp
@@ -130,6 +133,7 @@ add_library(gc_platform STATIC
   src/platform/windows/identity_prompt.cpp
   src/platform/windows/local_time.cpp
   src/platform/windows/locale_text.cpp
+  src/platform/windows/operation_history_store.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp
   src/platform/windows/persistent_store.cpp
@@ -138,6 +142,7 @@ add_library(gc_platform STATIC
   src/platform/windows/push_probe.cpp
   src/platform/windows/remote_choice_dialog.cpp
   src/platform/windows/repo_detect.cpp
+  src/platform/windows/restore_probe.cpp
   src/platform/windows/subprocess.cpp
   src/platform/windows/submodule_probe.cpp
   src/platform/windows/undo_probe.cpp
@@ -162,6 +167,7 @@ add_library(gc_ui STATIC
   src/ui/pull_flow.cpp
   src/ui/push_flow.cpp
   src/ui/repo_bar.cpp
+  src/ui/restore_flow.cpp
   src/ui/splitter.cpp
   src/ui/submodule_flow.cpp
   src/ui/undo_flow.cpp
