@@ -81,6 +81,10 @@ enum ControlId : int {
   kIdPersistRecordsCheck = 201,
   kIdPersistDraftsCheck = 202,
   kIdClearPrefsButton = 203,
+  // 操作历史（可选功能）：「记录操作历史」总开关 + 「操作历史…」查看/导出/清除/恢复入口。
+  // 与「保存记录」各自独立：历史是只追加、按条保留、含引用级恢复线索的事件流。
+  kIdHistoryCheck = 204,
+  kIdHistoryBrowseButton = 205,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
@@ -137,6 +141,11 @@ inline constexpr UINT kSubmodulePointerProbeCompleted = WM_APP + 18;
 inline constexpr UINT kConflictProbeCompleted = WM_APP + 19;
 // 「首次使用」持久化说明的弹出通知：WM_CREATE 里不弹模态框，创建完成后由这条消息补上。
 inline constexpr UINT kPersistentConsentNotice = WM_APP + 23;
+// 「按记录恢复引用」的只读预检（分支现值／要挪回的对象可达性／有没有流程停着，全部本地只读）
+// 完成通知；wParam 为请求序号。命令本身在命令窗口里跑，不走这条通知。
+inline constexpr UINT kRestoreProbeCompleted = WM_APP + 24;
+// 恢复「点头之后、发命令之前」的分支现值复核完成通知；wParam 为请求序号。走后台，没回来不发命令。
+inline constexpr UINT kRestoreRecheckCompleted = WM_APP + 25;
 // 注意：WM_APP + 20 归命令窗口执行器的完成通知（platform::CommandWindowRunner::kCompletionMessage），
 // 它不在本文件里定义，历史上就差点与这里的序号撞车（撞了会表现为「终态回调把预检通知当成
 // 操作完成」这类极难查的错乱）。因此这一段从 19 直接跳到 21，文件末尾有一条 static_assert 兜底。
@@ -156,6 +165,11 @@ inline constexpr UINT kRefreshDebounceMs = 300;
 // 到点在本线程做一次「拿锁→重读→合并→原子写」的小文件写入（不启动任何子进程）。
 inline constexpr UINT_PTR kPrefsSaveTimer = 0x4717;
 inline constexpr UINT kPrefsSaveDebounceMs = 1500;
+
+// 操作历史落账的防抖：一次操作终态、逐目标核实追加、开关切换都只重排这一个定时器；
+// 到点在本线程做一次「拿锁→重读→按 ID 合并→原子写」的小文件写入（不启动任何子进程）。
+inline constexpr UINT_PTR kHistorySaveTimer = 0x4718;
+inline constexpr UINT kHistorySaveDebounceMs = 1200;
 
 // “Git 程序”输入防抖：连续键入只在停顿后验证一次。
 inline constexpr UINT_PTR kGitVerifyTimer = 0x4711;
@@ -215,6 +229,11 @@ inline constexpr unsigned long kCommitProbeTimeoutMs = 20000;
 // 放弃这次执行：确认框不重弹、命令不发，也绝不退回用早前那一份事实继续。
 inline constexpr unsigned long kConflictProbeTimeoutMs = 20000;
 
+// 「按记录恢复引用」的预检与复核都只有两条毫秒级本地只读查询（rev-parse --verify --quiet），
+// 沿用撤回复核那一档短超时：超时即按「读不回来 → 不发命令」收场，绝不对已变的现状盲目动引用。
+inline constexpr unsigned long kRestoreProbeTimeoutMs = 3000;
+inline constexpr unsigned long kRestoreRecheckTimeoutMs = 3000;
+
 // 编译期防撞：本文件里定义的每一条完成通知都不许等于执行器那条完成消息。
 // 新增通知时先核对这一段，别指望 switch 的重复 case 一定会报错（两条消息分属两个函数时就漏了）。
 static_assert(kSplitterDragged != platform::CommandWindowRunner::kCompletionMessage);
@@ -222,5 +241,7 @@ static_assert(kConflictProbeCompleted != platform::CommandWindowRunner::kComplet
 static_assert(kConflictRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictAftermathCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kPersistentConsentNotice != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kRestoreProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kRestoreRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 
 }  // namespace gc::ui

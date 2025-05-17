@@ -377,6 +377,24 @@ void PushFlow::Launch(OperationHost& host, const OperationContext& ctx,
                         L"），等待 Git 退出码…";
   options.scopeNotice = request.scopeNotice;
   options.pushOperation = true;
+  // 操作历史：绑定「确认要送出去的这一份提交、这一条远端引用、这一批发布地址」。
+  // URL 在这里是未掩码原值，装配层逐条掩码后才落盘/展示。推送属远端历史，恢复只解释与复制。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::push;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = request.displayName;
+  options.history.sourceRef = firstPushActive_ ? firstPlan_.localBranchRef : plan_.localBranchRef;
+  options.history.sourceObjectId = request.pushedObjectId;
+  options.history.targetRef = request.remoteBranchRef;
+  options.history.targetObjectId = request.pushedObjectId;
+  options.history.remoteName = request.remoteName;
+  options.history.publishUrls = request.pushUrls;
+  options.history.restoreKind = app::HistoryRestoreKind::manualRemote;
+  options.history.restoreNote =
+      L"这条已推送到远端：「" + request.remoteName + L"」的 " + request.remoteBranchRef +
+      L" 收到 " + git::ShortObjectId(request.pushedObjectId) +
+      L"。本地即便把分支挪回去也不会让远端跟着回退——撤销已推送历史要靠 force push，"
+      L"有真实的协作风险，本程序不自动执行，也不列为可自动恢复。";
   stage_ = Stage::pushing;
   binding_ = request;  // 核实要问的那一份：与刚才确认的完全同一批地点与那一份提交。
   boundRepositoryDirectory_ = ctx.detection.root;  // 核实与上游写入都认这一个仓库根。
@@ -439,6 +457,9 @@ void PushFlow::OnVerifyCompleted(OperationHost& host, const OperationContext& ct
     text += L"\n" + line;
   }
   host.SetStatus(text);
+  // 把逐目标核实结果作为「追加证据」登记进最近那条推送记录：命令窗口的退出码是各目标的合计，
+  // 「哪一个发布地址真的收到了那一份提交」只有这份 ls-remote 的回答能说明。追加，不改命令终态。
+  host.RecordPushVerification(text);
 
   // 「Git 说成功了却没核实上」与「核实到的位置和推出去的那一份不是一个东西」必须当面讲清楚，
   // 状态栏那行会被后续刷新挤掉。全都对得上的场合不再多弹一次窗。

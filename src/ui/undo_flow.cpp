@@ -140,6 +140,24 @@ void UndoFlow::Launch(OperationHost& host, const OperationContext& ctx,
   options.scopeNotice = plan.notice;
   options.undoOperation = true;
   options.restoreHint = plan.restoreHint;
+  // 操作历史：撤回是「移动一个本地分支引用」，带完整对象 ID，因此是唯一可审查回退的一类。
+  // 反手恢复就是把那条分支从「撤回后的父提交」挪回「被撤回的原提交」——同一条原子 update-ref 命令族。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::undo;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = plan.displayName;
+  options.history.sourceRef = plan.targetRef;
+  options.history.sourceObjectId = plan.expectedOldObjectId;  // 撤回前该分支指着的原提交
+  if (!plan.newObjectId.empty()) {
+    options.history.restoreKind = app::HistoryRestoreKind::refMove;
+    options.history.restoreBranchRef = plan.targetRef;
+    options.history.restoreExpectedCurrentId = plan.newObjectId;        // 撤回后分支应指（父提交）
+    options.history.restoreUndoToObjectId = plan.expectedOldObjectId;   // 恢复要挪回的原提交
+  } else {
+    // 根提交撤回删掉了引用：恢复它等于「无预期旧值地重建引用」，不属于自动回退范围。
+    options.history.restoreKind = app::HistoryRestoreKind::none;
+  }
+  options.history.restoreNote = plan.restoreHint;
   if (!host.LaunchCommandWindow(operation, options)) {
     host.SetStatus(L"这次撤回没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
     return;

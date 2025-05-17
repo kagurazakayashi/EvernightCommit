@@ -89,6 +89,16 @@ void FetchFlow::Launch(OperationHost& host, const OperationContext& ctx, const g
                         L"），等待 Git 退出码…";
   options.scopeNotice = plan.notice;
   options.fetchOperation = true;
+  // 操作历史：fetch 的边界就是它不改的那些东西，因此没有「挪回」的对象，恢复类别为 none。
+  options.history.record = true;
+  options.history.flow = app::HistoryFlow::fetch;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = plan.displayName;
+  options.history.remoteName = plan.remoteName;
+  options.history.restoreKind = app::HistoryRestoreKind::none;
+  options.history.restoreNote =
+      L"fetch 只更新远端跟踪引用（refs/remotes/ 下）、FETCH_HEAD 与对象库：不移动 HEAD、"
+      L"不改本地分支/索引/工作区，没有需要「挪回」的本地引用。";
   if (!host.LaunchCommandWindow(operation, options)) {
     host.SetStatus(L"这次 fetch 没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
   }

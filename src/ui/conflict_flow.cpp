@@ -156,6 +156,18 @@ void ConflictFlow::Launch(OperationHost& host, const OperationContext& ctx) {
   options.scopeNotice = plan_.notice;
   options.conflictContinueOperation = continuing;
   options.conflictAbortOperation = !continuing;
+  // 操作历史：继续/中止都是多提交重放或工作区重写，不是单条能安全「挪回」的本地引用，
+  // 恢复类别为 none；中止本身已是回退动作，本程序不在其上再叠加任何自动撤销。
+  options.history.record = true;
+  options.history.flow = continuing ? app::HistoryFlow::conflictContinue : app::HistoryFlow::conflictAbort;
+  options.history.workTreeRoot = ctx.detection.root;
+  options.history.operationLabel = plan_.displayName;
+  options.history.restoreKind = app::HistoryRestoreKind::none;
+  options.history.restoreNote =
+      continuing ? L"「继续该流程」会让 Git 建立提交并改动索引/工作区：那是合并/重放的结果，"
+                    L"不是一条能安全「挪回」的本地引用。本程序不自动撤销，处理以命令窗口输出与现场为准。"
+                 : L"「中止该流程」由 Git 重写工作区与索引、回到流程开始前的状态；它本身已是回退动作，"
+                    L"且不止涉及一个引用。本程序不在此之上再自动撤销。";
   const std::wstring commandLabel = plan_.commandLabel;
   if (!host.LaunchCommandWindow(operation, options)) {
     host.SetStatus(L"这条命令没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。"

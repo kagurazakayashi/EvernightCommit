@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "app/commit_form_session.h"
+#include "app/operation_history.h"
 #include "app/submodule_journey.h"  // HeldForm：子模块导航交还表单时要倒回的那一份
 #include "app/task_coordinator.h"
 #include "git/author_config.h"
@@ -62,6 +63,10 @@ struct CommandLaunchOptions {
   // 两个位互斥：一次操作只能是其中一种，控制器据此认出该用哪一种措辞补完结论。
   bool conflictContinueOperation = false;
   bool conflictAbortOperation = false;
+  // 操作历史（可选新增功能）：这次写操作若要落一条历史，随操作带走那份「用户已确认的结构化事实」
+  // （分支/远端引用、完整对象 ID、发布 URL、引用级恢复线索）。record=false 表示这一类操作不落历史
+  // （查看、status、以及被用户取消的）。发布 URL 在这里是未掩码原值，装配层统一掩码后才落盘/展示。
+  app::HistoryCapture history;
 };
 
 // 决策点一次性取用的仓库与界面只读快照。操作控制器全程只能用这里的值——不允许回头读
@@ -138,6 +143,10 @@ public:
   virtual void ScheduleRefresh() = 0;
   // 把一段结论交给协调器保管：紧随其后的自动刷新会把它和仓库现状并排显示在同一行里。
   virtual void RememberOperationConclusion(std::wstring_view conclusion) = 0;
+
+  // 推送核实回来后，把逐目标的送达/未核实/不符结论作为「追加证据」登记进本窗口最近一条
+  // 推送记录（单窗口内推送串行，命令窗口单槽，指向明确）。这是复核只追加、不改命令终态的落点。
+  virtual void RecordPushVerification(std::wstring_view verificationSummary) = 0;
 
   // 导航用的仓库切换：把界面绑定的仓库整个换到给出的目录，走的就是既有的那条链路
   // （后台识别 → 绑定 → 作废旧列表 → 重读 → 作者默认值重查），不另开一套。
