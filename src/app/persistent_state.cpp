@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "app/decimal_text.h"  // ParseNonNegativeDecimal / ParseInt32Decimal：带上下界、不溢出的数字解析
 #include "git/repository.h"
 
 namespace gc::app {
@@ -106,53 +107,17 @@ std::vector<std::wstring_view> SplitPipes(std::wstring_view line) {
   return parts;
 }
 
-// 严格非负十进制整数：只允许 '0'..'9'，最多 19 位（不猜上界溢出后的值）。
-bool ParseNonNegative(std::wstring_view text, long long* out) {
-  if (text.empty() || text.size() > 19) {
-    return false;
-  }
-  long long value = 0;
-  for (const wchar_t c : text) {
-    if (c < L'0' || c > L'9') {
-      return false;
-    }
-    value = value * 10 + static_cast<long long>(c - L'0');
-  }
-  *out = value;
-  return true;
+// 严格非负十进制整数：只允许 '0'..'9'，并且结果必须落在 [0, upperInclusive]。
+// 上界在乘加之前判定（见 app/decimal_text.h），所以损坏文件里的超长数字只会整份拒绝，
+// 不会先溢出回绕成一个负数再被当成有效数据——这与 operation_history 用的是同一套解析。
+bool ParseNonNegative(std::wstring_view text, long long upperInclusive, long long* out) {
+  return ParseNonNegativeDecimal(text, upperInclusive, out);
 }
 
-// 严格带符号十进制整数（窗口坐标可以为负）。
+// 严格带符号十进制整数（窗口坐标可以为负）：上界就是 int 的表示范围，
+// 缩窄之前已经判过，因此不存在截断。
 bool ParseSigned(std::wstring_view text, int* out) {
-  if (text.empty() || text.size() > 11) {
-    return false;
-  }
-  size_t index = 0;
-  bool negative = false;
-  if (text[0] == L'-') {
-    negative = true;
-    index = 1;
-  }
-  if (index >= text.size()) {
-    return false;
-  }
-  long long value = 0;
-  for (; index < text.size(); ++index) {
-    const wchar_t c = text[index];
-    if (c < L'0' || c > L'9') {
-      return false;
-    }
-    value = value * 10 + static_cast<long long>(c - L'0');
-    if (value > 4294967296LL) {  // 屏幕坐标不可能到这个量级；到了就是坏数据。
-      return false;
-    }
-  }
-  const long long signedValue = negative ? -value : value;
-  if (signedValue < -2147483648LL || signedValue > 2147483647LL) {
-    return false;
-  }
-  *out = static_cast<int>(signedValue);
-  return true;
+  return ParseInt32Decimal(text, -2147483648LL, 2147483647LL, out);
 }
 
 bool ParseFlag(std::wstring_view text, bool* out) {
@@ -465,18 +430,20 @@ PersistentLoadResult ParsePersistentState(std::wstring_view text) {
   bool hasGit = false;
 
   size_t firstRecord = 0;
-  int version = -1;
+  long long version = -1;
   {
     // 首行是版本头吗：`evernightcommit.prefs|<n>`。不是就按未分版本的老文件（v0）迁移。
     const std::vector<std::wstring_view> head = SplitPipes(lines[0]);
     if (head.size() == 2 && head[0] == std::wstring_view(kMagicName)) {
       long long parsedVersion = 0;
-      if (!ParseNonNegative(head[1], &parsedVersion) || parsedVersion > 4294967296LL) {
+      // 版本号不设业务上界，也不截断成 int：自报得比本程序新都只影响 tooNew 的措辞，
+      // 而「不应用、不覆盖」的保护必须优先于「大到 int 装不下」这种极端数值。
+      if (!ParseNonNegative(head[1], kDecimalLongLongMax, &parsedVersion)) {
         result.status = PersistentLoadStatus::corrupt;
         result.reason = L"版本头的版本号不成立";
         return result;
       }
-      version = static_cast<int>(parsedVersion);
+      version = parsedVersion;
       firstRecord = 1;
     }
   }
@@ -551,7 +518,7 @@ PersistentLoadResult ParsePersistentState(std::wstring_view text) {
         return corrupt(L"修订号形态不对");
       }
       long long revision = 0;
-      if (!ParseNonNegative(decoded, &revision)) {
+      if (!ParseNonNegative(decoded, kDecimalLongLongMax, &revision)) {
         return corrupt(L"修订号不是非负十进制整数");
       }
       hasRevision = true;
@@ -655,7 +622,7 @@ PersistentLoadResult ParsePersistentState(std::wstring_view text) {
       return corrupt(L"同一个仓库有两份草稿");
     }
     long long epoch = 0;
-    if (!ParseNonNegative(parts[3], &epoch)) {
+    if (!ParseNonNegative(parts[3], kDecimalLongLongMax, &epoch)) {
       return corrupt(L"草稿的保存时刻不是非负整数");
     }
     draft.savedAtEpoch = epoch;
@@ -680,9 +647,8 @@ PersistentLoadResult ParsePersistentState(std::wstring_view text) {
       return corrupt(L"草稿正文的转义不成立");
     }
     long long coauthorCount = 0;
-    if (!ParseNonNegative(parts[10], &coauthorCount) ||
-        coauthorCount != static_cast<long long>(parts.size() - 11) ||
-        coauthorCount > static_cast<long long>(kMaxDraftContentChars)) {
+    if (!ParseNonNegative(parts[10], static_cast<long long>(kMaxDraftContentChars), &coauthorCount) ||
+        coauthorCount != static_cast<long long>(parts.size() - 11)) {
       return corrupt(L"草稿的合作者条数与尾巴字段对不上");
     }
     for (long long i = 0; i < coauthorCount; ++i) {

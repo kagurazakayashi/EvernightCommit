@@ -156,6 +156,22 @@ struct PushConfigListing {
 // 免得 `fatal: … 'https://user:token@host'` 這種回答把口令攤到螢幕上。
 [[nodiscard]] std::wstring MaskPushUrlCredentialsInText(std::wstring_view text);
 
+// ---- 落盘/导出用的保守脱敏（比展示掩码多去掉查询串与 fragment）----
+// 上面两道只收 userinfo，而对象存储型远端把令牌放在**查询串**里（Azure Blob、SAS、
+// 各类 presigned URL：`https://host/repo.git?sig=…&token=…`）或 fragment 里，那同样是凭据。
+// 凡是写进本地记录文件、导出文件、恢复说明的字段一律走这里；界面上「将要去哪个地址」
+// 仍然走上面的展示掩码，因为用户需要看见完整路径才能核对目标。
+// 这两个函数只产生「给人看/给记录用的副本」，真正执行与核实用的地址必须保持原值，
+// 绝不允许把这些返回值回填成 Git 参数。
+// 规则（保守，但不靠关键字表）：
+//   * 带 scheme 的 URL：掩码 userinfo，并去掉第一个 '?' 或 '#' 起的全部尾串（查询串 + fragment）。
+//   * scp 形态 `user@host:path`：掩码 user 段（Git 文档承认的写法，同样可能带敏感账号）。
+//   * 本机绝对路径、相对路径、不含凭据位置的文本：原样返回，绝不改动分支名或路径。
+[[nodiscard]] std::wstring MaskStoredPushUrl(std::wstring_view url);
+
+// 自由文字里的每一处 URL 按上面的规则逐处处理（多地址、句读收尾、引号包裹都要拦住）。
+[[nodiscard]] std::wstring MaskStoredPushUrlInText(std::wstring_view text);
+
 // 多個目標 URL 折成一行展示文字（逐條編號，全部已做憑據掩碼）。
 [[nodiscard]] std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls);
 
