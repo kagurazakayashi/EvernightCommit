@@ -12,10 +12,12 @@
 //     窗口的新草稿）、两个 worktree 互不覆盖、写入意图门控、MRU 交叉合并、
 //     关闭草稿保存即清空、replaceAll 只留策略。
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "app/persistent_state.h"
 #include "git/repository.h"
+#include "support/record_text.h"
 #include "support/tiny_test.h"
 
 namespace {
@@ -405,4 +407,96 @@ GC_TEST(persistent_describe_storage_path_is_metadata_only) {
   GC_CHECK(DescribeStoragePath(L"C:\\Users\\me\\AppData\\Roaming\\", L"state.prefs") ==
            std::wstring(L"C:\\Users\\me\\AppData\\Roaming\\state.prefs"));
   GC_CHECK(DescribeStoragePath(L"", L"state.prefs").find(L"取不到") != std::wstring::npos);
+}
+
+// ---- R6：数字字段带上下界解析（走公开的 ParsePersistentState）----
+
+namespace {
+
+using gc::test::BadField;
+using gc::test::ReplaceField;
+
+bool AllPrefsCorrupt(const std::wstring& valid,
+                     std::wstring_view prefix,
+                     size_t fieldIndex,
+                     const std::vector<BadField>& cases,
+                     const char* what) {
+  bool allRejected = true;
+  for (const BadField& bad : cases) {
+    const PersistentLoadResult result = ParsePersistentState(ReplaceField(valid, prefix, fieldIndex, bad.value));
+    if (result.status != PersistentLoadStatus::corrupt) {
+      allRejected = false;
+      std::string note(what);
+      note += " 没拦住：";
+      note += bad.label;
+      GC_CHECK_MESSAGE(false, note);
+    }
+  }
+  return allRejected;
+}
+
+}  // namespace
+
+GC_TEST(persistent_numeric_fields_reject_overflow_without_wrapping) {
+  const std::wstring valid = SerializePersistentState(SampleState());
+  GC_CHECK(ParsePersistentState(valid).status == PersistentLoadStatus::loaded);
+
+  // 版本号：满量程仍判 tooNew（不应用、不覆盖、不截断），越界判损坏。
+  const PersistentLoadResult hugeVersion =
+      ParsePersistentState(ReplaceField(valid, L"evernightcommit.prefs", 1, L"9223372036854775807"));
+  GC_CHECK_MESSAGE(hugeVersion.status == PersistentLoadStatus::tooNew, "超大自报版本仍须判 tooNew");
+  GC_CHECK(hugeVersion.detectedVersion == 9223372036854775807LL);
+  GC_CHECK(AllPrefsCorrupt(valid, L"evernightcommit.prefs", 1,
+                           {{"19 个 9", L"9999999999999999999"},
+                            {"上界 +1", L"9223372036854775808"},
+                            {"负号", L"-1"}},
+                           "版本号"));
+
+  // 修订号：非负路径；19 个 9 曾在这一档上有符号溢出并返回 true。
+  GC_CHECK(ParsePersistentState(ReplaceField(valid, L"revision", 1, L"0")).state.revision == 0);
+  GC_CHECK(ParsePersistentState(ReplaceField(valid, L"revision", 1, L"9223372036854775807"))
+               .state.revision == 9223372036854775807LL);
+  GC_CHECK(AllPrefsCorrupt(valid, L"revision", 1,
+                           {{"19 个 9", L"9999999999999999999"},
+                            {"超长", L"999999999999999999999999999999999999999999999999"},
+                            {"负号", L"-5"},
+                            {"空白", L" 5"},
+                            {"尾随空白", L"5 "},
+                            {"非数字", L"5a"},
+                            {"科学计数", L"1e3"}},
+                           "修订号"));
+
+  // 窗口坐标：int 上界在缩窄之前判定（此前的写法先算再比，越界值会先回绕）。
+  GC_CHECK(ParsePersistentState(ReplaceField(valid, L"window", 1, L"-8,0,1280,800,1")).state.window.valid);
+  GC_CHECK(ParsePersistentState(ReplaceField(valid, L"window", 1, L"0,0,2147483647,800,0"))
+               .state.window.width == 2147483647);
+  GC_CHECK(AllPrefsCorrupt(valid, L"window", 1,
+                           {{"宽度越 int", L"0,0,2147483648,800,0"},
+                            {"宽度 19 个 9", L"0,0,9999999999999999999,800,0"},
+                            {"坐标越界", L"99999999999,0,1280,800,0"},
+                            {"尺寸非正", L"0,0,0,800,0"}},
+                           "窗口记录"));
+
+  // 列宽千分比：业务区间仍由记录本身裁定，溢出输入整份拒绝。
+  GC_CHECK(AllPrefsCorrupt(valid, L"columns", 1,
+                           {{"溢出", L"9999999999999999999,400"},
+                            {"越 int", L"2147483648,400"},
+                            {"超出千分比", L"300,700"}},
+                           "列宽记录"));
+
+  // 草稿保存时刻与合作者条数。
+  GC_CHECK(AllPrefsCorrupt(valid, L"draft", 3,
+                           {{"19 个 9", L"9999999999999999999"},
+                            {"负号", L"-1"}},
+                           "草稿时刻"));
+  GC_CHECK(AllPrefsCorrupt(valid, L"draft", 10,
+                           {{"溢出", L"9999999999999999999"},
+                            {"与尾巴字段数不符", L"5"}},
+                           "合作者条数"));
+
+  // 墙钟六个整数同样按 int 上下界判定，不接受溢出后的回绕值。
+  GC_CHECK(AllPrefsCorrupt(valid, L"draft", 5,
+                           {{"年份溢出", L"9999999999999999999,2,29,23,59,58"},
+                            {"年份越 int", L"2147483648,2,29,23,59,58"}},
+                           "墙钟时间"));
 }

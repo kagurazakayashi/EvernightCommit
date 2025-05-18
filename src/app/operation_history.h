@@ -61,6 +61,7 @@ enum class HistoryFlow {
   firstPush,        // 首次推送 + 写上游配置
   conflictContinue, // 冲突流程「继续该流程」（会让 Git 造提交）
   conflictAbort,    // 冲突流程「中止该流程」（重写工作区与索引）
+  restore,          // 按记录做的引用恢复（只移动一个本地分支引用；追加在末尾，旧文件不受影响）
 };
 
 [[nodiscard]] std::wstring_view HistoryFlowLabel(HistoryFlow flow) noexcept;
@@ -83,6 +84,10 @@ enum class HistoryTerminal {
 };
 
 [[nodiscard]] std::wstring_view HistoryTerminalLabel(HistoryTerminal terminal) noexcept;
+
+// 这条记录是否已经有「确定的那一版结论」：inProgress 还没定，其余（含 unknown）都已定。
+// 界面在补记「结果未知」之前先问这一句，绝不把已经拿到的终态降级。
+[[nodiscard]] bool TerminalHasSettled(HistoryTerminal terminal) noexcept;
 
 // 恢复线索的类别——决定「恢复入口」对这个记录能走哪条路，也决定它绝不走哪条路。
 //   * none —— 这次操作不产生「把某个本地引用挪回去」的可审查恢复形态：
@@ -178,6 +183,7 @@ struct OperationLog {
 // 最后按 kMaxHistoryFieldChars 截断。落盘与展示前都要过这一道。
 [[nodiscard]] std::wstring SanitizeHistoryText(std::wstring_view text);
 
+
 // 记录一条操作：先校验 ID 与仓库键形态，再逐字段脱敏与限长，然后
 //   * 同 ID 已存在 —— 用「更确定的终态」升级它（inProgress 可被任何终态取代；
 //     已是确定终态的记录不被更「弱」的信息覆盖），复核证据 append 进原记录，
@@ -229,8 +235,8 @@ enum class HistoryLoadStatus {
 struct HistoryLoadResult {
   HistoryLoadStatus status = HistoryLoadStatus::empty;
   OperationLog log;
-  std::wstring reason;      // 面向用户的具体说明（不含正文）
-  int detectedVersion = 0;  // 文件自报的版本（tooNew 的措辞要用它）
+  std::wstring reason;           // 面向用户的具体说明（不含正文）
+  long long detectedVersion = 0; // 文件自报的版本（tooNew 的措辞要用它；按解析上界收下，不截断）
 };
 
 [[nodiscard]] HistoryLoadResult ParseOperationLog(std::wstring_view text);
@@ -275,6 +281,7 @@ struct HistoryMergeReport {
 
 // 命令窗口终态的分类（界面从 OperationOutcome + CommandCompletion 映射进来，各自分立）。
 enum class HistoryOutcome {
+  inProgress,     // 已启动、还没拿到任何结果（界面关掉或进程被强杀时历史里就停在这一档）
   succeeded,      // finished + 退出码策略判成功
   failed,         // finished + 退出码策略判失败
   unknown,        // 窗口提前关闭 / 超过观察期限：结果未知
@@ -319,6 +326,19 @@ struct HistoryTerminalInfo {
 // 把一份 capture + 一份终态装配成一条记录。装配点：终态已定，terminal 由 outcome 映射；
 // 「结果未知」映射成 unknown 而非成功/失败。URL 掩码、文本脱敏、对象 ID 校验都在这一层。
 // 记录不合法（ID/键/对象 ID 不成立）时返回的 record 会带 blocked 语义：AppendHistoryRecord
+// 启动一次「要落历史」的写操作之前，在公共边界上核对这份捕获里结构性必需的字段。
+// 返回空串 = 可以启动（或这次压根不落历史，无需判定）。
+//
+// 为什么要这一道：历史上出过「控制器把 record 置了 true 却漏填仓库工作区根」，结果
+// AppendHistoryRecord 因为规范键为空而拒绝整条记录——操作真的执行了，历史里却一个字都没有，
+// 用户回头找不到任何线索。漏字段是接线缺陷，就该在接线处当场报出来，而不是让它在写盘时
+// 悄悄失败（那会被读成「这次没做过任何操作」）。
+//   * 历史开关没开：什么都不会写，因此绝不因为字段缺失拦住用户的操作；
+//   * record=false：这次操作本来就不落历史，同样放行；
+//   * record=true 而归属信息缺失：拒绝启动，并把话说清是哪一项。
+[[nodiscard]] std::wstring DescribeHistoryCaptureRefusal(const HistoryCapture& capture,
+                                                        bool historyEnabled);
+
 // 会拒收并给原因，调用方据状态栏处理，绝不落一条坏记录。
 [[nodiscard]] OperationRecord ComposeHistoryRecord(std::wstring id, std::wstring workTreeRoot,
                                                    const HistoryCapture& capture,

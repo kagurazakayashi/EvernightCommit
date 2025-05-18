@@ -4,8 +4,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "app/decimal_text.h"    // ParseNonNegativeDecimal / ParseSignedDecimal：带上下界、不溢出的数字解析
 #include "git/commit_history.h"  // LooksLikeFullObjectId：对象 ID 字段落盘/读回前先按可信形态裁定
-#include "git/push_plan.h"       // MaskPushUrlCredentialsInText：任何 URL 落盘/展示前先过这一道
+#include "git/push_plan.h"       // MaskStoredPushUrlInText：任何 URL 落盘/展示前先过这一道（含查询串脱敏）
 #include "git/repository.h"      // CanonicalPathKey
 
 namespace gc::app {
@@ -96,48 +97,15 @@ std::vector<std::wstring_view> SplitPipes(std::wstring_view line) {
   return parts;
 }
 
-bool ParseNonNegative(std::wstring_view text, long long* out) {
-  if (text.empty() || text.size() > 19) {
-    return false;
-  }
-  long long value = 0;
-  for (const wchar_t c : text) {
-    if (c < L'0' || c > L'9') {
-      return false;
-    }
-    value = value * 10 + static_cast<long long>(c - L'0');
-  }
-  *out = value;
-  return true;
+// 数字字段一律走 app/decimal_text.h：上界在乘加之前判定，损坏文件里的超长数字只会
+// 被整份拒绝，不会再出现「19 位仍溢出」的有符号回绕（历史用例曾由 UBSan 复现）。
+bool ParseNonNegative(std::wstring_view text, long long upperInclusive, long long* out) {
+  return ParseNonNegativeDecimal(text, upperInclusive, out);
 }
 
 bool ParseSigned(std::wstring_view text, long long* out) {
-  if (text.empty() || text.size() > 20) {
-    return false;
-  }
-  size_t index = 0;
-  bool negative = false;
-  if (text[0] == L'-') {
-    negative = true;
-    index = 1;
-  }
-  if (index >= text.size()) {
-    return false;
-  }
-  long long value = 0;
-  for (; index < text.size(); ++index) {
-    const wchar_t c = text[index];
-    if (c < L'0' || c > L'9') {
-      return false;
-    }
-    // 退出码量级不该接近 64 位边界；到了就是坏数据，拒绝而不是回绕。
-    if (value > (9223372036854775807LL - 9) / 10) {
-      return false;
-    }
-    value = value * 10 + static_cast<long long>(c - L'0');
-  }
-  *out = negative ? -value : value;
-  return true;
+  // 退出码量级不该接近 64 位边界；到了就是坏数据，拒绝而不是回绕。
+  return ParseSignedDecimal(text, -kDecimalLongLongMax, kDecimalLongLongMax, out);
 }
 
 bool ParseFlag(std::wstring_view text, bool* out) {
@@ -165,16 +133,6 @@ bool ParseFlags3(std::wstring_view text, bool* a, bool* b, bool* c) {
   return ParseFlag(text.substr(0, first), a) &&
          ParseFlag(text.substr(first + 1, second - first - 1), b) &&
          ParseFlag(text.substr(second + 1), c);
-}
-
-// ---- 枚举取值范围 ----
-
-bool FlowInRange(long long v) { return v >= 0 && v <= static_cast<long long>(HistoryFlow::conflictAbort); }
-bool TerminalInRange(long long v) {
-  return v >= 0 && v <= static_cast<long long>(HistoryTerminal::unknown);
-}
-bool RestoreKindInRange(long long v) {
-  return v >= 0 && v <= static_cast<long long>(HistoryRestoreKind::manualRemote);
 }
 
 // 一个「可选的对象 ID」字段：空串合法（表示「这个位置本就没有对象」，如分支尚不存在），
@@ -286,6 +244,10 @@ void TrimToMaxRecords(OperationLog& log) {
 
 }  // namespace
 
+bool TerminalHasSettled(HistoryTerminal terminal) noexcept {
+  return terminal != HistoryTerminal::inProgress;
+}
+
 std::wstring_view HistoryFlowLabel(HistoryFlow flow) noexcept {
   switch (flow) {
     case HistoryFlow::unknown:
@@ -306,6 +268,8 @@ std::wstring_view HistoryFlowLabel(HistoryFlow flow) noexcept {
       return L"冲突流程继续";
     case HistoryFlow::conflictAbort:
       return L"冲突流程中止";
+    case HistoryFlow::restore:
+      return L"按记录恢复引用";
   }
   return L"未知操作";
 }
@@ -313,7 +277,9 @@ std::wstring_view HistoryFlowLabel(HistoryFlow flow) noexcept {
 std::wstring_view HistoryTerminalLabel(HistoryTerminal terminal) noexcept {
   switch (terminal) {
     case HistoryTerminal::inProgress:
-      return L"已启动，未见结果";
+      // 这条可能就是本次界面刚发出去的那一步，也可能是上一个进程留下的在途记录（甚至可能
+      // 正由另一个窗口执行）。措辞不许暗示「已经完成」，也不许猜成败或已撤销。
+      return L"已启动，未见结果（不猜成败；可能仍在别处进行）";
     case HistoryTerminal::succeeded:
       return L"成功";
     case HistoryTerminal::failed:
@@ -367,13 +333,31 @@ std::wstring SanitizeHistoryText(std::wstring_view text) {
     }
     stripped.push_back(c);
   }
-  // 2) 掩码任何 scheme://…@… 形态里内嵌的凭据（与推送链路同一份实现，避免两处口径漂移）。
-  std::wstring masked = git::MaskPushUrlCredentialsInText(stripped);
+  // 2) 落盘形态的 URL 脱敏：掩 userinfo，并去掉查询串与 fragment（对象存储型远端把
+  //    签名/令牌放在查询串里，只掩 userinfo 会把它原样留在记录与导出文件里）。
+  //    这是「副本」：真正执行与核实的地址不经过这里。
+  std::wstring masked = git::MaskStoredPushUrlInText(stripped);
   // 3) 限长：截断只影响一条元数据摘要的可读尾巴，绝不影响「恢复哪一条」这类结构化字段。
   if (masked.size() > kMaxHistoryFieldChars) {
     masked.resize(kMaxHistoryFieldChars);
   }
   return masked;
+}
+
+std::wstring DescribeHistoryCaptureRefusal(const HistoryCapture& capture, bool historyEnabled) {
+  if (!historyEnabled || !capture.record) {
+    return {};  // 不落盘的场景没有可核对的记录，也就无权拦用户的操作。
+  }
+  if (capture.workTreeRoot.empty()) {
+    return L"这次操作要记进操作历史，却没带上它属于哪个仓库工作区（接线缺陷：漏填 workTreeRoot）。";
+  }
+  if (capture.flow == HistoryFlow::unknown) {
+    return L"这次操作要记进操作历史，却没说明它是哪一类操作（接线缺陷：flow 仍是 unknown）。";
+  }
+  if (capture.operationLabel.empty()) {
+    return L"这次操作要记进操作历史，却没有操作名称（接线缺陷：operationLabel 为空）。";
+  }
+  return {};
 }
 
 bool AppendHistoryRecord(OperationLog* log, OperationRecord record, std::wstring* refusal) {
@@ -621,10 +605,13 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
       return corrupt(0, L"缺少 evernightcommit.history 版本头");
     }
     long long version = 0;
-    if (!ParseNonNegative(head[1], &version) || version > 4294967296LL) {
+    // 版本号不设业务上界：自报得比本程序新只影响 tooNew 的措辞，而 tooNew 的保护
+    // （不读取、不覆盖）必须优先于「大到 int 装不下」这种极端数值，所以按 long long
+    // 收下、结果字段也是 long long，绝不截断成一个看似合理的版本号。
+    if (!ParseNonNegative(head[1], kDecimalLongLongMax, &version)) {
       return corrupt(0, L"版本号不成立");
     }
-    result.detectedVersion = static_cast<int>(version);
+    result.detectedVersion = version;
     if (version > kHistoryFormatVersion) {
       result.status = HistoryLoadStatus::tooNew;
       result.reason = L"文件由更新版本的程序写出（版本 " + std::to_wstring(version) + L"）";
@@ -669,13 +656,14 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
         return corrupt(lineIndex, L"策略记录缺保留字段");
       }
       long long retention = 0;
-      if (!ParseNonNegative(std::wstring_view(decoded).substr(cursor, c2 - cursor), &retention) ||
-          retention > kMaxHistoryRetentionDays) {
+      if (!ParseNonNegative(std::wstring_view(decoded).substr(cursor, c2 - cursor),
+                            kMaxHistoryRetentionDays, &retention)) {
         return corrupt(lineIndex, L"保留天数不成立或超出上限");
       }
       long long maxRecords = 0;
-      if (!ParseNonNegative(std::wstring_view(decoded).substr(c2 + 1), &maxRecords) || maxRecords < 1 ||
-          maxRecords > static_cast<long long>(kMaxHistoryRecords)) {
+      if (!ParseNonNegative(std::wstring_view(decoded).substr(c2 + 1),
+                            static_cast<long long>(kMaxHistoryRecords), &maxRecords) ||
+          maxRecords < 1) {
         return corrupt(lineIndex, L"条数上限不成立或超出上限");
       }
       hasMeta = true;
@@ -701,8 +689,8 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
         const std::wstring_view stamps = parts[2];
         const size_t comma = stamps.find(L',');
         if (comma == std::wstring_view::npos || stamps.find(L',', comma + 1) != std::wstring_view::npos ||
-            !ParseNonNegative(stamps.substr(0, comma), &record.startedEpoch) ||
-            !ParseNonNegative(stamps.substr(comma + 1), &record.terminalEpoch)) {
+            !ParseNonNegative(stamps.substr(0, comma), kDecimalLongLongMax, &record.startedEpoch) ||
+            !ParseNonNegative(stamps.substr(comma + 1), kDecimalLongLongMax, &record.terminalEpoch)) {
           return corrupt(lineIndex, L"时间戳不成立");
         }
       }
@@ -724,8 +712,12 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
         }
         long long flowValue = -1;
         long long terminalValue = -1;
-        if (!ParseNonNegative(segs[0], &flowValue) || !FlowInRange(flowValue) ||
-            !ParseNonNegative(segs[1], &terminalValue) || !TerminalInRange(terminalValue) ||
+        // 枚举字段用「枚举上界就是解析上界」的写法：越界在解析阶段即整份拒绝，
+        // 后面不会再靠一次额外的范围判断来兜住已经截断过的值。
+        // 枚举字段用「枚举上界就是解析上界」的写法：越界在解析阶段即整份拒绝。
+        // 上界取当前最后一个成员（新增操作类型时这里必须一起看，否则新文件会被自己读成损坏）。
+        if (!ParseNonNegative(segs[0], static_cast<long long>(HistoryFlow::restore), &flowValue) ||
+            !ParseNonNegative(segs[1], static_cast<long long>(HistoryTerminal::unknown), &terminalValue) ||
             !ParseFlag(segs[2], &record.exitCodeKnown) || !ParseSigned(segs[3], &record.exitCode)) {
           return corrupt(lineIndex, L"操作类型或终态取值不成立");
         }
@@ -761,7 +753,8 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
         if (comma == std::wstring_view::npos) {
           return corrupt(lineIndex, L"恢复线索形态不对");
         }
-        if (!ParseNonNegative(s.substr(0, comma), &restoreValue) || !RestoreKindInRange(restoreValue) ||
+        if (!ParseNonNegative(s.substr(0, comma),
+                              static_cast<long long>(HistoryRestoreKind::manualRemote), &restoreValue) ||
             !ParseFlag(s.substr(comma + 1), &isRoot) || s.find(L',', comma + 1) != std::wstring_view::npos) {
           return corrupt(lineIndex, L"恢复线索取值不成立");
         }
@@ -835,7 +828,7 @@ HistoryLoadResult ParseOperationLog(std::wstring_view text) {
         return corrupt(lineIndex, L"复核记录字段数量不对");
       }
       HistoryReview review;
-      if (!ParseNonNegative(parts[2], &review.epoch)) {
+      if (!ParseNonNegative(parts[2], kDecimalLongLongMax, &review.epoch)) {
         return corrupt(lineIndex, L"复核时刻不是非负整数");
       }
       if (!UnescapeField(parts[3], &review.text)) {
@@ -904,6 +897,8 @@ OperationLog MergeHistoryForWrite(const OperationLog& disk, const OperationLog& 
 namespace {
 HistoryTerminal MapOutcome(HistoryOutcome outcome) {
   switch (outcome) {
+    case HistoryOutcome::inProgress:
+      return HistoryTerminal::inProgress;
     case HistoryOutcome::succeeded:
       return HistoryTerminal::succeeded;
     case HistoryOutcome::failed:

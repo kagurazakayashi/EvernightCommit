@@ -91,6 +91,18 @@ public:
   void SetRepoPath(std::wstring path) { info_.repoPath = std::move(path); }
   void SetGitExePath(std::wstring path) { info_.gitExePath = std::move(path); }
   void SetStatusNote(std::wstring note) { statusNote_ = std::move(note); }
+  // 在现有那句后面补一句，而不是重来一句：操作结论已经写进去了，随后到达的
+  // 「历史记录没写成功」这类附属信息必须并列显示，绝不能把前一句悄悄覆盖掉。
+  void AppendStatusNote(std::wstring extra) {
+    if (extra.empty()) {
+      return;
+    }
+    if (statusNote_.empty()) {
+      statusNote_ = std::move(extra);
+      return;
+    }
+    statusNote_ += L"｜" + extra;
+  }
   // 提交表单自己的说明（校验结论、合作者增删的回报、作者默认值的来源）。
   // 它與 statusNote_ 分開兩條通道：後者是「任務/倉庫現在怎麼樣」，會随刷新不断刷新；
   // 表单那句属于使用者正在做的事，不能被紧随其后的读取结论抹掉，也不该反过来盖掉操作结论。

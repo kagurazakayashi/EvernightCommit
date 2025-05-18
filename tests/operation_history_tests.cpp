@@ -1,9 +1,13 @@
 #include "app/operation_history.h"
 
+#include <algorithm>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "git/repository.h"
+#include "support/record_text.h"
 #include "support/tiny_test.h"
 
 namespace {
@@ -42,6 +46,20 @@ h::OperationLog FreshLog() {
   log.historyEnabled = true;
   return log;
 }
+
+// 一条完整可读回的历史文件文本（版本号 1、一条 undo 记录、已定终态）。
+std::wstring ValidHistoryText() {
+  h::OperationLog log = FreshLog();
+  h::OperationRecord record = MakeRecord(L"op-num");
+  record.terminal = h::HistoryTerminal::succeeded;
+  std::wstring refusal;
+  h::AppendHistoryRecord(&log, record, &refusal);
+  return h::SerializeOperationLog(log);
+}
+
+// 把「以 prefix 开头那一行」的第 fieldIndex 列（0 是记录名）换成 newValue，其余原样。
+// 落盘的字段里不含裸 '|'（序列化时已转义成 \v），所以按 '|' 切列是可靠的。
+using gc::test::ReplaceField;
 
 }  // namespace
 
@@ -450,4 +468,341 @@ GC_TEST(operation_history_compose_undo_refmove_clues) {
   GC_CHECK(rec.restoreKind == h::HistoryRestoreKind::refMove);
   GC_CHECK(rec.restoreExpectedCurrentId == FullOid('b'));
   GC_CHECK(rec.restoreUndoToObjectId == FullOid('c'));
+}
+
+// ---- R6：数字字段带上下界解析（走公开的 ParseOperationLog）----
+
+namespace {
+
+using gc::test::BadField;
+
+bool AllCorrupt(const std::wstring& valid,
+                std::wstring_view prefix,
+                size_t fieldIndex,
+                const std::vector<BadField>& cases,
+                const char* what) {
+  bool allRejected = true;
+  for (const BadField& bad : cases) {
+    const h::HistoryLoadResult result =
+        h::ParseOperationLog(ReplaceField(valid, prefix, fieldIndex, bad.value));
+    if (result.status != h::HistoryLoadStatus::corrupt) {
+      allRejected = false;
+      std::string note(what);
+      note += " 没拦住：";
+      note += bad.label;
+      GC_CHECK_MESSAGE(false, note);
+    }
+  }
+  return allRejected;
+}
+
+}  // namespace
+
+GC_TEST(operation_history_numeric_fields_reject_overflow_without_wrapping) {
+  const std::wstring valid = ValidHistoryText();
+  // 基准：原文必须能读回，否则下面的断言全是在测「怎么改都损坏」。
+  GC_CHECK(h::ParseOperationLog(valid).status == h::HistoryLoadStatus::loaded);
+
+  // 版本号：大到 long long 上界的自报版本仍判 tooNew（不应用、不覆盖），报告里不被截断；
+  // 超出 long long 的（19 个 9、上界 +1）判损坏，绝不回绕成负数再当有效版本。
+  const h::HistoryLoadResult hugeVersion =
+      h::ParseOperationLog(ReplaceField(valid, L"evernightcommit.history", 1, L"9223372036854775807"));
+  GC_CHECK_MESSAGE(hugeVersion.status == h::HistoryLoadStatus::tooNew, "超大自报版本仍须判 tooNew");
+  GC_CHECK(hugeVersion.detectedVersion == 9223372036854775807LL);
+  GC_CHECK(AllCorrupt(valid, L"evernightcommit.history", 1,
+                      {{"19 个 9", L"9999999999999999999"},
+                       {"上界 +1", L"9223372036854775808"},
+                       {"负号", L"-1"},
+                       {"超长", L"9999999999999999999999999999999999999999"}},
+                      "版本号"));
+
+  // 策略行 <enabled,retentionDays,maxRecords>：业务上界 3650 / 1..1000。
+  GC_CHECK(h::ParseOperationLog(ReplaceField(valid, L"meta", 1, L"1,3650,1000"))
+               .status == h::HistoryLoadStatus::loaded);
+  GC_CHECK(h::ParseOperationLog(ReplaceField(valid, L"meta", 1, L"1,0,1"))
+               .status == h::HistoryLoadStatus::loaded);
+  GC_CHECK(AllCorrupt(valid, L"meta", 1,
+                      {{"19 个 9", L"1,9999999999999999999,1000"},
+                       {"上界 +1", L"1,9223372036854775808,1000"},
+                       {"保留天数越界", L"1,3651,1000"},
+                       {"条数越界", L"1,3650,1001"},
+                       {"条数为 0", L"1,3650,0"},
+                       {"负号", L"1,-1,1000"},
+                       {"空白", L"1, 90,1000"},
+                       {"非数字", L"1,90,1e3"},
+                       {"多字段", L"1,90,1000,"}},
+                      "策略值"));
+
+  // 时间戳列：满量程可读回，越界与畸形整份拒绝。
+  GC_CHECK(h::ParseOperationLog(ReplaceField(valid, L"record", 2, L"9223372036854775807,0"))
+               .status == h::HistoryLoadStatus::loaded);
+  GC_CHECK(AllCorrupt(valid, L"record", 2,
+                      {{"19 个 9", L"9999999999999999999,0"},
+                       {"尾列 19 个 9", L"0,9999999999999999999"},
+                       {"上界 +1", L"9223372036854775808,0"},
+                       {"负号", L"-1,0"},
+                       {"尾列负号", L"0,-1"},
+                       {"空白", L" 0,0"},
+                       {"非数字", L"0,0x1"},
+                       {"缺一列", L"0"},
+                       {"多一列", L"0,0,0"}},
+                      "时间戳"));
+
+  // 状态列 <flow>,<terminal>,<exitKnown>,<exitCode>：枚举越界即解析上界越界。
+  GC_CHECK(h::ParseOperationLog(ReplaceField(valid, L"record", 3, L"1,1,1,-9223372036854775807"))
+               .status == h::HistoryLoadStatus::loaded);
+  GC_CHECK(AllCorrupt(valid, L"record", 3,
+                      {{"flow 越枚举", L"10,1,0,0"},  // 9 是最后一个合法操作类型，10 才越界
+                       {"terminal 越枚举", L"1,9,0,0"},
+                       {"flow 溢出", L"9999999999999999999,1,0,0"},
+                       {"退出码 19 个 9", L"1,1,0,9999999999999999999"},
+                       {"退出码上界 +1", L"1,1,0,9223372036854775808"},
+                       {"布尔位非 0/1", L"1,1,2,0"}},
+                      "状态列"));
+
+  // 恢复线索列 <restoreKind>,<restoreIsRoot>。
+  GC_CHECK(h::ParseOperationLog(ReplaceField(valid, L"record", 14, L"2,0"))
+               .status == h::HistoryLoadStatus::loaded);
+  GC_CHECK(AllCorrupt(valid, L"record", 14,
+                      {{"越枚举", L"3,0"}, {"溢出", L"9999999999999999999,0"}},
+                      "恢复线索"));
+}
+
+// ---- R7：落盘/导出/复核文本的凭据脱敏（含查询串里的令牌）----
+
+GC_TEST(operation_history_storage_redaction_covers_query_tokens) {
+  // 只用虚构秘密：这条 URL 形如对象存储型远端把签名放在查询串里。
+  const std::wstring kSecretUrl =
+      L"https://example.invalid/repo.git?access_token=TEST_SECRET&signature=TEST_SIGNATURE";
+  GC_REQUIRE(h::SanitizeHistoryText(kSecretUrl).find(L"TEST_SECRET") == std::wstring::npos,
+             "SanitizeHistoryText 必须先收掉查询串令牌");
+
+  h::HistoryCapture capture;
+  capture.record = true;
+  capture.flow = h::HistoryFlow::push;
+  capture.operationLabel = L"推送到 origin";
+  capture.workTreeRoot = L"P:\\仓库\\a@b\\proj";  // 本地路径里的 '@' 不得被脱敏改坏
+  capture.sourceRef = L"refs/heads/main";
+  capture.sourceObjectId = FullOid('a');
+  capture.targetRef = L"refs/heads/main";
+  capture.targetObjectId = FullOid('a');
+  capture.remoteName = L"origin";
+  capture.publishUrls = {kSecretUrl, L"git@scp.example.invalid:p/repo.git"};
+  capture.restoreKind = h::HistoryRestoreKind::manualRemote;
+  capture.restoreNote = L"已发布的历史不自动撤销；如需回退请自行执行 git push --force-with-lease";
+
+  h::HistoryTerminalInfo terminal;
+  terminal.outcome = h::HistoryOutcome::succeeded;
+  terminal.startedEpoch = 1700000000;
+  terminal.terminalEpoch = 1700000010;
+  terminal.exitCodeKnown = true;
+  terminal.exitCode = 0;
+  terminal.conclusion = L"Git 回答：pushed to " + kSecretUrl;
+
+  h::OperationRecord record =
+      h::ComposeHistoryRecord(L"op-redact-1", capture.workTreeRoot, capture, terminal);
+
+  // 结构化字段不受通用脱敏牵连：仓库身份、引用名、对象 ID 原样成立。
+  GC_CHECK(record.workTreeRoot == capture.workTreeRoot);
+  GC_CHECK(record.repositoryKey == gc::git::CanonicalPathKey(capture.workTreeRoot));
+  GC_CHECK(record.sourceRef == L"refs/heads/main");
+  GC_CHECK(record.targetObjectId == FullOid('a'));
+
+  // 追加核实证据与复核文本也带着同一个地址——落账的唯一入口必须把它们一起清洗。
+  h::HistoryTargetCheck check;
+  check.maskedUrl = kSecretUrl;
+  check.queried = true;
+  check.ok = true;
+  check.refPresent = true;
+  check.remoteObjectId = FullOid('a');
+  check.failure = L"复核时又贴了一次 " + kSecretUrl;
+  record.targetChecks.push_back(check);
+
+  h::OperationLog log = FreshLog();
+  std::wstring refusal;
+  GC_REQUIRE(h::AppendHistoryRecord(&log, record, &refusal), "落一条推送记录");
+  GC_REQUIRE(h::AppendHistoryReview(&log, L"op-redact-1", 1700000099,
+                                    L"ls-remote 结果来自 " + kSecretUrl),
+             "追加复核");
+
+  const std::wstring serialized = h::SerializeOperationLog(log);
+  GC_CHECK_MESSAGE(serialized.find(L"TEST_SECRET") == std::wstring::npos, "序列化文本里不得残留令牌");
+  GC_CHECK_MESSAGE(serialized.find(L"TEST_SIGNATURE") == std::wstring::npos, "序列化文本里不得残留签名");
+
+  // 读回后仍然没有：证明清洗发生在写入之前，不是显示时才补救。
+  const h::HistoryLoadResult reread = h::ParseOperationLog(serialized);
+  GC_CHECK_MESSAGE(reread.status == h::HistoryLoadStatus::loaded, "清洗后的记录仍须能读回");
+  GC_REQUIRE(reread.log.records.size() == 1, "读回一条");
+  const h::OperationRecord& back = reread.log.records[0];
+  GC_CHECK(back.workTreeRoot == capture.workTreeRoot);
+  GC_CHECK_MESSAGE(back.outcomeNote.find(L"TEST_SECRET") == std::wstring::npos, "结论里的地址须已脱敏");
+  // 两条发布 URL 各占一条（装配时已脱敏），加上落账时带核实证据的那一条，共三条。
+  GC_REQUIRE(back.targetChecks.size() == 3, "逐目标核实应挂回");
+  GC_CHECK(back.targetChecks[0].maskedUrl == L"https://example.invalid/repo.git");
+  GC_CHECK(back.targetChecks[0].failure.empty());
+  GC_CHECK(!back.targetChecks[0].queried);  // 命令窗口那刻还没核实
+  GC_CHECK(back.targetChecks[1].maskedUrl == L"***@scp.example.invalid:p/repo.git");
+  GC_CHECK(back.targetChecks[2].maskedUrl == L"https://example.invalid/repo.git");
+  GC_CHECK(back.targetChecks[2].failure.find(L"TEST_SECRET") == std::wstring::npos);
+  GC_CHECK(back.targetChecks[2].queried && back.targetChecks[2].ok);
+  GC_REQUIRE(back.reviews.size() == 1, "复核应挂回");
+  GC_CHECK(back.reviews[0].text.find(L"TEST_SECRET") == std::wstring::npos);
+  GC_REQUIRE(back.restoreNote.empty() == false, "恢复说明应保留");
+  GC_CHECK(back.restoreNote.find(L"TEST_SECRET") == std::wstring::npos);
+
+  // 导出复用同一份序列化，因此脱敏口径与存储完全一致。
+  const std::wstring exported = h::SerializeOperationLog(reread.log);
+  GC_CHECK(exported.find(L"TEST_SECRET") == std::wstring::npos);
+  GC_CHECK(exported == serialized);
+}
+
+// ---- R5：在途记录、终态沿用同一 ID、公共边界的必需字段核对 ----
+
+namespace {
+
+// 一条「现在可以启动、也确实要落历史」的捕获。
+h::HistoryCapture GoodCapture() {
+  h::HistoryCapture capture;
+  capture.record = true;
+  capture.flow = h::HistoryFlow::restore;
+  capture.operationLabel = L"按记录恢复引用";
+  capture.workTreeRoot = L"P:\\仓库\\proj";
+  capture.sourceRef = L"refs/heads/main";
+  capture.sourceObjectId = FullOid('b');
+  capture.restoreKind = h::HistoryRestoreKind::refMove;
+  capture.restoreBranchRef = L"refs/heads/main";
+  capture.restoreUndoToObjectId = FullOid('c');
+  capture.restoreExpectedCurrentId = FullOid('b');
+  return capture;
+}
+
+h::HistoryTerminalInfo TerminalFor(h::HistoryOutcome outcome, long long terminalEpoch) {
+  h::HistoryTerminalInfo terminal;
+  terminal.outcome = outcome;
+  terminal.startedEpoch = 1700000000;
+  terminal.terminalEpoch = terminalEpoch;
+  terminal.exitCodeKnown = outcome == h::HistoryOutcome::succeeded ||
+                           outcome == h::HistoryOutcome::failed;
+  terminal.exitCode = outcome == h::HistoryOutcome::succeeded ? 0 : 1;
+  terminal.completionLabel = L"退出码";
+  terminal.conclusion = L"结论";
+  return terminal;
+}
+
+}  // namespace
+
+GC_TEST(operation_history_capture_boundary_only_blocks_when_it_would_record) {
+  // 历史开关没开：不落盘，就没有「因为漏字段而拦住建操作」这回事。
+  h::HistoryCapture off = GoodCapture();
+  off.workTreeRoot.clear();
+  GC_CHECK(h::DescribeHistoryCaptureRefusal(off, /*historyEnabled=*/false).empty());
+  // 这次操作本来就不落历史（查看类、导航）：同样放行。
+  h::HistoryCapture noRecord = GoodCapture();
+  noRecord.record = false;
+  noRecord.workTreeRoot.clear();
+  GC_CHECK(h::DescribeHistoryCaptureRefusal(noRecord, true).empty());
+
+  // 要落历史却少了归属信息：当场拒绝，别让它在写盘时被整条拒掉而「查无此事」。
+  h::HistoryCapture noRoot = GoodCapture();
+  noRoot.workTreeRoot.clear();
+  const std::wstring rootRefusal = h::DescribeHistoryCaptureRefusal(noRoot, true);
+  GC_CHECK(!rootRefusal.empty());
+  GC_CHECK(rootRefusal.find(L"workTreeRoot") != std::wstring::npos);
+
+  h::HistoryCapture unknownFlow = GoodCapture();
+  unknownFlow.flow = h::HistoryFlow::unknown;
+  GC_CHECK(!h::DescribeHistoryCaptureRefusal(unknownFlow, true).empty());
+  h::HistoryCapture noLabel = GoodCapture();
+  noLabel.operationLabel.clear();
+  GC_CHECK(!h::DescribeHistoryCaptureRefusal(noLabel, true).empty());
+
+  GC_CHECK(h::DescribeHistoryCaptureRefusal(GoodCapture(), true).empty());
+}
+
+GC_TEST(operation_history_in_progress_row_is_upgraded_by_the_same_id) {
+  h::OperationLog log = FreshLog();
+  const h::HistoryCapture capture = GoodCapture();
+
+  // 启动当场：落一条「已启动，未见结果」，恢复线索当场就带着。
+  const h::OperationRecord started =
+      h::ComposeHistoryRecord(L"op-inflight", capture.workTreeRoot, capture,
+                              TerminalFor(h::HistoryOutcome::inProgress, 0));
+  GC_CHECK(started.terminal == h::HistoryTerminal::inProgress);
+  GC_CHECK_MESSAGE(started.terminalEpoch == 0, "还没有终态时刻");
+  GC_REQUIRE_MESSAGE(started.repositoryKey == gc::git::CanonicalPathKey(capture.workTreeRoot),
+                     "在途记录也必须带上仓库归属——恢复链路漏填这一项正是原缺陷");
+  std::wstring refusal;
+  GC_REQUIRE(h::AppendHistoryRecord(&log, started, &refusal), std::string("落在途记录：") + 
+                                                     std::string(refusal.begin(), refusal.end()));
+  GC_REQUIRE(log.records.size() == 1, "在途记录一条");
+
+  // 终态回来：同一个 ID 更新同一条，绝不新增第二条，也不丢已确认的线索。
+  h::OperationRecord settled =
+      h::ComposeHistoryRecord(L"op-inflight", capture.workTreeRoot, capture,
+                              TerminalFor(h::HistoryOutcome::succeeded, 1700000020));
+  settled.restoreNote = L"如需再反悔可挪回原值";
+  GC_REQUIRE(h::AppendHistoryRecord(&log, settled, &refusal), "同 ID 更新");
+  GC_REQUIRE(log.records.size() == 1, "更新不得另起一条记录");
+  GC_CHECK(log.records[0].terminal == h::HistoryTerminal::succeeded);
+  GC_CHECK(log.records[0].terminalEpoch == 1700000020);
+  GC_CHECK(log.records[0].restoreKind == h::HistoryRestoreKind::refMove);
+  GC_CHECK(log.records[0].restoreUndoToObjectId == FullOid('c'));
+  GC_CHECK(log.records[0].flow == h::HistoryFlow::restore);
+
+  // 写盘读回仍然是那一条、那一个终态（在途→终态不是只在内存里成立）。
+  const h::HistoryLoadResult reread = h::ParseOperationLog(h::SerializeOperationLog(log));
+  GC_CHECK(reread.status == h::HistoryLoadStatus::loaded);
+  GC_REQUIRE(reread.log.records.size() == 1, "读回一条");
+  GC_CHECK(reread.log.records[0].terminal == h::HistoryTerminal::succeeded);
+
+  // 迟到的「更弱的一次观察」不能把已定结果降级。
+  const h::OperationRecord late =
+      h::ComposeHistoryRecord(L"op-inflight", capture.workTreeRoot, capture,
+                              TerminalFor(h::HistoryOutcome::inProgress, 0));
+  GC_REQUIRE(h::AppendHistoryRecord(&log, late, &refusal), "补一条更弱的观察");
+  GC_REQUIRE(log.records.size() == 1, "仍然一条");
+  GC_CHECK_MESSAGE(log.records[0].terminal == h::HistoryTerminal::succeeded,
+                   "已定终态不被在途观察降级");
+  GC_CHECK(h::TerminalHasSettled(h::HistoryTerminal::succeeded));
+  GC_CHECK(h::TerminalHasSettled(h::HistoryTerminal::unknown));
+  GC_CHECK(!h::TerminalHasSettled(h::HistoryTerminal::inProgress));
+}
+
+GC_TEST(operation_history_unknown_after_restart_is_shown_as_unknown) {
+  // 进程被强杀/关窗后盘上留下的就是这条 inProgress：重启读回、按标签显示，
+  // 既不猜成功也不猜失败；时刻未知的记录还不会被保留策略当成过期丢掉。
+  h::OperationLog log = FreshLog();
+  const h::HistoryCapture capture = GoodCapture();
+  std::wstring refusal;
+  h::OperationRecord record =
+      h::ComposeHistoryRecord(L"op-orphan", capture.workTreeRoot, capture,
+                              TerminalFor(h::HistoryOutcome::inProgress, 0));
+  record.startedEpoch = 0;  // 连启动时刻都没记下
+  GC_REQUIRE(h::AppendHistoryRecord(&log, record, &refusal), "落一条孤儿在途记录");
+
+  h::HistoryLoadResult reread = h::ParseOperationLog(h::SerializeOperationLog(log));
+  GC_CHECK(reread.status == h::HistoryLoadStatus::loaded);
+  GC_REQUIRE(reread.log.records.size() == 1, "读回那一条");
+  GC_CHECK(reread.log.records[0].terminal == h::HistoryTerminal::inProgress);
+  const std::wstring_view label = h::HistoryTerminalLabel(reread.log.records[0].terminal);
+  GC_CHECK(label.find(L"未见结果") != std::wstring::npos);
+  GC_CHECK(label.find(L"不猜成败") != std::wstring::npos);
+
+  // 保留策略：时刻未知的在途记录不因「按天淘汰」被丢，但超条数上限时照样要退场。
+  h::ApplyHistoryRetention(&reread.log, 1700000000LL + 400LL * 24 * 60 * 60);
+  GC_REQUIRE(reread.log.records.size() == 1, "时刻未知不得被当成过期丢掉");
+  h::OperationLog crowded = reread.log;
+  crowded.maxRecords = 1;
+  for (int index = 0; index < 3; ++index) {
+    h::OperationRecord extra =
+        h::ComposeHistoryRecord(L"op-new-" + std::to_wstring(index), capture.workTreeRoot, capture,
+                                TerminalFor(h::HistoryOutcome::succeeded, 1800000000 + index));
+    GC_REQUIRE(h::AppendHistoryRecord(&crowded, extra, &refusal), "补几条更新的记录");
+  }
+  h::ApplyHistoryRetention(&crowded, 1800000100);
+  GC_CHECK(crowded.records.size() <= crowded.maxRecords,
+           "在途记录也参与容量裁剪：不能因为它没终态就让历史无限增长");
+  GC_CHECK(std::none_of(crowded.records.begin(), crowded.records.end(),
+                        [](const h::OperationRecord& item) { return item.id == L"op-orphan"; }),
+           "超上限时从最旧开始淘汰，在途那条同样在淘汰范围内");
 }

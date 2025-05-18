@@ -462,6 +462,167 @@ std::wstring MaskPushUrlCredentialsInText(std::wstring_view text) {
   return result;
 }
 
+namespace {
+
+// 自由文字里一处 URL 的结束位置：空白、引号、尖括号、反引号都算断开。
+// 记录文本是先去掉控制字符再送进来的，所以这里只需按「肉眼可读的分隔」切。
+size_t StoredUrlTokenEnd(std::wstring_view text, size_t from) {
+  for (size_t index = from; index < text.size(); ++index) {
+    const wchar_t c = text[index];
+    if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'"' || c == L'\'' ||
+        c == L'<' || c == L'>' || c == L'`') {
+      return index;
+    }
+  }
+  return text.size();
+}
+
+// 落盘形态的 scheme URL 主体（"://" 之后、按 token 边界截好的一段）：
+// 先整段丢掉查询串与 fragment（对象存储型远端的签名/令牌就在这两处），再掩 userinfo。
+// 丢弃发生在掩码之前，所以「 userinfo 里含 '?'」这类畸形写法也不会漏出尾串。
+std::wstring MaskStoredSchemeUrlBody(std::wstring_view body) {
+  size_t cut = body.size();
+  for (size_t index = 0; index < body.size(); ++index) {
+    if (body[index] == L'?' || body[index] == L'#') {
+      cut = index;
+      break;
+    }
+  }
+  std::wstring kept(body.substr(0, cut));
+  size_t authorityEnd = kept.size();
+  for (size_t index = 0; index < kept.size(); ++index) {
+    const wchar_t c = kept[index];
+    if (c == L'/' || c == L'\\') {
+      authorityEnd = index;
+      break;
+    }
+  }
+  if (authorityEnd == 0) {
+    return kept;  // "https:///path" 这种没有 authority 的写法：没有凭据位置可掩。
+  }
+  const size_t at = kept.find_last_of(L'@', authorityEnd - 1);
+  if (at == std::wstring_view::npos) {
+    return kept;
+  }
+  return std::wstring(L"***@") + kept.substr(at + 1);
+}
+
+// scp 形态 `user@host:path`（Git 文档承认的写法，没有 "://"）里，账号段就是敏感信息。
+// 判定收紧到「不可能误伤本机路径与邮箱」：
+//   * '@' 前的账号段不得含 ':' '/' '\'（否则那是 `C:\Users\a@b\repo` 这类本地路径）；
+//   * 账号段起点前必须是句读边界（串首、空白、引号、括号、逗号、等号）；
+//   * '@' 后到 token 结束之间的 host 段必须在遇到斜杠之前出现 ':'（邮箱没有这个冒号）。
+size_t ScpUserStart(std::wstring_view text, size_t at) {
+  if (at == 0 || at + 1 >= text.size()) {
+    return std::wstring_view::npos;
+  }
+  size_t start = at;
+  while (start > 0) {
+    const wchar_t c = text[start - 1];
+    if (c <= 0x20 || c == 0x7F || c == L'@' || c == L':' || c == L'/' || c == L'\\') {
+      break;
+    }
+    --start;
+  }
+  if (start == at) {
+    return std::wstring_view::npos;  // 空账号段：不是 scp 形态。
+  }
+  if (start > 0) {
+    const wchar_t before = text[start - 1];
+    const bool boundary = before == L' ' || before == L'\t' || before == L'"' || before == L'\'' ||
+                          before == L'(' || before == L'[' || before == L'<' || before == L'=' ||
+                          before == L',';
+    if (!boundary) {
+      return std::wstring_view::npos;
+    }
+  }
+  const size_t end = StoredUrlTokenEnd(text, at + 1);
+  const std::wstring_view host = text.substr(at + 1, end - (at + 1));
+  const size_t colon = host.find(L':');
+  if (colon == std::wstring_view::npos) {
+    return std::wstring_view::npos;
+  }
+  const size_t slash = host.find_first_of(L"\\/");
+  if (slash != std::wstring_view::npos && slash < colon) {
+    return std::wstring_view::npos;
+  }
+  return start;
+}
+
+}  // namespace
+
+std::wstring MaskStoredPushUrl(std::wstring_view url) {
+  const size_t schemeEnd = url.find(L"://");
+  if (schemeEnd != std::wstring_view::npos) {
+    const size_t end = StoredUrlTokenEnd(url, schemeEnd + 3);
+    std::wstring out(url.substr(0, schemeEnd + 3));
+    out += MaskStoredSchemeUrlBody(url.substr(schemeEnd + 3, end - (schemeEnd + 3)));
+    return out;
+  }
+  // 没有 scheme：本机绝对路径、相对路径、`\\server\share` 一类都没有凭据位置，原样返回；
+  // 只有确凿的 scp 形态才动它。
+  const size_t at = url.find(L'@');
+  if (at == std::wstring_view::npos) {
+    return std::wstring(url);
+  }
+  const size_t start = ScpUserStart(url, at);
+  if (start == std::wstring_view::npos) {
+    return std::wstring(url);
+  }
+  const size_t end = StoredUrlTokenEnd(url, at + 1);
+  std::wstring tail(url.substr(at + 1, end - (at + 1)));
+  const size_t query = tail.find_first_of(L"?#");
+  if (query != std::wstring::npos) {
+    tail.erase(query);  // scp 形态少见查询串，但保守起见同样切掉。
+  }
+  std::wstring out(url.substr(0, start));
+  out += L"***@";
+  out += tail;
+  return out;
+}
+
+std::wstring MaskStoredPushUrlInText(std::wstring_view text) {
+  std::wstring result;
+  result.reserve(text.size());
+  size_t cursor = 0;
+  while (cursor < text.size()) {
+    const size_t schemeEnd = text.find(L"://", cursor);
+    const size_t at = text.find(L'@', cursor);
+    const bool takeScheme = schemeEnd != std::wstring_view::npos &&
+                            (at == std::wstring_view::npos || schemeEnd < at);
+    if (takeScheme) {
+      const size_t end = StoredUrlTokenEnd(text, schemeEnd + 3);
+      result.append(text.substr(cursor, schemeEnd + 3 - cursor));
+      result += MaskStoredSchemeUrlBody(text.substr(schemeEnd + 3, end - (schemeEnd + 3)));
+      cursor = end;
+      continue;
+    }
+    if (at == std::wstring_view::npos) {
+      result.append(text.substr(cursor));
+      break;
+    }
+    const size_t start = ScpUserStart(text, at);
+    if (start == std::wstring_view::npos) {
+      // 不是 scp 形态（邮箱、本地路径、中文里的 '@'）：原样带到这个 '@' 之后继续找。
+      result.append(text.substr(cursor, at - cursor));
+      result.push_back(L'@');
+      cursor = at + 1;
+      continue;
+    }
+    const size_t end = StoredUrlTokenEnd(text, at + 1);
+    std::wstring tail(text.substr(at + 1, end - (at + 1)));
+    const size_t query = tail.find_first_of(L"?#");
+    if (query != std::wstring::npos) {
+      tail.erase(query);
+    }
+    result.append(text.substr(cursor, start - cursor));
+    result += L"***@";
+    result += tail;
+    cursor = end;
+  }
+  return result;
+}
+
 std::wstring FormatPushUrlList(const std::vector<std::wstring>& urls) {
   if (urls.empty()) {
     return std::wstring(L"（没能问出发布 URL）");

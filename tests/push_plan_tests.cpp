@@ -460,6 +460,50 @@ GC_TEST(push_text_masking_covers_every_url_in_a_message) {
   GC_CHECK(atOnly == L"mail me at a@b, then push https://host/r.git");
 }
 
+GC_TEST(push_storage_masking_drops_query_and_fragment_too) {
+  // 审查里复现的那一条：令牌放在查询串时，落盘形态必须把它整段去掉。
+  GC_CHECK(gc::git::MaskStoredPushUrl(
+               L"https://example.invalid/repo.git?access_token=TEST_SECRET&signature=TEST_SIGNATURE") ==
+           L"https://example.invalid/repo.git");
+  // userinfo 与查询串/fragment 同时出现：凭据位置全收，host 与路径留着供人核对目标。
+  GC_CHECK(gc::git::MaskStoredPushUrl(
+               L"https://u:TEST_SECRET@host.example:8443/o/r.git?sig=TEST_SIG#frag") ==
+           L"https://***@host.example:8443/o/r.git");
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"https://host.example/r.git#TEST_SECRET") ==
+           L"https://host.example/r.git");
+  // 百分号编码的令牌同样在查询串里，随整段一起消失。
+  GC_CHECK(!TextContains(gc::git::MaskStoredPushUrl(
+                             L"https://host.example/r.git?token=a%2Fb%3FTEST_SECRET"),
+                         L"TEST_SECRET"));
+  // scp 形态：账号段是敏感信息，路径保留。
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"git@scp.example:path/repo.git") ==
+           L"***@scp.example:path/repo.git");
+  // 本机路径、UNC、相对路径：没有凭据位置，一律原样（脱敏不得反过来改坏仓库身份）。
+  GC_CHECK(gc::git::MaskStoredPushUrl(kUrl) == std::wstring(kUrl));
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"\\\\server\\share\\repo.git") == L"\\\\server\\share\\repo.git");
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"/srv/git/repo.git") == L"/srv/git/repo.git");
+  // '@' 出现在本地路径、分支名或邮箱里时不得被误判成 scp 形态。
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"D:\\Users\\a@b\\repo") == L"D:\\Users\\a@b\\repo");
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"refs/heads/feature@exp") == L"refs/heads/feature@exp");
+  GC_CHECK(gc::git::MaskStoredPushUrl(L"zhangsan@example.com") == L"zhangsan@example.com");
+
+  // 自由文字：多处地址逐处处理，句子里的 '@' 与本地路径不受影响。
+  const std::wstring text = gc::git::MaskStoredPushUrlInText(
+      L"push https://host.example/r.git?sig=TEST_A failed; retried 'ssh://deploy:TEST_B@host.example/y.git' "
+      L"via git@scp.example:p/r.git; local D:\\bare\\origin.git and mail a@b stay");
+  GC_CHECK(!TextContains(text, L"TEST_A"));
+  GC_CHECK(!TextContains(text, L"TEST_B"));
+  GC_CHECK(TextContains(text, L"https://host.example/r.git"));
+  GC_CHECK(TextContains(text, L"ssh://***@host.example/y.git"));
+  GC_CHECK(TextContains(text, L"***@scp.example:p/r.git"));
+  GC_CHECK(TextContains(text, L"D:\\bare\\origin.git"));
+  GC_CHECK(TextContains(text, L"mail a@b stay"));
+
+  // 展示口径保持不变：用户核对发布地点时仍要看得见完整路径与查询串（只掩 userinfo）。
+  GC_CHECK(gc::git::MaskPushUrlCredentials(L"https://u:p@host.example/r.git?sig=KEEP") ==
+           L"https://***@host.example/r.git?sig=KEEP");
+}
+
 // ---- 发布远端的优先序 ----
 
 GC_TEST(push_remote_resolution_follows_git_precedence) {

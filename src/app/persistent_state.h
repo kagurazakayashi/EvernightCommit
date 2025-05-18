@@ -151,7 +151,7 @@ struct PersistentLoadResult {
   PersistentLoadStatus status = PersistentLoadStatus::empty;
   PersistentState state;
   std::wstring reason;      // 面向用户的具体说明（不含正文）
-  int detectedVersion = 0;  // 文件自报的版本（migrated/tooNew 的措辞要用它）
+  long long detectedVersion = 0;  // 文件自报的版本（migrated/tooNew 的措辞要用它；按解析上界收下，不截断）
 };
 
 [[nodiscard]] PersistentLoadResult ParsePersistentState(std::wstring_view text);
