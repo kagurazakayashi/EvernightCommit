@@ -98,6 +98,7 @@ enum class CommandPlanReject {
   quoteInPath,             // 路径含双引号：命令行引用形态无法安全表达，直接拒绝
   controlCharacterInPath,  // 路径含控制字符（含制表、换行），会截断说明书行
   illegalArgument,         // 参数含双引号或控制字符（Git 参数按语义不应需要引号）
+  emptyArguments,          // 一个参数都没有：那是裸 `git`，不是任何一条已审查的操作
   tooManyArguments,
   commandTooLong,
   illegalNonce,              // 随机口令缺失或含非 ASCII 字母数字：无法与被启动的辅助进程绑定

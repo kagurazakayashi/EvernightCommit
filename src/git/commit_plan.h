@@ -61,6 +61,18 @@ struct RepositoryWorkflowState {
   [[nodiscard]] std::wstring SpecialFlowText() const;
 };
 
+// Git 目錄流程痕跡的探測結論。與 RepositoryWorkflowState 分開是有原因的：後者只有布爾值，
+// 「沒痕跡」與「根本沒讀到」在它那六個 false 裡长得一模一樣。恢復與衝突處理這類要据此放行
+// 寫命令的鏈路必須能分辨這兩者，所以這裡把第三態明確帶出來：
+//   readable=true  + state 各布爾值 = 每一個痕跡都問出了確定答案（含「明確不存在」）；
+//   readable=false + failure        = 讀不成（目錄不可達、權限、其它錯誤），此時
+//                                     state 一律不可用作「沒有流程停着」的依據。
+struct WorkflowProbeResult {
+  bool readable = false;
+  RepositoryWorkflowState state;
+  std::wstring failure;
+};
+
 // 一個時間的兩種形态：交給 Git 的值 + 給人看的說明。
 // gitDate 為空表示平台層沒能算出這一刻（换算失敗），方案層會因此拒絕。
 struct CommitTimeChoice {

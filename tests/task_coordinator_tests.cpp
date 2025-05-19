@@ -364,3 +364,66 @@ GC_TEST(switching_repository_clears_pending_operation_conclusion) {
                        std::wstring::npos,
                    "换仓库后不再重复上个仓库的操作结论");
 }
+
+// ---- R4：控制器绑定的仓库身份快照（迟到结果与「切走又切回」的失效判定）----
+//
+// 这一组断言钉的是恢复链路上「这一步等的还是不是我绑定的那个仓库」的判定：确认框与后台复核
+// 之间用户可能切到别的仓库再切回同一路径、可能点刷新重新识别、也可能换了 git.exe。
+// 只看路径字符串这三件事都看不出来，因此代次与绝对 Git 目录都要一起比。
+GC_TEST(repository_binding_invalidates_every_identity_change_not_just_the_path) {
+  using gc::app::RepositoryBinding;
+  using gc::app::RepositoryIdentity;
+
+  RepositoryBinding binding;
+  GC_CHECK_MESSAGE(!binding.MatchesCurrent(true, RepositoryIdentity{}, L"D:\\repo\\.git",
+                                           L"C:\\git.exe", L"D:\\repo"),
+                   "没绑定过的快照一律不成立：不能拿默认值当「匹配」");
+  binding.valid = true;
+  binding.generation = 7;
+  binding.gitExePath = L"C:\\Program Files\\Git\\bin\\git.exe";
+  binding.workTreeRoot = L"D:\\repo";
+  binding.absoluteGitDir = L"D:\\repo\\.git";
+
+  RepositoryIdentity current;
+  current.generation = 7;
+  current.gitExePath = binding.gitExePath;
+  current.workTreeRoot = binding.workTreeRoot;
+  GC_CHECK(binding.MatchesCurrent(true, current, binding.absoluteGitDir, binding.gitExePath,
+                                  binding.workTreeRoot),
+           "同一身份必须放行，否则每一步都会被自己作废");
+
+  // 没有可用工作区（识别失败/裸仓库）时，身份即使字面没变也不能继续等那份结果。
+  GC_CHECK(!binding.MatchesCurrent(false, current, binding.absoluteGitDir, binding.gitExePath,
+                                   binding.workTreeRoot));
+
+  // 代次变了：切走到别的仓库再切回同一路径、或点刷新重新识别过。这时路径字符串完全一样。
+  RepositoryIdentity rebound = current;
+  ++rebound.generation;
+  GC_CHECK_MESSAGE(!binding.MatchesCurrent(true, rebound, binding.absoluteGitDir,
+                                           binding.gitExePath, binding.workTreeRoot),
+                   "切走又切回同一路径也要作废这一份确认");
+  RepositoryIdentity unbound = current;
+  unbound.generation = 0;  // 协调器还没绑定（未识别/识别中）
+  GC_CHECK(!binding.MatchesCurrent(true, unbound, binding.absoluteGitDir, binding.gitExePath,
+                                   binding.workTreeRoot));
+
+  // git.exe 换了路径要作废；大小写与前斜杠写法不算换。
+  GC_CHECK(!binding.MatchesCurrent(true, current, binding.absoluteGitDir, L"C:\\other\\git.exe",
+                                   binding.workTreeRoot));
+  GC_CHECK(binding.MatchesCurrent(true, current, binding.absoluteGitDir,
+                                  L"c:\\program files\\git\\bin\\git.exe", binding.workTreeRoot));
+
+  // 链接工作树：同一个工作区根、不同的绝对 Git 目录，就是另一个落点。
+  GC_CHECK(!binding.MatchesCurrent(true, current, L"D:\\repo\\.git\\worktrees\\other",
+                                   binding.gitExePath, binding.workTreeRoot));
+  // 工作区根本身变了。
+  GC_CHECK(!binding.MatchesCurrent(true, current, binding.absoluteGitDir, binding.gitExePath,
+                                   L"E:\\别的仓库"));
+  GC_CHECK(binding.MatchesCurrent(true, current, L"D:/repo/.git", binding.gitExePath, L"d:/REPO"));
+
+  // 后台结果带回来的目录只认绑定的那一个（大小写与斜杠写法同义）。
+  GC_CHECK(binding.MatchesProbedDirectory(L"d:\\REPO"));
+  GC_CHECK(!binding.MatchesProbedDirectory(L"E:\\别的"));
+  RepositoryBinding fresh;
+  GC_CHECK(!fresh.MatchesProbedDirectory(L"D:\\repo"));  // 没绑定过就不许认
+}
