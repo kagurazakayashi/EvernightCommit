@@ -5,7 +5,28 @@
 #include "git/repository.h"
 
 namespace gc::app {
+
+bool RepositoryBinding::MatchesCurrent(bool repoUsable, const RepositoryIdentity& identity,
+                                       std::wstring_view currentAbsoluteGitDir,
+                                       std::wstring_view currentGitExePath,
+                                       std::wstring_view currentWorkTreeRoot) const {
+  if (!valid || !repoUsable) {
+    return false;  // 沒綁定過，或此刻連可用工作區都沒有：這一步等的那份現場已經不在。
+  }
+  if (identity.generation == 0 || generation != identity.generation) {
+    return false;  // 代次不同：切走又切回同一路徑、重新識別過、換了 Git 程序都落在這裡。
+  }
+  return git::PathsEqualFolded(workTreeRoot, currentWorkTreeRoot) &&
+         git::PathsEqualFolded(absoluteGitDir, currentAbsoluteGitDir) &&
+         git::PathsEqualFolded(gitExePath, currentGitExePath);
+}
+
+bool RepositoryBinding::MatchesProbedDirectory(std::wstring_view probedDirectory) const {
+  return valid && git::PathsEqualFolded(probedDirectory, workTreeRoot);
+}
+
 namespace {
+
 
 // 身份比較走折疊路徑：Windows 路徑大小寫不敏感、正反斜杠同義，
 // 否則同一倉庫換一種寫法就會被當成「換了倉庫」而白白丟掉列表與選擇狀態。

@@ -36,6 +36,14 @@ namespace gc::platform {
 // 采样长度上限由 git::kBinaryProbeBytes 决定，超大文件因此同样只需极短一次读取。
 [[nodiscard]] git::WorktreeFileFacts ProbeWorktreeFileForPreview(std::wstring_view absolutePath);
 
+// 同一套痕迹的「带第三态」版本，供要据此放行写命令的链路使用（按记录恢复、冲突处理复核）。
+// 与上面那个的区别不是格式，而是**敢不敢说「没有」**：这里逐个痕迹问「在 / 明确不在 / 问不成」，
+// 只要有任何一个问不成（目录不可达、权限拒绝、设备错误……），readable 就是 false，
+// 调用方必须按「不能确定」处理，绝不允许把六个 false 当成「仓库里没有流程停着」。
+// 判定依据同样是档案系统的存在性事实，不启动任何子进程。
+[[nodiscard]] git::WorkflowProbeResult ProbeRepositoryWorkflowStateStrict(
+    std::wstring_view absoluteGitDir);
+
 // 探测「这个仓库里有没有特殊的 Git 流程正在走」与「索引是否正被别人写着」。
 //
 // 依据只有 Git 自己留在 Git 目录里的那些痕迹，全部是只读的「存不存在」判断：

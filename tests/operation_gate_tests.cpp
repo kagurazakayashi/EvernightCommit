@@ -1,6 +1,6 @@
-// app/operation_gate 的纯逻辑测试：五个被编排操作的准入裁决。
+// app/operation_gate 的纯逻辑测试：七个被编排操作的准入裁决。
 // 覆盖：共同前提三条的先后次序与文案、每个操作「自己已在走」的拒绝、
-// 既有互斥矩阵（刻意不对称的部分逐格钉住：创建提交不拦人、fetch 不等 pull、
+// 既有互斥矩阵（刻意不对称的部分逐格钉住：创建提交不拦人、fetch 不等 pull、conflict/restore
 // pull 要等 fetch 等）、以及一切空闲时的放行。
 // 这里钉住的是「界面此前逐条写在各入口里的拒绝说明」——改动任何一句都必须先想清楚
 // 那句长期承诺有没有变，不能顺手润色。
@@ -149,6 +149,69 @@ GC_TEST(operation_gate_cross_refusals_match_the_existing_matrix) {
   several.undo = true;
   GC_CHECK(AdmitWriteFlow(GitFlow::fetch, several, Ready(), L"fetch") ==
            L"「推送」还在走它的预检、复核或核实，请先让那一步结束，再来 fetch。");
+}
+
+GC_TEST(operation_gate_restore_waits_for_everything_and_navigation_waits_for_restore) {
+  using gc::app::DescribeNavigationRefusal;
+
+  // 恢复等其余全部六个：它发出去的是移动分支引用的写命令，整条链路等的都是「自己核对过的现状」。
+  GitFlowActivity commitBusy = NoneActive();
+  commitBusy.commit = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, commitBusy, Ready(), L"按记录恢复") ==
+           L"「创建提交」正在核对仓库现状（或正在做执行前复核），请先等那一步结束，再来按记录恢复。");
+  GitFlowActivity undoBusy = NoneActive();
+  undoBusy.undo = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, undoBusy, Ready(), L"按记录恢复") ==
+           L"「撤回最近提交」的预检还在跑，请先等它的确认框出现，再来按记录恢复。");
+  GitFlowActivity fetchBusy = NoneActive();
+  fetchBusy.fetch = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, fetchBusy, Ready(), L"按记录恢复") ==
+           L"「fetch」的目标预检还在跑，请先等它的界面出现，再来按记录恢复。");
+  GitFlowActivity pullBusy = NoneActive();
+  pullBusy.pull = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, pullBusy, Ready(), L"按记录恢复") ==
+           L"「pull」还在走它的预检、获取或整合，请先让那一步结束，再来按记录恢复。");
+  GitFlowActivity pushBusy = NoneActive();
+  pushBusy.push = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, pushBusy, Ready(), L"按记录恢复") ==
+           L"「推送」还在走它的预检、复核或核实，请先让那一步结束，再来按记录恢复。");
+  GitFlowActivity conflictBusy = NoneActive();
+  conflictBusy.conflict = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, conflictBusy, Ready(), L"按记录恢复") ==
+           L"「冲突处理」还在走它的现场读取、执行前复核或现场补报，请先让那一步结束，再来按记录恢复。");
+
+  // 自己已经在走：恢复的预检/复核/命令窗口任一阶段都算，再点不会排队。
+  GitFlowActivity restoreBusy = NoneActive();
+  restoreBusy.restore = true;
+  GC_CHECK(AdmitWriteFlow(GitFlow::restore, restoreBusy, Ready(), L"按记录恢复") ==
+           L"已经有一次「按记录恢复」在走（预检、执行前复核或命令窗口里那条引用更新），"
+           L"请等它结束或先取消那一步。");
+
+  // 与冲突处理同一条刻意不对称：其余六个不等恢复（它发命令时占的是命令窗口单槽）。
+  GC_CHECK_MESSAGE(AdmitWriteFlow(GitFlow::undo, restoreBusy, Ready(), L"撤回最近提交").empty(),
+                   "undo 不等 restore：与 conflict 同一取舍");
+  GC_CHECK_MESSAGE(AdmitWriteFlow(GitFlow::push, restoreBusy, Ready(), L"推送").empty(),
+                   "push 不等 restore");
+  GC_CHECK_MESSAGE(AdmitWriteFlow(GitFlow::conflict, restoreBusy, Ready(), L"继续该流程").empty(),
+                   "conflict 不等 restore");
+
+  // 空闲时七路全放行。
+  const GitFlowActivity idle = NoneActive();
+  for (const GitFlow flow : {GitFlow::commit, GitFlow::undo, GitFlow::fetch, GitFlow::pull,
+                             GitFlow::push, GitFlow::conflict, GitFlow::restore}) {
+    GC_CHECK_MESSAGE(AdmitWriteFlow(flow, idle, Ready(), L"操作").empty(), "空闲且前提齐备时必须放行");
+  }
+
+  // 导航：恢复在途时必须拦（换绑定的仓库会让回来的结果不属于任何人的现状）。
+  const std::wstring navRefusal = DescribeNavigationRefusal(Ready(), restoreBusy, L"进入子模块");
+  GC_CHECK_MESSAGE(navRefusal.find(L"按记录恢复") != std::wstring::npos,
+                   "导航必须点名恢复这个占路者");
+  GC_CHECK_MESSAGE(navRefusal.find(L"换掉") != std::wstring::npos, "还要说清换绑定的后果");
+  GitFlowActivity conflictOnly = NoneActive();
+  conflictOnly.conflict = true;
+  GC_CHECK(DescribeNavigationRefusal(Ready(), conflictOnly, L"进入子模块").find(L"冲突处理") !=
+           std::wstring::npos);
+  GC_CHECK(DescribeNavigationRefusal(Ready(), idle, L"进入子模块").empty());
 }
 
 }  // namespace

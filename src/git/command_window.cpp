@@ -234,6 +234,8 @@ std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
       return L"路径含控制字符，无法安全写入操作说明书";
     case CommandPlanReject::illegalArgument:
       return L"参数含双引号或控制字符";
+    case CommandPlanReject::emptyArguments:
+      return L"参数表为空（裸 git 不构成任何一条已审查的操作）";
     case CommandPlanReject::tooManyArguments:
       return L"参数数量超过上限";
     case CommandPlanReject::commandTooLong:
@@ -273,6 +275,14 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
   if (operation.repositoryDirectory.empty()) {
     return fail(CommandPlanReject::emptyWorkingDirectory,
                 std::wstring(CommandPlanRejectLabel(CommandPlanReject::emptyWorkingDirectory)));
+  }
+  // 空参数表在这条链路上只能是「接线时漏传了参数」：界面上写着要跑 git config，实际发给 Git 的
+  // 是一个字都没有的裸 git（usage 输出、退出码 1，看起来像 Git 拒绝了操作）。任何已审查的操作
+  // 方案都至少带一个参数，所以在边界上直接拒绝，而不是让它悄悄跑完再靠文案解释。
+  if (operation.arguments.empty()) {
+    return fail(CommandPlanReject::emptyArguments,
+                std::wstring(CommandPlanRejectLabel(CommandPlanReject::emptyArguments)) +
+                    L"：操作「" + operation.displayName + L"」（ID " + operation.operationId + L"）");
   }
   if (operation.arguments.size() > kMaxArguments) {
     return fail(CommandPlanReject::tooManyArguments,

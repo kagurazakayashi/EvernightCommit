@@ -36,6 +36,8 @@ using gc::git::UndoQueryOutcome;
 using gc::git::UndoQueryRead;
 using gc::git::UndoTargetKind;
 
+constexpr std::wstring_view kWorktreeRoot = L"D:\\repo";
+
 // 完整對象 ID 形狀的樁值（40 個十六進制字符）。
 constexpr std::wstring_view kShaA = L"1111111111111111111111111111111111111111";  // HEAD
 constexpr std::wstring_view kShaB = L"2222222222222222222222222222222222222222";  // 第一父
@@ -127,6 +129,13 @@ UndoPreflightQueries HealthyQueries() {
   queries.remoteRefs = Answer(0, L"refs/remotes/origin/main\n");
   queries.remoteContains = Answer(0, L"");
   queries.status = Answer(0, L"");
+  // 名字自身的形态与占用（R2 起属于撤回的必需证据）：symbolic-ref 明确答「不是符号引用」（退出码 1 + 空输出），
+  // worktree list 里这条分支只由本工作树自己检出。
+  queries.worktreeRoot = std::wstring(kWorktreeRoot);
+  queries.branchSymref = Answer(1);
+  queries.worktrees = Answer(0,
+                             L"worktree " + std::wstring(kWorktreeRoot) + L"\nHEAD " +
+                             std::wstring(kShaA) + L"\nbranch refs/heads/main\n\n");
   return queries;
 }
 
@@ -151,7 +160,7 @@ void MakeMergeShaped(UndoPreflightQueries& queries) {
 UndoCommitPlanInput InputFromQueries(const UndoPreflightQueries& queries) {
   UndoCommitPlanInput input;
   input.facts = gc::git::InterpretUndoPreflight(queries);
-  input.repositoryRoot = L"D:\\repo";
+  input.repositoryRoot = std::wstring(kWorktreeRoot);
   return input;
 }
 
@@ -171,6 +180,8 @@ GC_TEST(undo_probe_arguments_are_read_only_and_bound_to_repository) {
       gc::git::BuildUndoParentObjectArguments(dir, kShaB),
       gc::git::BuildUndoRemoteRefsArguments(dir),
       gc::git::BuildUndoRemoteContainsArguments(dir, kShaA),
+      gc::git::BuildRefSymbolicProbeArguments(dir, L"refs/heads/main"),
+      gc::git::BuildWorktreeListArguments(dir),
   };
   for (const std::vector<std::wstring>& arguments : probeGroups) {
     GC_CHECK_MESSAGE(!arguments.empty() && arguments[0] == L"-C", "每条查询必须显式 -C 绑定仓库根");
@@ -606,12 +617,13 @@ GC_TEST(plan_normal_commit_uses_update_ref_with_expected_old_value) {
   const UndoCommitPlan plan = gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries()));
   GC_CHECK_MESSAGE(!plan.blocked, Narrow(plan.blockedReason));
   GC_CHECK(!plan.requiresForce);
-  // git update-ref --create-reflog -m <說明> <完整分支引用> <父完整ID> <原完整ID>
+  // git update-ref --no-deref --create-reflog -m <說明> <完整分支引用> <父完整ID> <原完整ID>
   GC_CHECK_MESSAGE(
-      plan.arguments.size() == 7 && plan.arguments[0] == L"update-ref" &&
-          plan.arguments[1] == L"--create-reflog" && plan.arguments[2] == L"-m" &&
-          plan.arguments[3] == kReason && plan.arguments[4] == L"refs/heads/main" &&
-          plan.arguments[5] == kShaB && plan.arguments[6] == kShaA,
+      plan.arguments.size() == 8 && plan.arguments[0] == L"update-ref" &&
+          plan.arguments[1] == L"--no-deref" && plan.arguments[2] == L"--create-reflog" &&
+          plan.arguments[3] == L"-m" && plan.arguments[4] == kReason &&
+          plan.arguments[5] == L"refs/heads/main" &&
+          plan.arguments[6] == kShaB && plan.arguments[7] == kShaA,
       "普通撤回必须是带预期旧值的 git update-ref <分支引用> <父ID> <原ID>");
   GC_CHECK(plan.operationId == L"undo-commit");
   GC_CHECK(plan.commandLabel == L"git update-ref");
@@ -690,9 +702,10 @@ GC_TEST(plan_root_commit_undo_deletes_the_named_ref_with_old_value) {
   GC_CHECK(!plan.requiresForce);
   // git update-ref -d -m <說明> <完整分支引用> <原完整ID>：刪的是分支引用本身，不是 HEAD。
   GC_CHECK_MESSAGE(
-      plan.arguments.size() == 6 && plan.arguments[0] == L"update-ref" && plan.arguments[1] == L"-d" &&
-          plan.arguments[2] == L"-m" && plan.arguments[3] == kReason &&
-          plan.arguments[4] == L"refs/heads/main" && plan.arguments[5] == kShaA,
+      plan.arguments.size() == 7 && plan.arguments[0] == L"update-ref" &&
+          plan.arguments[1] == L"--no-deref" && plan.arguments[2] == L"-d" &&
+          plan.arguments[3] == L"-m" && plan.arguments[4] == kReason &&
+          plan.arguments[5] == L"refs/heads/main" && plan.arguments[6] == kShaA,
       "根提交必须走带预期旧值核对的 git update-ref -d <分支引用> <完整ID>");
   GC_CHECK(!Contains(plan.arguments, L"HEAD"));
   GC_CHECK(plan.commandLabel == L"git update-ref -d");
@@ -721,7 +734,7 @@ GC_TEST(plan_shallow_repository_with_readable_parent_needs_force) {
   GC_CHECK(TextContains(plan.previewText, L"--is-shallow-repository"));
   // 「強制」不換命令：仍然是同一條帶預期舊值的引用移動。
   GC_CHECK(plan.arguments[0] == L"update-ref" && Contains(plan.arguments, L"--create-reflog"));
-  GC_CHECK(plan.arguments[5] == kShaB && plan.arguments[6] == kShaA);
+  GC_CHECK(plan.arguments[6] == kShaB && plan.arguments[7] == kShaA);
 }
 
 GC_TEST(plan_merge_commit_undo_targets_first_parent_and_forces_confirmation) {
@@ -730,7 +743,7 @@ GC_TEST(plan_merge_commit_undo_targets_first_parent_and_forces_confirmation) {
   const UndoCommitPlan plan = gc::git::BuildUndoCommitPlan(InputFromQueries(merge));
   GC_CHECK_MESSAGE(!plan.blocked, Narrow(plan.blockedReason));
   GC_CHECK_MESSAGE(plan.requiresForce, "合并提交撤回属于要「强制撤回（仅本地）」确认的风险");
-  GC_CHECK_MESSAGE(plan.arguments[5] == kShaB, "目标必须是第一父提交");
+  GC_CHECK_MESSAGE(plan.arguments[6] == kShaB, "目标必须是第一父提交");
   GC_CHECK(plan.targetKind == UndoTargetKind::mergeParents);
   GC_CHECK(TextContains(plan.previewText, L"合并提交"));
   GC_CHECK(TextContains(plan.previewText, L"第一父提交"));
@@ -867,4 +880,149 @@ GC_TEST(undo_recheck_mismatch_refusal_is_verbatim) {
   UndoHeadFacts failedQuiet;
   failedQuiet.queryOk = false;
   GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(failedQuiet, preflight), L"原因未知"));
+}
+
+// ---- R2：目标只能是一条本地分支，且「不追随符号引用、不跨工作树」要说得出依据 ----
+
+GC_TEST(undo_refname_accepts_only_full_local_branches) {
+  // 合法：完整 refs/heads/ 引用，包括 Git 允许但对 shell 敏感的字符——界面走 Unicode 参数数组，
+  // 这些字符不是命令，不能在这里被挡掉（挡掉就等于替用户否决了一个合法分支名）。
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/main"));
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/feature/nested"));
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/demo&calc&rem"));
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/100%25done!"));
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/中文分支"));
+  GC_CHECK(gc::git::IsSafeUndoTargetRef(L"refs/heads/v1.0"));
+
+  // 非法：别的命名空间、相对名、HEAD、伪引用、空段、以 '.' 开头、'.lock' 结尾、纯数字段、
+  // 以及会破坏命令行/说明书形态的字符。
+  const wchar_t* const rejected[] = {
+      L"refs/tags/v1.0",   L"refs/remotes/origin/main", L"refs/notes/commits",
+      L"refs/stash",       L"HEAD",                     L"main",
+      L"refs/heads/",      L"refs/heads",               L"refs/",
+      L"refs/heads//x",    L"refs/heads/x/",            L"refs/heads/.hidden",
+      L"refs/heads/a.lock", L"refs/heads/123",          L"refs/heads/a/123",
+      L"refs/heads/@@{u}", L"refs/heads/a b",           L"refs/heads/a:b",
+      L"refs/heads/a~b",   L"refs/heads/a^b",           L"refs/heads/a?b",
+      L"refs/heads/a*b",   L"refs/heads/a[b",           L"refs/heads/a\"b",
+      L"refs/heads/a'b",   L"refs/heads/a`b",           L"refs/heads/a\\b",
+  };
+  for (const wchar_t* rejectedRef : rejected) {
+    GC_CHECK_MESSAGE(!gc::git::IsSafeUndoTargetRef(rejectedRef),
+                     std::string("必须挡下的引用名：") + Narrow(rejectedRef));
+  }
+}
+
+GC_TEST(undo_plan_refuses_unmovable_target_ref) {
+  // 名字自己是一条符号引用：默认形态的 update-ref 会去改它指向的那条分支。
+  UndoPreflightQueries symref = HealthyQueries();
+  symref.branchSymref = Answer(0, L"refs/heads/victim\n");
+  const UndoCommitPlan symrefPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(symref));
+  GC_CHECK_MESSAGE(symrefPlan.blocked, "符号引用必须被拒绝");
+  GC_CHECK(TextContains(symrefPlan.blockedReason, L"符号引用"));
+  GC_CHECK(TextContains(symrefPlan.blockedReason, L"refs/heads/victim"));
+  GC_CHECK_MESSAGE(symrefPlan.arguments.empty(), "拒绝时不产生任何命令");
+
+  // 这条分支正被另一个 linked worktree 检出：移动它会隔空改动那边的现场。
+  UndoPreflightQueries held = HealthyQueries();
+  held.worktrees = Answer(
+      0, L"worktree " + std::wstring(kWorktreeRoot) + L"\nHEAD " +
+             std::wstring(kShaA) + L"\nbranch refs/heads/main\n\n" +
+             L"worktree D:\\另一个工作树\nHEAD " +
+             std::wstring(kShaA) + L"\nbranch refs/heads/main\n\n");
+  const UndoCommitPlan heldPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(held));
+  GC_CHECK(heldPlan.blocked);
+  GC_CHECK(TextContains(heldPlan.blockedReason, L"另一个工作树检着用"));
+  GC_CHECK(TextContains(heldPlan.blockedReason, L"D:\\另一个工作树"));
+  GC_CHECK(heldPlan.arguments.empty());
+
+  // 「本工作树自己检出这条分支」不是占用；而实测 Git 的 porcelain 用正斜杠回答路径，
+  // 同一路径的两种写法必须算同一个工作树（否则每次都会误判成「被别人占着」）。
+  // （HealthyQueries 就是这个形态，能正常出方案。）
+  const UndoCommitPlan own = gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries()));
+  GC_CHECK_MESSAGE(!own.blocked, Narrow(own.blockedReason));
+  UndoPreflightQueries slashed = HealthyQueries();
+  // 实测 Git 的 porcelain 用正斜杠回答路径：同一路径的两种写法必须算同一个工作树。
+  slashed.worktrees = Answer(0, std::wstring(L"worktree D:/repo") +
+                                   L"\nHEAD " +
+                                   std::wstring(kShaA) + L"\nbranch refs/heads/main\n\n");
+  GC_CHECK_MESSAGE(!gc::git::BuildUndoCommitPlan(InputFromQueries(slashed)).blocked,
+                   "正斜杠回答的同一个工作树不该被判成被占用");
+
+  // 没问过 = 不知道，绝不是「没问题」：两条查询各挡一种。
+  UndoPreflightQueries symrefUnasked = HealthyQueries();
+  symrefUnasked.branchSymref = LaunchFailed();
+  const UndoCommitPlan unaskedPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(symrefUnasked));
+  GC_CHECK(unaskedPlan.blocked);
+  GC_CHECK(TextContains(unaskedPlan.blockedReason, L"没能问出"));
+
+  UndoPreflightQueries worktreesUnasked = HealthyQueries();
+  worktreesUnasked.worktrees = LaunchFailed();
+  const UndoCommitPlan worktreesPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(worktreesUnasked));
+  GC_CHECK(worktreesPlan.blocked);
+  GC_CHECK(TextContains(worktreesPlan.blockedReason, L"有没有被其它工作树（git worktree）检出"));
+
+  // 答上了但形态读不出：按「不能确定」拒绝，绝不按「没有别的占用」放行。
+  UndoPreflightQueries junkWorktrees = HealthyQueries();
+  junkWorktrees.worktrees = Answer(0, L"这一份输出根本不按 porcelain 形态回答\n");
+  const UndoCommitPlan junkPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(junkWorktrees));
+  GC_CHECK(junkPlan.blocked);
+  GC_CHECK(TextContains(junkPlan.blockedReason, L"读不出可靠形态"));
+}
+
+GC_TEST(undo_command_carries_no_deref_with_expected_old_value) {
+  const UndoCommitPlan plan = gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries()));
+  GC_REQUIRE(!plan.blocked, "健康现场应可撤回");
+  GC_REQUIRE(plan.arguments.size() >= 5, "普通撤回的参数形态");
+  GC_CHECK(plan.arguments[0] == L"update-ref");
+  GC_CHECK_MESSAGE(plan.arguments[1] == L"--no-deref", "不追随符号引用必须是命令形态的一部分");
+  GC_CHECK(Contains(plan.arguments, kReason));
+  GC_CHECK(Contains(plan.arguments, L"--create-reflog"));
+  GC_CHECK(plan.arguments.back() == std::wstring(kShaA));  // 预期旧值仍是最后一个参数
+  GC_CHECK(plan.targetRef == L"refs/heads/main");
+  GC_CHECK(plan.expectedOldObjectId == std::wstring(kShaA));
+  // 确认文字里那句「只动这一条」必须由实际命令支撑：--no-deref 要出现在说明里。
+  GC_CHECK(TextContains(plan.previewText, L"--no-deref"));
+
+  // 根提交的删除形态同样不解引用。
+  UndoPreflightQueries root = HealthyQueries();
+  MakeRootShaped(root);
+  const UndoCommitPlan rootPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(root));
+  GC_REQUIRE(!rootPlan.blocked, "非浅仓库的真根提交可撤回");
+  GC_REQUIRE(rootPlan.arguments.size() >= 4, "删除形态的参数形态");
+  GC_CHECK(rootPlan.arguments[0] == L"update-ref");
+  GC_CHECK(rootPlan.arguments[1] == L"--no-deref");
+  GC_CHECK(Contains(rootPlan.arguments, L"-d"));
+  GC_CHECK(rootPlan.arguments.back() == std::wstring(kShaA));
+  GC_CHECK(TextContains(rootPlan.previewText, L"--no-deref"));
+}
+
+GC_TEST(undo_recheck_refuses_ref_kind_changed_after_confirm) {
+  const UndoPreflightFacts preflight = gc::git::InterpretUndoPreflight(HealthyQueries());
+  GC_REQUIRE(!gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries())).blocked,
+             "基准现场本身可撤回，否则下面测不出复核查的是什么");
+
+  // 确认框期间这个名字被换成符号引用：分支与那份提交都没变，也必须拦下。
+  UndoHeadFacts becameSymref = preflight.head;
+  becameSymref.refIntegrity.symrefIsSymbolic = true;
+  becameSymref.refIntegrity.symrefTarget = L"refs/heads/other";
+  const std::wstring symrefRefusal =
+      gc::git::DescribeUndoRecheckMismatch(becameSymref, preflight);
+  GC_CHECK(!symrefRefusal.empty());
+  GC_CHECK(TextContains(symrefRefusal, L"符号引用"));
+  GC_CHECK(TextContains(symrefRefusal, L"没有执行任何命令"));
+
+  // 期间这条分支被另一个工作树检出：同样拦下。
+  UndoHeadFacts becameHeld = preflight.head;
+  becameHeld.refIntegrity.worktreeHolder = L"D:\\另一个工作树";
+  GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(becameHeld, preflight), L"另一个工作树"));
+
+  // 复核这一轮没问到形态：不知道就不动。
+  UndoHeadFacts unasked = preflight.head;
+  unasked.refIntegrity = gc::git::RefIntegrityFacts{};
+  unasked.refIntegrity.branchRefUsable = true;
+  GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(unasked, preflight), L"没能问出"));
+
+  // 原样不动时复核必须放行（否则上面几条是在测「怎么都拦」）。
+  GC_CHECK(gc::git::DescribeUndoRecheckMismatch(preflight.head, preflight).empty());
 }

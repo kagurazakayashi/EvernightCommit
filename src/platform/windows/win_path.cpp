@@ -123,12 +123,22 @@ git::WorktreeFileFacts ProbeWorktreeFileForPreview(std::wstring_view absolutePat
   const std::wstring value(absolutePath);
   const DWORD attributes = ::GetFileAttributesW(value.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
+    // GetFileAttributesW 失败时，「为什么失败」决定了能不能对存在性下结论：
+    // 只有「明确找不到」这两个错误码才是「不存在」；权限、网络、设备、名称非法等
+    // 都答不了这个问题，必须按「读不到属性」返回，绝不能伪装成文件消失了，也不能
+    // 反过来把「不存在」标成存在（此前正是这个反向判读）。
     const DWORD error = ::GetLastError();
-    facts.probed = true;
-    facts.exists = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-    if (!facts.exists) {
-      facts.failureReason = L"读取文件属性失败（Windows 错误码 " + std::to_wstring(error) + L"）。";
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+      facts.probed = true;
+      facts.exists = false;
+      facts.failureReason = error == ERROR_FILE_NOT_FOUND
+                                ? L"该路径下没有这个文件（Windows 错误码 2）。"
+                                : L"该路径的上级目录就不存在（Windows 错误码 3）。";
+      return facts;
     }
+    facts.probed = false;  // 无法判定：存在与否都未知。
+    facts.exists = false;
+    facts.failureReason = L"读取文件属性失败（Windows 错误码 " + std::to_wstring(error) + L"）。";
     return facts;
   }
   facts.probed = true;
@@ -177,6 +187,80 @@ git::WorktreeFileFacts ProbeWorktreeFileForPreview(std::wstring_view absolutePat
   }
   facts.containsNullByte = std::find(bytes.begin(), bytes.begin() + got, '\0') != (bytes.begin() + got);
   return facts;
+}
+
+git::WorkflowProbeResult ProbeRepositoryWorkflowStateStrict(std::wstring_view absoluteGitDir) {
+  // 逐个痕迹问「在 / 明确不在 / 问不成」。只有前两种是答案；第三种一次都不许被当成「没有」。
+  // 判定依据与上面的宽松版本同源（GetFileAttributesW），区别只在对失败的处理。
+  git::WorkflowProbeResult result;
+  if (absoluteGitDir.empty()) {
+    result.failure = L"没有可用的绝对 Git 目录，无从判断仓库里停没停着流程。";
+    return result;
+  }
+  std::wstring base(absoluteGitDir);
+  if (base.back() != L'\\' && base.back() != L'/') {
+    base.push_back(L'\\');
+  }
+  // Git 目录本身要读得动：连它都不在（或访问不了），六个痕迹就一个都没问过。
+  const DWORD directoryAttributes = ::GetFileAttributesW(base.c_str());
+  if (directoryAttributes == INVALID_FILE_ATTRIBUTES) {
+    result.failure = L"读不到这个仓库的 Git 目录（Windows 错误码 " +
+                     std::to_wstring(static_cast<unsigned long>(::GetLastError())) +
+                     L"）。无从知道里面停没停着流程。";
+    return result;
+  }
+
+  enum class MarkerAnswer { absent, present, unreadable };
+  const auto ask = [&base](const wchar_t* name, bool wantDirectory) -> MarkerAnswer {
+    const std::wstring path = base + name;
+    const DWORD attributes = ::GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      const DWORD error = ::GetLastError();
+      // 与预览探测同一套口径：只有「明确找不到」才是「不在」，其余都是「问不成」。
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        return MarkerAnswer::absent;
+      }
+      return MarkerAnswer::unreadable;
+    }
+    const bool isDirectory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return isDirectory == wantDirectory ? MarkerAnswer::present : MarkerAnswer::absent;
+  };
+  const auto refuse = [&result](const wchar_t* name) {
+    result.readable = false;
+    result.failure =
+        std::wstring(L"读不到 Git 目录里的 ") + name + L" 这一项，无法确定仓库里停着什么样的流程。";
+  };
+
+  // 逐项判定并直接落到 state 的对应字段上（不用成员指针：MSVC 对限定名成员指针的
+  // 声明写法接受度差，直接赋值最好读）。
+  auto check = [&ask, &result, &refuse](const wchar_t* name, bool wantDirectory,
+                                         auto setter) {
+    const MarkerAnswer answer = ask(name, wantDirectory);
+    if (answer == MarkerAnswer::unreadable) {
+      refuse(name);
+      return false;
+    }
+    if (answer == MarkerAnswer::present) {
+      setter(result.state);
+    }
+    return true;
+  };
+  const auto markMerge = [](git::RepositoryWorkflowState& s) { s.mergeInProgress = true; };
+  const auto markRevert = [](git::RepositoryWorkflowState& s) { s.revertInProgress = true; };
+  const auto markCherryPick = [](git::RepositoryWorkflowState& s) { s.cherryPickInProgress = true; };
+  const auto markBisect = [](git::RepositoryWorkflowState& s) { s.bisectInProgress = true; };
+  const auto markIndexLock = [](git::RepositoryWorkflowState& s) { s.indexLocked = true; };
+  const auto markRebase = [](git::RepositoryWorkflowState& s) { s.rebaseInProgress = true; };
+  const bool allAnswered =
+      check(L"MERGE_HEAD", false, markMerge) && check(L"REVERT_HEAD", false, markRevert) &&
+      check(L"CHERRY_PICK_HEAD", false, markCherryPick) && check(L"BISECT_LOG", false, markBisect) &&
+      check(L"index.lock", false, markIndexLock) && check(L"rebase-merge", true, markRebase) &&
+      check(L"rebase-apply", true, markRebase);
+  if (!allAnswered) {
+    return result;  // refuse() 已经写好 failure，readable 保持 false。
+  }
+  result.readable = true;
+  return result;
 }
 
 git::RepositoryWorkflowState ProbeRepositoryWorkflowState(std::wstring_view absoluteGitDir) {

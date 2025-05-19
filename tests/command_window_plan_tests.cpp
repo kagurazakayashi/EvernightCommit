@@ -105,6 +105,23 @@ GC_TEST(command_plan_rejects_empty_fields) {
   GC_CHECK(reject == CommandPlanReject::illegalOperationId);
 }
 
+GC_TEST(command_plan_rejects_argument_less_operation) {
+  // R1 的边界：界面写着要跑某条命令、装配时把参数数组漏掉了——那是一个字都没有的裸 git。
+  // 任何已审查的操作方案都至少带一个参数，所以这里直接拒绝，而不是让它跑完再靠文案解释。
+  CommandWindowOperation bare = MakeOperation(L"C:\\git.exe", {});
+  GC_CHECK(bare.arguments.empty());
+  CommandPlanReject reject = CommandPlanReject::none;
+  std::wstring detail;
+  bool ok = true;
+  BuildLine(bare, &ok, &reject, &detail);
+  GC_CHECK(!ok);
+  GC_CHECK(reject == CommandPlanReject::emptyArguments);
+  GC_CHECK_MESSAGE(detail.find(L"参数表为空") != std::wstring::npos, "原因里要写明是参数表为空");
+  // 原因里带上是哪条操作：漏参数是接线缺陷，界面必须说得出是哪一条，而不是「Git 打了 usage」。
+  GC_CHECK_MESSAGE(detail.find(bare.displayName) != std::wstring::npos, "原因里要带操作名");
+  GC_CHECK_MESSAGE(detail.find(bare.operationId) != std::wstring::npos, "原因里要带操作 ID");
+}
+
 GC_TEST(command_plan_quotes_program_and_arguments) {
   const CommandWindowOperation operation =
       MakeOperation(L"C:\\Program Files\\Git\\bin\\git.exe", {L"status", L"--porcelain=v1"});

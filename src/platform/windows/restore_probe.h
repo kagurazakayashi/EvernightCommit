@@ -38,11 +38,10 @@ struct RestoreProbeOutcome {
 // 恢复预检的后台控制器：查询在工作线程执行，GUI 线程不冻结；连续点击时旧结果按序号作废。
 using RestoreProbeWorker = GitTaskWorker<RestoreProbeRequest, RestoreProbeOutcome>;
 
-// 「点头之后、发命令之前」的分支现值复核也走后台：只重问 <分支>^{commit} 这一条。
-[[nodiscard]] git::GitQueryResult CaptureRestoreBranchRecheck(const std::wstring& exePath,
-                                                             const std::wstring& repositoryDirectory,
-                                                             const std::wstring& branchRef,
-                                                             unsigned long timeoutMilliseconds);
-using RestoreRecheckWorker = GitTaskWorker<RestoreProbeRequest, git::GitQueryResult>;
+// 「点头之后、发命令之前」的现场复核也走后台。它与预检问同一组事实——分支现值、这条引用自身
+// 是不是符号引用、这条分支有没有被别的工作树检出、仓库里停没停着流程：只重问 OID 的话，
+// 确认框期间别人开一个「不移动分支的合并」就能带着旧授权发出写命令。
+[[nodiscard]] git::RestoreRecheckScene CaptureRestoreRecheck(const RestoreProbeRequest& request);
+using RestoreRecheckWorker = GitTaskWorker<RestoreProbeRequest, git::RestoreRecheckScene>;
 
 }  // namespace gc::platform

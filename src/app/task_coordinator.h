@@ -41,6 +41,30 @@ struct RepositoryIdentity {
   [[nodiscard]] bool Valid() const noexcept { return generation != 0 && !gitExePath.empty() && !workTreeRoot.empty(); }
 };
 
+// 一條被编排操作在發起時抓下的倉庫身份快照。與 RepositoryIdentity 的差別只在於它還帶著
+// 「絕對 Git 目錄」——鏈接工作樹下每個工作樹有自己的 Git 目錄，只比工作區根看不出換了工作樹。
+//
+// 為什麼要单独有這個快照（而不是讓控制器各自比路徑字符串）：確認框與後台複核之間可能隔著幾分鐘，
+// 期間用戶可以切到另一個倉庫再切回同一個路徑、可以點「刷新」重新識別一次、也可以換 git.exe。
+// 這些場合路徑字符串都還是「一樣」，但那份確認等的已經不是此刻的現場。代次由協調器統一遞增，
+// 因此把它一起比就能把「同一個路徑的不同一段歷史」分開。
+struct RepositoryBinding {
+  bool valid = false;
+  unsigned long long generation = 0;
+  std::wstring gitExePath;
+  std::wstring workTreeRoot;
+  std::wstring absoluteGitDir;
+
+  // 這一輪的現場還是不是綁定時那一個。repoUsable 單獨傳：它是「此刻還有沒有可用工作區」，
+  // 不屬於身份字段但任何一步都得先過這一關。
+  [[nodiscard]] bool MatchesCurrent(bool repoUsable, const RepositoryIdentity& identity,
+                                    std::wstring_view currentAbsoluteGitDir,
+                                    std::wstring_view currentGitExePath,
+                                    std::wstring_view currentWorkTreeRoot) const;
+  // 後台結果帶回來的目錄必須就是綁定那一個（问错了仓库的结果不属于这一步）。
+  [[nodiscard]] bool MatchesProbedDirectory(std::wstring_view probedDirectory) const;
+};
+
 // 一次在途讀取的憑證：序號隨請求交給工作線程、完成通知原樣帶回；
 // 身份版本由協調器自己保管（完成時只需帶序號，不必把路徑再傳回來）。
 struct ReadTicket {

@@ -20,20 +20,22 @@ namespace gc::git {
 // 索引與工作區一個字節都不動，原提交的改動相對新 HEAD 表現為「已暫存的更改」。
 // 它不是 revert（那會產生反向提交），更不是 hard reset（那會丟改動），也絕不觸碰遠端。
 //
-// 執行形態一律是帶預期舊值的原子引用更新（本任務的關鍵修復）：
-//   * 普通提交：`git update-ref --create-reflog -m <reason> <完整分支引用> <父完整ID> <原完整ID>`
+// 執行形態一律是帶預期舊值且 `--no-deref` 的原子引用更新（本任務的關鍵修復）：
+//   * 普通提交：`git update-ref --no-deref --create-reflog -m <reason> <完整分支引用> <父完整ID> <原完整ID>`
 //     —— Git 文檔寫明三參數形態「after verifying that the current value of the <ref> matches
 //     <old-oid>」，值對不上即以非 0 拒絕、引用原樣不動。
-//   * 真正根提交：`git update-ref -d -m <reason> <完整分支引用> <原完整ID>`
+//   * 真正根提交：`git update-ref --no-deref -d -m <reason> <完整分支引用> <原完整ID>`
 //     —— 文檔寫明 `-d` 形態同樣「deletes the named <ref> after verifying that it still
 //     contains <old-oid>」；刪除的是那個分支引用本身，索引與工作區照舊一字不動。
 //   兩條路徑都不再使用 `git reset --soft`（它沒有「預期舊值」這個前提：確認到執行之間分支被
 //   別的流程推進的話，軟撤回會從那個新位置再退一步，撤掉根本不屬於用戶確認的那條提交），
 //   也不再拿可變的 `HEAD` 當作目標名稱——兩個分支可以指向同一個提交，`HEAD` 換指另一個分支後，
 //   「分支引用名 + 完整舊值」纔是唯一可靠的綁定對象。
-//   符號引用（HEAD 究竟還指著哪個分支）無法由單條 update-ref 一起核對：本程序用「確認後、
-//   啟動命令窗口前的同步復核」加上引用名綁定來處理，並在確認文字裡如實說明這個殘餘窗口，
-//   不自稱鎖住了任意外部寫入者（完整事務需要 git update-ref --stdin，命令窗口沒有 stdin 通道）。
+//   `--no-deref` 是「只動你確認過的那一個名字」的根據：Git 文檔寫明默認形態會追隨符號引用去更新
+//   它指向的目標，因此那個名字本身是不是符號引用、有沒有被別的 worktree 檢出，都要先問清楚
+//   （見下方「目標引用自身的形態與佔用」）；問不到一律不放行。完整事務仍需 `git update-ref --stdin`
+//   而命令窗口沒有 stdin 通道，所以「確認後復核與啟動 Git 之間」那個窗口鎖不住，確認文字裡如實
+//   說明這一點，不自稱擋住了任意外部寫入者。
 //
 // 目標提交（父提交）必須由兩份互不相通的證據共同確認，任何不一致都明確拒絕（見 UndoTargetKind）：
 //   * `rev-list --parents -n 1 <原完整ID>`：Git 的**歷史視圖**。淺倉庫的歷史邊界會讓它把有父的
@@ -96,6 +98,69 @@ namespace gc::git {
                                                                          std::wstring_view headSha);
 // 工作區狀態復用 git/workspace_status 的同一套參數與解析：撤回要面對的「索引現狀」
 // 與界面列表必須是同一定義，不能在這裡另發一種 status。
+
+// ---- 目標引用自身的形態與佔用（撤回與「按記錄恢復」共用這一份，兩條鏈路的保證必須同口徑）----
+//
+// 為什麼還要多問這兩條：`git update-ref` 按**名字**改引用，而名字有兩件事實不問就不知道。
+//   1) 那個名字本身可能是一條符號引用（`git symbolic-ref refs/heads/x refs/heads/y` 做出來的
+//      「分支指向另一個分支」）。默認形態的 update-ref 會**追隨**它去改 y：預期舊值核對的是
+//      解引用之後的值，所以「核對了 x 的舊值」並不等於「只動 x」。實測（一次性裸倉庫，兩個提交 C）：
+//      `update-ref -d -m <reason> refs/heads/alias C`（alias→victim）刪掉的是 **victim**，
+//      alias 仍然留著並繼續指向那個已被刪的 victim。本程序把命令一律加上 `--no-deref`，
+//      並在預檢與確認後復核裡明確問「這個名字是不是符號引用」——是就拒絕，絕不無聲當普通分支處理。
+//      加了 `--no-deref` 之後，Git 讀寫與比對都按名字自己那一條記錄，確認之間被人改成符號引用的場合
+//      會因為舊值對不上而被拒；這不是完整事務（完整事務要 `update-ref --stdin`，命令窗口沒有
+//      標準輸入通道），残余窗口只有在「不追隨別人」這一點上是不變量。
+//   2) 那條分支可能正被另一個 linked worktree 檢出。移動它等於隔空改動別人的工作樹 HEAD 落點，
+//      那種場合一律拒絕（本程序只動「這個工作樹自己確認過的那條分支」）。
+// 兩條查詢都是只讀：symbolic-ref 帶 --quiet（不是符號引用 = 退出碼 1 + 空輸出，是明確答案）；
+// worktree list --porcelain 一行一條記錄，解析不出來就判「讀不回來」，絕不当「沒有別的佔用」。
+[[nodiscard]] std::vector<std::wstring> BuildRefSymbolicProbeArguments(
+    std::wstring_view repositoryDirectory, std::wstring_view branchRef);
+[[nodiscard]] std::vector<std::wstring> BuildWorktreeListArguments(
+    std::wstring_view repositoryDirectory);
+
+// `git worktree list --porcelain` 的一條記錄（只留判定要用的欄位）。
+struct WorktreeRecord {
+  std::wstring path;      // worktree <path>
+  std::wstring headOid;   // HEAD <oid>
+  std::wstring branchRef;  // branch <refs/heads/…>；游離/裸倉庫時為空
+  bool bare = false;
+  bool detached = false;
+};
+
+// 解析 porcelain 輸出。回 false = 形态不符合約定（一條 worktree 記錄都沒有、欄位順序不對、
+// 或解碼後的行不成形），調用方必須按「讀不回來」處理，絕不能把「解析不出來」當成「沒有別的佔用」。
+[[nodiscard]] bool ParseWorktreeListPorcelain(const GitQueryResult& result,
+                                              std::vector<WorktreeRecord>* out,
+                                              std::wstring* failure);
+
+// 目標引用的形態與佔用結論（布爾都是「這條查詢問沒問到明確答案」，不是「有沒有」）。
+struct RefIntegrityFacts {
+  bool branchRefUsable = false;  // 有合格完整分支引用名可問（沒有時下面幾條一律不發）
+
+  bool symrefRan = false;        // symbolic-ref <branchRef> 得到了明確答案（含明確「不是符號引用」）
+  bool symrefIsSymbolic = false; // answered → 這個名字本身是符號引用
+  std::wstring symrefTarget;     // 是符號引用時它指向哪裡（只用於措辭）
+  std::wstring symrefDetail;     // 問不成時的具體原因
+
+  bool worktreesRan = false;     // worktree list 發出了
+  bool worktreesReadable = false;  // 且輸出解析成功
+  std::wstring worktreeHolder;   // 這條分支被「別的」工作樹檢出：那个工作樹根（空 = 沒有）
+  std::wstring worktreesDetail;  // 問不成/解析不成時的具體原因
+};
+
+// 把兩條查詢判成 RefIntegrityFacts。currentWorktreeRoot 是本次操作綁定的工作樹根，
+// 「同一條分支被本工作樹自己檢出」不是佔用，只有**別的**工作樹才算。
+[[nodiscard]] RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
+                                                     const GitQueryResult& worktrees,
+                                                     std::wstring_view branchRef,
+                                                     std::wstring_view currentWorktreeRoot);
+
+// 一句話說清「為什麼這份現場不能移動這條引用」；回空串 = 可以按已確認的名字移動。
+// 順序：問不到就先拒絕（不知道不是可以）；是符號引用拒絕；被別的工作樹佔用拒絕。
+[[nodiscard]] std::wstring DescribeRefIntegrityRefusal(const RefIntegrityFacts& facts,
+                                                      std::wstring_view branchRef);
 
 // ---- 查詢結果的判讀 ----
 
@@ -174,6 +239,11 @@ struct UndoHeadFacts {
 
   UndoTargetEvidence target;  // 與 parentObjectIds 一起讀：分類決定能不能撤回、撤回去哪兒
 
+  // 這個名字自己是不是一條符號引用、這條分支有沒有被別的 linked worktree 佔用。
+  // 默認形態的 RefIntegrityFacts（symrefRan=false）表示「沒問」，方案層據此拒絕——
+  // 不知道不等於可以。
+  RefIntegrityFacts refIntegrity;
+
   std::wstring headSummary;  // 僅供確認文字展示；查不到留空，不影響可撤回性判定
 };
 
@@ -220,6 +290,12 @@ struct UndoPreflightQueries {
   GitQueryResult headSummary;
   GitQueryResult remoteRefs;
   GitQueryResult remoteContains;
+  // 目標引用自身的形態與佔用（都必須先問出分支名才發得出來；不是分支時兩條都不發）。
+  GitQueryResult branchSymref;
+  GitQueryResult worktrees;
+  // 本次操作綁定的工作樹根：用它辨別「worktree list 裡的這條分支是不是本工作樹自己檢出的」。
+  // 留空時任何命中都算別的佔用（寧可拒絕也不多動）。
+  std::wstring worktreeRoot;
   GitQueryResult status;  // porcelain v2 NUL 分隔輸出
 };
 
@@ -272,8 +348,14 @@ struct UndoCommitPlan {
   UndoTargetKind targetKind = UndoTargetKind::undetermined;
 };
 
-// 撤回目標的分支引用名校驗：必須是 refs/ 開頭的完整引用名，且不含會破壞命令行/說明書形態的字符。
-// Git 自己還會再按 refname 規則核對一次；這裡只是不讓一個來歷不明的名字進入命令。
+// 撤回/恢復目標的引用名校驗：**必須是完整的地方分支引用**（refs/heads/<分支>，分支段不為空）。
+// 之前只要求 refs/ 開頭，於是 refs/tags/…、refs/remotes/…、refs/notes/… 這類命名空間也被放行，
+// 與界面承諾的「只動用戶確認的那一條本地分支」對不上；歷史記錄文件裡的引用名按**外部輸入**對待，
+// 不因「這份文件是本程序寫的」而放寬。輪廓校验在这里，Git 自己的 check-ref-format 在預檢裡再核一次
+// （非法名以非 0 拒絕）；兩者口徑一致的規則在此實作：不許 `..`、不許 @\{、不許以 / 結尾或含空段、
+// 不許以 .lock 結尾、不許純數字段、控制字符/空白/引號/`~^:?*[\/` 一律拒絕。
+// 注意：`&`、`%`、`!` 這些 Git 認為合法的字符**不得**被這裡攔下（界面走 Unicode 參數數組，
+// 它們不是 shell 語法）；需要 shell 安全的是「復制給人的命令文本」，那由 FormatCopyableCommand 另行裁定。
 [[nodiscard]] bool IsSafeUndoTargetRef(std::wstring_view branchRef);
 
 // 主入口：核對事實並產出方案。前提不成立一律 blocked（不產生任何命令）。
