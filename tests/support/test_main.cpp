@@ -91,6 +91,7 @@ constexpr const char* kPureFiles[] = {
     "commit_message_tests.cpp",
     "commit_plan_tests.cpp",
     "conflict_state_tests.cpp",
+    "decimal_text_tests.cpp",
     "diff_view_tests.cpp",
     "environment_block_tests.cpp",  // 仅在本进程内改环境并 RAII 复原；串行运行前提见 docs/testing.md
     "fetch_plan_tests.cpp",
@@ -113,6 +114,7 @@ constexpr const char* kPureFiles[] = {
     "restore_plan_tests.cpp",
     "staging_plan_tests.cpp",
     "submodule_journey_tests.cpp",
+    "shell_text_tests.cpp",
     "submodule_navigation_tests.cpp",
     "subprocess_capture_tests.cpp",
     "subprocess_command_line_tests.cpp",
@@ -129,6 +131,8 @@ constexpr const char* kWindowsFiles[] = {
     "operation_history_store_file_tests.cpp",  // 真实历史文件读写/锁与剪贴板往返，全部在测试自己的临时根；不启动 Git、不碰用户 %APPDATA%。
     "persistent_store_file_tests.cpp",  // 真实文件读写/锁，全部在测试自己的临时根里；不启动 Git、不碰用户 %APPDATA%。
     "subprocess_capture_fixture_tests.cpp",
+    "upstream_write_flow_tests.cpp",  // UI 层控制器的接线断言（假宿主，不起子进程、不启动 Git、不碰文件系统）。
+    "win_path_probe_tests.cpp",  // 真实文件系统上的预览预检（存在性/可读性/二进位），只用测试自己的临时目录；不启动 Git。
 };
 
 // 引用 GitFixture/RemoteRig 的文件；未列入下方只读名单的用例默认含提交/推送。
@@ -202,6 +206,8 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // restore_plan_fixture_tests.cpp —— 只有 init + 一条只读 rev-parse 预检形态核对，
     // 不建提交、不推送、不动任何引用（2026-10-09 操作历史任务逐行核实）。
     "restore_branch_probe_accepts_the_query_shape_on_a_fresh_repository",
+    // R2：符号引用探测与 worktree list 两条只读查询的真实形态核对（都不改动仓库）。
+    "restore_ref_integrity_queries_match_real_git_contract",
     // repo_detect_fixture_tests.cpp —— 无提交形态的识别
     "detect_empty_repository_as_without_commits",
     "detect_plain_directory_as_not_repository",

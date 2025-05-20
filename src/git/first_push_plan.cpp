@@ -265,6 +265,64 @@ std::vector<UpstreamWriteStep> BuildUpstreamWriteSteps(std::wstring_view branchN
   return {remoteStep, mergeStep};
 }
 
+std::wstring DescribeUpstreamWriteStaleness(const PushPreflightFacts& latest,
+                                            const std::vector<UpstreamWriteStep>& steps,
+                                            std::wstring_view branchRef) {
+  if (steps.empty()) {
+    // 没有已审查过的步骤就没有「还差哪一条」可谈：调用方不该把空步骤交到这里，
+    // 但这里也不返回「可以写」——那会让上层以为还能发命令。
+    return L"没有已审查过的上游写入步骤，因此没有可写的内容。";
+  }
+  if (!latest.queryOk) {
+    return L"写上游之前问不回当前仓库状态（" +
+           (latest.queryFailure.empty() ? std::wstring(L"查询没有成功") : latest.queryFailure) +
+           L"）。不能确定这条分支现在还有没有上游，因此一条配置都不写——"
+           L"「问不到」不等于「没有」，把过时的值盖上去可能抹掉别人刚设好的上游。";
+  }
+  if (!latest.onBranch || latest.branchRef.empty()) {
+    return L"写上游之前这条分支已经不处于「在分支上」的状态（当前 HEAD " +
+           (latest.branchRef.empty() ? std::wstring(L"不再是命名分支") : latest.branchRef) +
+           L"）。要写的配置键是按分支名落的，场合变了就不能照旧方案写。";
+  }
+  if (!branchRef.empty() && latest.branchRef != std::wstring(branchRef)) {
+    return L"写上游之前当前分支已经换掉：原本要给 " + std::wstring(branchRef) +
+           L" 设上游，现在这条分支是 " + latest.branchRef +
+           L"。剩下的配置命令没有发出，已发生的结果原样留着。";
+  }
+  if (!latest.upstreamRan) {
+    return L"写上游之前没能问出这条分支的上游状态（这一条查询没有发出去或没被采认）。"
+           L"不能确定前提还在不在，因此一条配置都不写。";
+  }
+  if (latest.upstreamConfigured) {
+    // 上游在这期间出现了：逐值比对。完全一致时没有任何要写的东西；不一致时绝不覆盖别人设的。
+    const auto valueFor = [&steps](std::wstring_view suffix) -> std::wstring {
+      for (const UpstreamWriteStep& step : steps) {
+        if (step.key.size() >= suffix.size() &&
+            step.key.compare(step.key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+          return step.value;
+        }
+      }
+      return std::wstring();
+    };
+    const std::wstring wantRemote = valueFor(L".remote");
+    const std::wstring wantMerge = valueFor(L".merge");
+    const bool sameRemote = !latest.upstreamRemote.empty() && latest.upstreamRemote == wantRemote;
+    const bool sameMerge = !latest.upstreamRemoteRef.empty() && latest.upstreamRemoteRef == wantMerge;
+    std::wstring text = L"写上游之前这条分支已经有了上游：远端「" + latest.upstreamRemote +
+                        L"」的 " + latest.upstreamRemoteRef + L"（原方案要写「" + wantRemote + L"」的 " +
+                        wantMerge + L"）。";
+    if (sameRemote && sameMerge) {
+      text += L"要写的值与现状逐条相同，因此这一步没有发出任何命令——配置已经是这个样子，"
+              L"再跑一次只是重复写同一个值。";
+      return text;
+    }
+    text += L"两者不同，本程序不把别人的设置盖掉，剩下的配置命令没有发出，也不自动重试。"
+            L"确实要换成原方案那一套的话，请自己核对清楚后再执行。";
+    return text;
+  }
+  return std::wstring();
+}
+
 // ---- 對端現狀的聚合 ----
 
 FirstPushPresenceSummary SummarizeFirstPushPresence(const std::vector<PushTargetCheck>& checks) {

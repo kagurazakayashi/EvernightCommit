@@ -865,3 +865,97 @@ GC_TEST(first_push_recheck_refuses_incomplete_recheck) {
 }
 
 }  // namespace
+
+// ---- R1：写上游之前的现场复核（DescribeUpstreamWriteStaleness）----
+
+namespace {
+
+// 「前提还在」的那一份现场：还是这条分支、上游问过且明确没有。
+PushPreflightFacts StillNoUpstreamFacts() {
+  PushPreflightFacts facts;
+  facts.queryOk = true;
+  facts.onBranch = true;
+  facts.branchRef = L"refs/heads/main";
+  facts.branchName = L"main";
+  facts.headQueried = true;
+  facts.headResolved = true;
+  facts.headObjectId = std::wstring(kHead);
+  facts.upstreamRan = true;
+  facts.upstreamConfigured = false;
+  return facts;
+}
+
+std::vector<UpstreamWriteStep> TwoUpstreamSteps() {
+  return gc::git::BuildUpstreamWriteSteps(L"main", L"origin", L"refs/heads/main");
+}
+
+}  // namespace
+
+GC_TEST(first_push_upstream_staleness_only_allows_the_reviewed_plan) {
+  const std::vector<UpstreamWriteStep> steps = TwoUpstreamSteps();
+  GC_REQUIRE(steps.size() == 2, "两条上游步骤应生成成功");
+
+  // 前提原样成立：回空串，调用方据此照原方案发命令。
+  GC_CHECK(gc::git::DescribeUpstreamWriteStaleness(StillNoUpstreamFacts(), steps,
+                                                   L"refs/heads/main")
+               .empty());
+
+  // 空步骤不构成「可以写」。
+  GC_CHECK(!gc::git::DescribeUpstreamWriteStaleness(StillNoUpstreamFacts(), {}, L"refs/heads/main")
+                .empty());
+
+  // 问不回现场 = 不能确定，绝不写（「问不到」永远不是「没有」）。
+  PushPreflightFacts unreadable = StillNoUpstreamFacts();
+  unreadable.queryOk = false;
+  unreadable.queryFailure = L"git 没能启动";
+  const std::wstring refuseUnread =
+      gc::git::DescribeUpstreamWriteStaleness(unreadable, steps, L"refs/heads/main");
+  GC_CHECK(!refuseUnread.empty());
+  GC_CHECK(TextContains(refuseUnread, L"一条配置都不写"));
+  GC_CHECK(TextContains(refuseUnread, L"git 没能启动"));
+
+  PushPreflightFacts upstreamNotAsked = StillNoUpstreamFacts();
+  upstreamNotAsked.upstreamRan = false;
+  const std::wstring refuseNotAsked =
+      gc::git::DescribeUpstreamWriteStaleness(upstreamNotAsked, steps, L"refs/heads/main");
+  GC_CHECK(!refuseNotAsked.empty());
+  GC_CHECK(TextContains(refuseNotAsked, L"没能问出"));
+
+  // 分支不在了 / 换成别的分支：按分支名落的键就不再是确认过的那件事。
+  PushPreflightFacts detached = StillNoUpstreamFacts();
+  detached.onBranch = false;
+  detached.branchRef.clear();
+  const std::wstring refuseDetached =
+      gc::git::DescribeUpstreamWriteStaleness(detached, steps, L"refs/heads/main");
+  GC_CHECK(!refuseDetached.empty());
+  GC_CHECK(TextContains(refuseDetached, L"不再是命名分支"));
+
+  PushPreflightFacts switched = StillNoUpstreamFacts();
+  switched.branchRef = L"refs/heads/dev";
+  switched.branchName = L"dev";
+  const std::wstring refuseSwitched =
+      gc::git::DescribeUpstreamWriteStaleness(switched, steps, L"refs/heads/main");
+  GC_CHECK(!refuseSwitched.empty());
+  GC_CHECK(TextContains(refuseSwitched, L"当前分支已经换掉"));
+
+  // 上游在这期间被设好：值相同就无事可做（一条命令都不发），值不同绝不覆盖。
+  PushPreflightFacts alreadySame = StillNoUpstreamFacts();
+  alreadySame.upstreamConfigured = true;
+  alreadySame.upstreamRemote = L"origin";
+  alreadySame.upstreamRemoteRef = L"refs/heads/main";
+  const std::wstring sameText =
+      gc::git::DescribeUpstreamWriteStaleness(alreadySame, steps, L"refs/heads/main");
+  GC_CHECK(!sameText.empty());
+  GC_CHECK(TextContains(sameText, L"逐条相同"));
+  GC_CHECK(TextContains(sameText, L"没有发出任何命令"));
+
+  PushPreflightFacts alreadyOther = StillNoUpstreamFacts();
+  alreadyOther.upstreamConfigured = true;
+  alreadyOther.upstreamRemote = L"fork";
+  alreadyOther.upstreamRemoteRef = L"refs/heads/other";
+  const std::wstring otherText =
+      gc::git::DescribeUpstreamWriteStaleness(alreadyOther, steps, L"refs/heads/main");
+  GC_CHECK(!otherText.empty());
+  GC_CHECK(TextContains(otherText, L"不把别人的设置盖掉"));
+  GC_CHECK(TextContains(otherText, L"fork"));
+}

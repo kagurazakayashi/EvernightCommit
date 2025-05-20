@@ -109,6 +109,7 @@ add_library(gc_core STATIC
   src/git/push_plan.cpp
   src/git/repository.cpp
   src/git/restore_plan.cpp
+  src/git/shell_text.cpp
   src/git/staging_plan.cpp
   src/git/submodule_navigation.cpp
   src/git/undo_commit_plan.cpp
@@ -171,7 +172,8 @@ add_library(gc_ui STATIC
   src/ui/splitter.cpp
   src/ui/submodule_flow.cpp
   src/ui/undo_flow.cpp
-  src/ui/ui_metrics.cpp)
+  src/ui/ui_metrics.cpp
+  src/ui/upstream_write_flow.cpp)
 target_include_directories(gc_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_ui PUBLIC gc_core gc_platform
   comctl32 gdi32 user32 uxtheme)

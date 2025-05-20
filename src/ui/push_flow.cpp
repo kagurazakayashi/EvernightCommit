@@ -48,8 +48,14 @@ void PushFlow::OnProbeCompleted(OperationHost& host, const OperationContext& ctx
     return;  // 后台控制器层：期间又发起了更晚的预检，这份结果不再有意义。
   }
   const Stage stage = stage_;
-  if (stage != Stage::probe && stage != Stage::recheckProbe) {
+  if (stage != Stage::probe && stage != Stage::recheckProbe && stage != Stage::upstreamRecheck) {
     return;  // 这一次推送已经按「取消 / 结案」作废，迟到的结果原样丢掉。
+  }
+  if (stage == Stage::upstreamRecheck) {
+    // 这一份是「写配置之前再问一次现场」的结果：它问的是这次推送绑定的仓库，
+    // 不是界面此刻的仓库，所以不能套用下面那条「与当前界面根比对」的作废规则。
+    HandleUpstreamRecheck(host, ctx, outcome);
+    return;
   }
   if (!ctx.repoUsable || !git::PathsEqualFolded(outcome.repositoryDirectory, ctx.detection.root)) {
     Abandon(host, L"预检完成时仓库已经换掉，这次推送没有执行任何命令。请对现在的仓库重新点一次「推送」。");
@@ -476,120 +482,93 @@ void PushFlow::OnVerifyCompleted(OperationHost& host, const OperationContext& ct
 
   // 核实与写上游互不影响：核实只说「对端现在在哪」，写不写上游由用户当场那个决定说了算，
   // 而且只看推送那一步的成败。所以核实的结论无论哪一档，该写的照写、该跳过的照跳过。
+  // 轮到写之前还要再问一次现场：命令窗口与网络核实之间隔着几分钟，那份「这条分支还没有上游」
+  // 的前提属于点「确定」那一刻的仓库，而 git config 是覆盖式的写法。
   if (upstreamPending_) {
     upstreamPending_ = false;
-    stage_ = Stage::writingUpstream;
-    LaunchUpstreamStep(host, ctx, 0);
+    StartUpstreamRecheck(host, ctx);
     return;
   }
+  SettlePushFlow();
+}
+
+// ---- 首次推送之后：写上游配置（先复核现场，再逐条发） ----
+
+void PushFlow::StartUpstreamRecheck(OperationHost& host, const OperationContext& ctx) {
+  stage_ = Stage::upstreamRecheck;
+  platform::PushProbeRequest request;
+  request.exePath = ctx.gitExecutable;
+  // 问的是这次推送绑定的那个仓库根：界面中途换了仓库，这一步复核问的仍是刚才那条分支。
+  request.repositoryDirectory = boundRepositoryDirectory_;
+  // Git 目录只在「绑定的根就是界面当前这个仓库」时才取得到；对不上就不带，
+  // 绝不拿另一个仓库的 Git 目录去回答这个问题。
+  request.absoluteGitDir = git::PathsEqualFolded(ctx.detection.root, boundRepositoryDirectory_)
+                               ? ctx.detection.absoluteGitDir
+                               : std::wstring();
+  request.timeoutMilliseconds = kPushProbeTimeoutMs;
+  worker_.Request(ctx.notifyWindow, kPushProbeCompleted, std::move(request),
+                  [](const platform::PushProbeRequest& pending) {
+                    return platform::RunPushProbeLoad(pending);
+                  });
+  host.SetStatus(L"推送与核实都已结束，现在**只读**再问一次现场（当前是哪条分支、这条分支的上游"
+                 L"有没有被人改过），确认前提还在才发那两条 git config——这一步不接触远端、不写任何配置…");
+}
+
+void PushFlow::HandleUpstreamRecheck(OperationHost& host, const OperationContext& ctx,
+                                     const platform::PushProbeOutcome& outcome) {
+  if (!git::PathsEqualFolded(outcome.repositoryDirectory, boundRepositoryDirectory_)) {
+    host.SetStatus(L"上游设置这一步没有发出：复核问回来的不是刚才那个仓库（工作区根已经变了）。"
+                   L"那条推送本身的结果以它自己的核实为准，已经写成的配置原样留着，"
+                   L"本程序不自动回退、不自动重发。");
+    SettlePushFlow();
+    return;
+  }
+  const std::wstring stale = git::DescribeUpstreamWriteStaleness(
+      outcome.facts, firstPlan_.upstreamSteps, firstPlan_.localBranchRef);
+  if (!stale.empty()) {
+    std::wstring text =
+        L"上游设置剩下的配置命令没有发出（推送那一步的结果不受影响，结论是「" +
+        upstreamPushConclusion_ + L"」）：\n · " + stale;
+    host.SetStatus(text);
+    SettlePushFlow();
+    return;
+  }
+  StartUpstreamWrites(host, ctx);
+}
+
+void PushFlow::StartUpstreamWrites(OperationHost& host, const OperationContext& ctx) {
+  stage_ = Stage::writingUpstream;
+  UpstreamWriteFlow::Plan plan;
+  plan.steps = firstPlan_.upstreamSteps;
+  plan.branchName = firstPlan_.branchName;
+  plan.gitExecutable = ctx.gitExecutable;
+  plan.repositoryDirectory = boundRepositoryDirectory_;
+  plan.pushConclusion = upstreamPushConclusion_;
+  if (!upstreamWrites_.Begin(host, ctx, std::move(plan))) {
+    // 一条都没发出去（没有步骤、参数表为空的接线缺陷、或第一步就没启动成功）：就此结案。
+    SettlePushFlow();
+  }
+}
+
+void PushFlow::SettlePushFlow() noexcept {
   stage_ = Stage::none;
   preflight_ = platform::PushProbeOutcome{};
   firstPreflight_ = platform::FirstPushProbeOutcome{};
   plan_ = git::PushPlan{};
   firstPlan_ = git::FirstPushPlan{};
   firstPushActive_ = false;
-}
-
-void PushFlow::LaunchUpstreamStep(OperationHost& host, const OperationContext& ctx, size_t index) {
-  if (index >= firstPlan_.upstreamSteps.size()) {
-    FinishUpstreamWrites(host, L"上游设置：没有需要执行的配置命令。");
-    return;
-  }
-  const git::UpstreamWriteStep& step = firstPlan_.upstreamSteps[index];
-  upstreamStep_ = index + 1;
-
-  git::CommandWindowOperation operation;
-  operation.operationId = step.operationId;
-  operation.displayName = step.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  // 仍然绑在这次推送那个仓库根上：中途界面换了仓库，剩下的配置命令就不该发给另一个仓库。
-  operation.repositoryDirectory = boundRepositoryDirectory_;
-
-  CommandLaunchOptions options;
-  options.startedNote = L"已在命令窗口启动 " + step.commandLabel + L"（上游设置第 " +
-                        std::to_wstring(index + 1) + L"/" +
-                        std::to_wstring(firstPlan_.upstreamSteps.size()) + L" 条），等待 Git 退出码…";
-  options.scopeNotice = L"这一步只写这一把配置键：" + step.key + L" = " + step.value +
-                        L"。只影响本地分支 " + firstPlan_.branchName +
-                        L" 的上游记录，不动别的配置、不动分支与工作区，也不接触远端。";
-  options.upstreamWriteStep = static_cast<int>(index + 1);
-  if (!host.LaunchCommandWindow(operation, options)) {
-    host.SetStatus(L"上游设置这一步没能启动：命令窗口未能打开或启动失败（原因见上一行）。"
-                   L"远端与本地配置都没有被这次操作改动——那条推送本身的结果以它自己的核实为准。");
-    stage_ = Stage::none;
-    firstPreflight_ = platform::FirstPushProbeOutcome{};
-    firstPlan_ = git::FirstPushPlan{};
-    firstPushActive_ = false;
-    upstreamStep_ = 0;
-  }
+  upstreamPending_ = false;
+  upstreamPushConclusion_.clear();
 }
 
 void PushFlow::OnUpstreamStepSettled(OperationHost& host, const OperationContext& ctx, int step,
                                      bool succeeded, std::wstring_view conclusion) {
-  if (stage_ != Stage::writingUpstream || upstreamStep_ == 0 ||
-      static_cast<size_t>(step) != upstreamStep_) {
-    return;  // 迟到的、或不属于这一次操作的结果。
+  if (stage_ != Stage::writingUpstream) {
+    return;  // 不属于这一次的推送（已结案，或本来就没走到这一步）。
   }
-  if (!git::PathsEqualFolded(boundRepositoryDirectory_, ctx.detection.root)) {
-    host.SetStatus(L"上游设置停在第 " + std::to_wstring(upstreamStep_) + L" 条：界面上的仓库已经换掉，"
-                   L"剩下的配置命令没有发出。已写入的那几条原样留着，本程序不自动回退、不自动重发。\n"
-                   L" · 刚才那一步（第 " + std::to_wstring(upstreamStep_) + L" 条）在命令窗口里的结论：「" +
-                   std::wstring(conclusion) + L"」\n"
-                   L" · 推送那一步的结论：「" + upstreamPushConclusion_ + L"」");
-    stage_ = Stage::none;
-    firstPreflight_ = platform::FirstPushProbeOutcome{};
-    firstPlan_ = git::FirstPushPlan{};
-    firstPushActive_ = false;
-    upstreamStep_ = 0;
-    return;
+  if (!upstreamWrites_.OnStepSettled(host, ctx, step, succeeded, conclusion)) {
+    SettlePushFlow();
   }
-
-  const size_t done = upstreamStep_ - 1;
-  if (!succeeded) {
-    const git::UpstreamWriteStep& failed = firstPlan_.upstreamSteps[done];
-    std::wstring text = L"推送与上游设置要分开说：\n";
-    text += L" · 推送那一步：命令窗口的结论是「" + upstreamPushConclusion_ + L"」，"
-            L"对端实况见上一行状态与刚才的核实结论。\n";
-    text += L" · 上游设置：第 " + std::to_wstring(upstreamStep_) + L" 条没有写成（" +
-            failed.commandLabel + L"，命令窗口那头的结论是「" + std::wstring(conclusion) +
-            L"」）。\n";
-    for (size_t index = 0; index < done; ++index) {
-      text += L" · 第 " + std::to_wstring(index + 1) + L" 条已经写成：" +
-              firstPlan_.upstreamSteps[index].conclusion + L"\n";
-    }
-    text += L" · 剩下的 " + std::to_wstring(firstPlan_.upstreamSteps.size() - upstreamStep_) +
-            L" 条没有发出：那种场合配置只写了一半，本程序不把它当成「上游已经设好」，"
-            L"也不自动重试。请对照命令窗口里那条命令的输出自己决定要不要再跑一次。";
-    stage_ = Stage::none;
-    firstPreflight_ = platform::FirstPushProbeOutcome{};
-    firstPlan_ = git::FirstPushPlan{};
-    firstPushActive_ = false;
-    upstreamStep_ = 0;
-    host.ShowWarning(L"上游设置没有完成", text);
-    host.SetStatus(text);
-    return;
-  }
-
-  if (upstreamStep_ < firstPlan_.upstreamSteps.size()) {
-    LaunchUpstreamStep(host, ctx, upstreamStep_);
-    return;
-  }
-  std::wstring summary = L"首次推送完成：推送那一步的结论是「" + upstreamPushConclusion_ +
-                         L"」，上游设置的两条配置都已写成：\n";
-  for (const git::UpstreamWriteStep& writeStep : firstPlan_.upstreamSteps) {
-    summary += L" · " + writeStep.conclusion + L"\n";
-  }
-  summary += L"这条分支现在有了上游；下一次点「推送」走的是普通推送（目标由仓库配置定）。";
-  FinishUpstreamWrites(host, summary);
-}
-
-void PushFlow::FinishUpstreamWrites(OperationHost& host, std::wstring_view summary) {
-  stage_ = Stage::none;
-  firstPreflight_ = platform::FirstPushProbeOutcome{};
-  firstPlan_ = git::FirstPushPlan{};
-  firstPushActive_ = false;
-  upstreamStep_ = 0;
-  host.SetStatus(std::wstring(summary));
 }
 
 void PushFlow::AbandonFlow() {
@@ -600,7 +579,9 @@ void PushFlow::AbandonFlow() {
   firstPlan_ = git::FirstPushPlan{};
   firstPushActive_ = false;
   upstreamPending_ = false;
-  upstreamStep_ = 0;
+  // 通知丢失的场合：还差的那几条配置命令就是「没有发出」，不是「失败了」。
+  // 主窗口那边已经按「没有收到完成通知」把结果判成未知，这里只清自己的等待状态，绝不重发。
+  upstreamWrites_.Forget();
   upstreamPushConclusion_.clear();
   firstPushRemoteName_.clear();
   firstPushBranchName_.clear();
