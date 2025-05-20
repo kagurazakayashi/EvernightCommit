@@ -151,6 +151,20 @@ struct UpstreamWriteStep {
                                                                     std::wstring_view remoteName,
                                                                     std::wstring_view targetBranchRef);
 
+// 寫上游之前對現場的一次核實（推送與核實都在命令窗口與網路那里耗時間，其間倉庫可能被別人動過）。
+// 依據是與預檢同族的只讀事實（PushPreflightFacts）：当初「這條分支還沒有上游」這個前提要是
+// 不再成立，那份方案就已經不屬於此刻的倉庫了——`git config` 是覆蓋式的寫法，把過時的值蓋上去
+// 會抹掉別人剛設好的上游，所以這裡只判定「還能不能寫」，絕不「改成別的值再寫」。
+// 回空字串 = 前提仍然成立（可以照原方案寫）；否則回「為什麼不能寫」的完整說明。
+// 分档：
+//   * 查詢本身沒跑成 / 問不回來：不能確定，就不寫（「問不到」永遠不是「沒有」）。
+//   * 當前分支已不是当初那條（切走了或已被刪）：按分支名落的鍵就不再是確認過的那件事。
+//   * 上游已經被設好：與原方案逐值相同時无事可做（回「已是這個值」，一條命令都不發）；
+//     值不同時拒絕覆蓋，並把現在是哪一對擺出來。
+[[nodiscard]] std::wstring DescribeUpstreamWriteStaleness(const PushPreflightFacts& latest,
+                                                          const std::vector<UpstreamWriteStep>& steps,
+                                                          std::wstring_view branchRef);
+
 // ---- 選定目標之後的預檢判讀 ----
 
 // 逐發布目標的「在／不在／問不到」合成出的結論。平台層在預檢中途也用它決定

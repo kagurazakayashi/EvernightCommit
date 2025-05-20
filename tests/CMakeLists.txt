@@ -5,7 +5,6 @@ add_executable(gc_tests
   author_config_tests.cpp
   author_config_fixture_tests.cpp
   command_window_directory_tests.cpp
-  command_window_directory_tests.cpp
   command_window_fixture_tests.cpp
   command_window_plan_tests.cpp
   commit_date_tests.cpp
@@ -18,6 +17,7 @@ add_executable(gc_tests
   commit_plan_tests.cpp
   conflict_fixture_tests.cpp
   conflict_state_tests.cpp
+  decimal_text_tests.cpp
   diff_view_fixture_tests.cpp
   diff_view_tests.cpp
   environment_block_tests.cpp
@@ -51,6 +51,7 @@ add_executable(gc_tests
   subprocess_capture_fixture_tests.cpp
   subprocess_capture_tests.cpp
   staging_plan_fixture_tests.cpp
+  shell_text_tests.cpp
   staging_plan_tests.cpp
   submodule_journey_tests.cpp
   submodule_navigation_fixture_tests.cpp
@@ -62,8 +63,10 @@ add_executable(gc_tests
   push_plan_tests.cpp
   push_fixture_tests.cpp
   undo_commit_plan_tests.cpp
+  upstream_write_flow_tests.cpp
   undo_probe_fixture_tests.cpp
   utf_text_tests.cpp
+  win_path_probe_tests.cpp
   workspace_status_tests.cpp
   workspace_status_fixture_tests.cpp)
 

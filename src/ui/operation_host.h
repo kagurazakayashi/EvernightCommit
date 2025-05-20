@@ -53,6 +53,9 @@ struct CommandLaunchOptions {
   bool pullIntegrateOperation = false;
   // 这次是「推送」：终态之后还要向发布目标做一次只读核对，成功与否以那份实况参与结论。
   bool pushOperation = false;
+  // 这次是「按记录恢复」发出去的那条引用更新（update-ref）。它的终态要交回恢复控制器结案：
+  // 恢复流程在启动之后仍然占着自己的流程状态，直到拿到终态或按「通知丢失」判为未知。
+  bool restoreOperation = false;
   // 这次是「首次推送之后的上游写入」：第几条 git config（1 = branch.<分支>.remote，
   // 2 = branch.<分支>.merge）。0 表示不是这一步。终态要交回推送控制器决定下一条与最终结论：
   // 「推送成功」与「配置写成没有」是两件事，各自有退出码，绝不合并成一句「推送并设置上游成功」。
@@ -77,6 +80,9 @@ struct OperationContext {
   std::wstring gitExecutable;       // 已验证可用的 git.exe
   git::RepoDetection detection;     // 仓库识别结果：工作区根、Git 目录、HEAD 状态、分支……
   bool repoUsable = false;          // 此刻仍有可用工作区（识别失败/裸仓库时控制器据此作废旧结果）
+  // 协调器当前绑定的仓库身份（代次 + git.exe + 工作区根）：控制器据此辨别「这份现状还是不是
+  // 它绑定时那一个仓库」。只比路径字符串看不出切走又切回同一路径、或重新识别过。
+  app::RepositoryIdentity repositoryIdentity;
   // 「提交者」身份在当前有效配置下的可得性：表单校验拿它当前提（取自界面刚读回的那份，
   // 预检回来之后一律改以预检事实里的提交者结论为准，两者不混用）。
   git::CommitterIdentityState committerState = git::CommitterIdentityState::unknown;

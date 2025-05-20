@@ -232,10 +232,19 @@ private:
   void ClearOperationHistory(HWND window);            // 确认之后清掉全部历史记录（保留开关）
   void ExportOperationHistory(HWND window);           // 把当前历史脱敏导出到同目录的导出文件
   [[nodiscard]] std::wstring HistoryStorageLine() const;
-  // 一次写操作拿到终态后，把「已确认事实 + 终态」装配成一条记录并落账（内部生成唯一 ID）。
-  // 返回落账记录的 ID（未开启记录或被拒时为空）；推送用它把核实结果回补到同一条记录。
+  // 一次写操作拿到终态后，把「已确认事实 + 终态」装配成一条记录并落账。
+  // existingId 非空时沿用它（更新同一条在途记录），否则生成新 ID。返回落账记录的 ID
+  // （未开启记录或被拒时为空）；推送用它把核实结果回补到同一条记录。
   std::wstring CommitHistoryRecord(const app::HistoryCapture& capture,
-                                   const app::HistoryTerminalInfo& terminal);
+                                   const app::HistoryTerminalInfo& terminal,
+                                   const std::wstring& existingId = std::wstring());
+  // 命令窗口那次启动成功之后立刻落一条「已启动，未见结果」的在途记录，并当场写盘。
+  // 用户允许界面关掉而命令继续跑、进程被强杀、通知丢失——这些场合历史里仍有这一条可查，
+  // 不会被读成「没有发生过任何操作」。返回这条记录的 ID（不记历史时为空）。
+  std::wstring BeginInProgressHistory(HWND window, const app::HistoryCapture& capture,
+                                      unsigned long long startedEpoch);
+  // 拿不到终态（完成通知丢失）时把那条在途记录判成「结果未知」：不猜成败、不自动重发。
+  void MarkHistoryRecordUnknown(const std::wstring& recordId, std::wstring_view why);
   // 「操作历史…」入口：选操作（查看/导出/清除/位置/保留）或选一条记录后恢复/复制。
   void ShowOperationHistory(HWND window);
   // 从一条 refMove 记录发起恢复：交给 RestoreFlow 走后台预检 → 强制确认 → 复核 → 命令窗口。
@@ -367,9 +376,14 @@ private:
     // 交给那台控制器，与 pull 整合失败同一套做法——绝不把「Git 返回非 0」与「没拿到退出码」合并。
     bool conflictContinueOperation = false;
     bool conflictAbortOperation = false;
+    // 这次是「按记录恢复」发出去的那条引用更新。恢复控制器在启动之后仍然占着自己的流程状态，
+    // 终态（含「通知丢失 → 结果未知」）都要交回它结案：绝不把「没拿到终态」说成成功或失败。
+    bool restoreOperation = false;
     // 操作历史：这次写操作带走那份「用户已确认的结构化事实」，终态时装配成一条记录。
     app::HistoryCapture history;
     unsigned long long historyStartedEpoch = 0;
+    // 启动当场落下的那条在途记录的 ID：终态、以及「通知丢失 → 结果未知」都要更新同一条。
+    std::wstring historyRecordId;
   };
 
   platform::UniqueWindow window_;

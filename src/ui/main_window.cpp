@@ -15,6 +15,7 @@
 #include "git/diff_view.h"
 #include "git/staging_plan.h"
 #include "git/workspace_model.h"
+#include "app/decimal_text.h"
 #include "app/operation_conclusions.h"
 #include "platform/windows/clipboard.h"
 #include "platform/windows/commit_message_file.h"
@@ -1409,6 +1410,18 @@ void MainWindow::InitializeCommandWatching(HWND window) {
 bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                              const git::CommandWindowOperation& operation,
                                              const CommandLaunchOptions& options) {
+  // 公共边界上先核对「这次要落的那条历史记录本身成立不成立」：漏了仓库工作区根或没说清是哪类
+  // 操作，记录会在写盘时被整条拒掉——那等于一件做过的操作在历史里查无此事。宁可当场不启动，
+  // 也不要「执行了但没有任何线索」。历史开关没开时一律放行（不落盘就没有可核对的记录）。
+  const std::wstring historyRefusal = app::DescribeHistoryCaptureRefusal(
+      options.history, HistoryApplicable());
+  if (!historyRefusal.empty()) {
+    state_.SetStatusNote(historyRefusal + L"（没有启动命令窗口，仓库没有被改动。）");
+    platform::RemoveNulPathspecFile(options.pathspecFile);
+    platform::RemoveCommitMessageFile(options.messageFile);
+    RefreshTexts(window);
+    return false;
+  }
   unsigned long long serial = 0;
   if (!tasks_.BeginOperation(operation.displayName, &serial, options.policy)) {
     // 槽位被占：这次根本没跑起来，清单文件也就没人会去读，立刻回收。
@@ -1463,12 +1476,18 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.upstreamWriteStep,
                                      options.conflictContinueOperation,
                                      options.conflictAbortOperation,
+                                     options.restoreOperation,
                                      options.history};
   // 记下启动时刻：终态落账时用「启动→终态」这对时间，而不是让 startedEpoch 空着。
   if (options.history.record) {
     const platform::LocalInstant now = platform::CurrentLocalInstant();
     activeOperation_.historyStartedEpoch =
         now.valid ? static_cast<unsigned long long>(now.utcEpochSeconds) : 0ULL;
+    // 当场落一条「已启动，未见结果」并立刻写盘：用户可能允许关掉界面让命令继续跑，进程也可能
+    // 就在这几分钟里被强杀。没有这一条，发生过的事会在历史里读成「什么都没做」。
+    // 终态（或「通知丢失 → 结果未知」）之后都用同一个 ID 更新这一条。
+    activeOperation_.historyRecordId = BeginInProgressHistory(
+        window, options.history, activeOperation_.historyStartedEpoch);
   }
   state_.SetStatusNote(options.startedNote);
   UpdateCommandAvailability();
@@ -1529,6 +1548,7 @@ bool MainWindow::AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_
       /*pull=*/pullFlow_.Active(),
       /*push=*/pushFlow_.Active(),
       /*conflict=*/conflictFlow_.Active(),
+      /*restore=*/restoreFlow_.Active(),
   };
   app::WritePrerequisites prereq;
   prereq.gitUsable = state_.GitUsable();
@@ -1552,6 +1572,9 @@ OperationContext MainWindow::CaptureOperationContext() const {
   ctx.gitExecutable = state_.Git().path;
   ctx.detection = state_.Repo().detection;
   ctx.repoUsable = state_.RepoUsable();
+  // 协调器的仓库身份：控制器据此辨别「这份现状还是不是它绑定时那一个仓库」。只比路径字符串
+  // 看不出切走又切回同一路径、或重新识别过仓库。
+  ctx.repositoryIdentity = tasks_.Identity();
   ctx.committerState = state_.Author().config.CommitterState();
   ctx.workspaceStatus = state_.Workspace().status;
   ctx.workspaceMessage = state_.Workspace().message;
@@ -2665,6 +2688,8 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   const std::wstring restoreHint = activeOperation_.restoreHint;
   const app::HistoryCapture historyCapture = activeOperation_.history;
   const unsigned long long historyStartedEpoch = activeOperation_.historyStartedEpoch;
+  const std::wstring historyRecordId = activeOperation_.historyRecordId;
+  const bool restoreOperation = activeOperation_.restoreOperation;
   activeOperation_ = ActiveOperation{};
   // 清单临时文件的回收：只在“Git 肯定不会再来读它”的终态删除 ——
   // result.txt 是 Git 退出之后才写完的（finished），launchFailed/gitNotStarted/helperNeverStarted 里
@@ -2698,7 +2723,7 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     terminal.exitCode = result.exitCode;
     terminal.completionLabel = std::wstring(git::CommandCompletionLabel(result.completion));
     terminal.conclusion = concl;
-    const std::wstring recordId = CommitHistoryRecord(historyCapture, terminal);
+    const std::wstring recordId = CommitHistoryRecord(historyCapture, terminal, historyRecordId);
     if (pushOperation) {
       lastPushRecordId_ = recordId;
     }
@@ -2805,6 +2830,11 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     pushFlow_.OnUpstreamStepSettled(*this, CaptureOperationContext(), upstreamWriteStep,
                                     outcome.succeeded, conclusion);
   }
+  if (restoreOperation) {
+    // 按记录恢复的那条引用更新到此结案：恢复控制器在此之前一直占着自己的流程状态，现在才放开。
+    // 成功与失败（含「结果未知」）的措辞由它自己说，本处不替它判定成成功。
+    restoreFlow_.OnCommandSettled(*this, outcome.succeeded, conclusion);
+  }
   // 无论成功还是失败都要重读一次：失败的操作同样可能已经改动仓库
   // （提交到一半、push 被拒、合并留下冲突），只有退出码决定要不要报成功。
   ScheduleRefresh(window);
@@ -2818,10 +2848,12 @@ void MainWindow::TickActiveOperations(HWND window) {
       !commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
     const unsigned long long serial = activeOperation_.serial;
     const std::wstring name = activeOperation_.displayName;
+    const std::wstring inFlightHistoryId = activeOperation_.historyRecordId;
     const bool pullStepInProgress = activeOperation_.pullFetchOperation ||
                                     activeOperation_.pullIntegrateOperation;
     const bool pushStepInProgress =
         activeOperation_.pushOperation || activeOperation_.upstreamWriteStep != 0;
+    const bool restoreStepInProgress = activeOperation_.restoreOperation;
     // 这里不删清单文件：通知丢失意味着 Git 可能还在命令窗口里跑，删掉正在被读的文件
     // 会让一次合法的 git add 变成 Git 的报错。%TEMP% 里留下几百字节的清单远小于那个代价。
     activeOperation_ = ActiveOperation{};
@@ -2837,11 +2869,18 @@ void MainWindow::TickActiveOperations(HWND window) {
     if (pushStepInProgress) {
       pushFlow_.AbandonFlow();
     }
+    // 恢复同理：那条引用更新没拿到终态就是「结果未知」，控制器放开流程状态，
+    // 既不说成功也不说失败，更不自动重发。
+    if (restoreStepInProgress) {
+      restoreFlow_.Forget();
+    }
     // 执行器已经不记得这个操作：按“结果未知”结案并释放槽位，
     // 否则一个再也等不到通知的操作会把后续写操作永久锁住。
     const app::OperationOutcome outcome =
         tasks_.ForgetOperation(serial, L"本程序没有收到「" + name + L"」的完成通知");
     if (outcome.recognised) {
+      // 同一条在途记录补成「结果未知」：这句不是成功、不是失败，也不是「已撤销」。
+      MarkHistoryRecordUnknown(inFlightHistoryId, outcome.note);
       tasks_.RememberOperationConclusion(outcome.note);
       state_.SetStatusNote(outcome.note);
       UpdateCommandAvailability();
@@ -3051,6 +3090,8 @@ void MainWindow::EnterSubmodule(HWND window) {
       /*fetch=*/fetchFlow_.Active(),
       /*pull=*/pullFlow_.Active(),
       /*push=*/pushFlow_.Active(),
+      /*conflict=*/conflictFlow_.Active(),
+      /*restore=*/restoreFlow_.Active(),
   };
   app::WritePrerequisites prereq;
   prereq.gitUsable = state_.GitUsable();
@@ -3670,11 +3711,14 @@ void MainWindow::ScheduleHistorySave() {
 }
 
 std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
-                                             const app::HistoryTerminalInfo& terminal) {
+                                             const app::HistoryTerminalInfo& terminal,
+                                             const std::wstring& existingId) {
   if (!capture.record || !HistoryApplicable()) {
     return {};  // 没勾「记录操作历史」就一个字节都不写，也不在内存里堆记录。
   }
-  const std::wstring id = NextHistoryId();
+  // existingId 非空 = 更新启动当场落下的那条在途记录（同 ID 由 AppendHistoryRecord 合并，
+  // 只有更确定的终态会替换已记录的终态，绝不会把已定结果降级）。
+  const std::wstring id = existingId.empty() ? NextHistoryId() : existingId;
   app::OperationRecord record = app::ComposeHistoryRecord(id, capture.workTreeRoot, capture, terminal);
   std::wstring refusal;
   if (!app::AppendHistoryRecord(&historyLog_, std::move(record), &refusal)) {
@@ -3683,6 +3727,59 @@ std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
   }
   ScheduleHistorySave();
   return id;
+}
+
+std::wstring MainWindow::BeginInProgressHistory(HWND window,
+                                               const app::HistoryCapture& capture,
+                                               unsigned long long startedEpoch) {
+  app::HistoryTerminalInfo terminal;
+  terminal.outcome = app::HistoryOutcome::inProgress;
+  terminal.startedEpoch = static_cast<long long>(startedEpoch);
+  terminal.terminalEpoch = 0;  // 还没有终态时刻：这一条只说明「发出去了」
+  terminal.completionLabel = L"执行中";
+  terminal.conclusion = L"命令窗口已经启动，本程序还没有拿到它的结果。";
+  const std::wstring id = CommitHistoryRecord(capture, terminal);
+  if (id.empty()) {
+    return {};
+  }
+  // 当场写盘，不等防抖：这条记录的意义正是「进程此刻没了也还查得到」。
+  historySavePending_ = false;
+  if (window != nullptr) {
+    ::KillTimer(window, kHistorySaveTimer);
+  }
+  RunHistorySave(window);
+  return id;
+}
+
+void MainWindow::MarkHistoryRecordUnknown(const std::wstring& recordId,
+                                          std::wstring_view why) {
+  if (recordId.empty() || !HistoryApplicable()) {
+    return;
+  }
+  // 完成通知没送到：那次操作既没被报成功也没被报失败。把在途那条判成「结果未知」，
+  // 绝不猜成成功、失败或已撤销；命令窗口里 Git 可能还在跑，所以也不自动重发。
+  for (const app::OperationRecord& existing : historyLog_.records) {
+    if (existing.id == recordId) {
+      if (app::TerminalHasSettled(existing.terminal)) {
+        return;  // 已经有更确定的结论（迟到的终态先到）：不降级、不改写。
+      }
+      break;
+    }
+  }
+  app::OperationRecord unknown;
+  unknown.id = recordId;
+  unknown.terminal = app::HistoryTerminal::unknown;
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  unknown.terminalEpoch = now.valid ? now.utcEpochSeconds : 0;
+  unknown.completionLabel = L"没有收到完成通知";
+  unknown.outcomeNote = std::wstring(why);
+  std::wstring refusal;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(unknown), &refusal)) {
+    state_.AppendStatusNote(L"另外：这条在途操作的历史没能补成「结果未知」（" +
+                            refusal + L"）；Git 那一步的结果不受影响。");
+    return;
+  }
+  ScheduleHistorySave();
 }
 
 void MainWindow::RecordPushVerification(std::wstring_view verificationSummary) {
@@ -3728,7 +3825,9 @@ void MainWindow::RunHistorySave(HWND window) {
                            L" 条）；本次以先记录到终态的那份为准，没有把较弱的信息盖上去。");
       }
       if (!outcome.detail.empty()) {
-        state_.SetStatusNote(outcome.detail);
+        // 这是「历史文件那边」的补充信息（损坏原件已改名保留等），与刚才那条操作结论并列显示，
+        // 不能把后者盖掉：用户要同时看到「Git 做得怎么样」和「记录写得怎么样」。
+        state_.AppendStatusNote(outcome.detail);
       }
       return;
     case platform::HistorySaveStatus::busy:
@@ -3737,10 +3836,14 @@ void MainWindow::RunHistorySave(HWND window) {
       return;
     case platform::HistorySaveStatus::refusedTooNew:
       historyWritable_ = false;
-      state_.SetStatusNote(outcome.detail);
+      state_.AppendStatusNote(outcome.detail);
       return;
     case platform::HistorySaveStatus::failed:
+      // 写不进去不等于 Git 那一步没做成：两句分开说，脏意留回队列稍后再试一次。
       requeue();
+      ScheduleHistorySave();
+      state_.AppendStatusNote(L"操作历史这次没写成功（" + outcome.detail +
+                              L"）；Git 那一步的结果不受影响。");
       return;
   }
 }
@@ -3888,19 +3991,9 @@ void MainWindow::ShowOperationHistory(HWND window) {
                           std::to_wstring(historyLog_.maxRecords);
       spec.okText = L"保存设置";
       spec.validate = [](const std::wstring& text) -> std::wstring {
-        const auto parse = [](std::wstring_view piece, long long* out) {
-          if (piece.empty() || piece.size() > 10) {
-            return false;
-          }
-          long long value = 0;
-          for (const wchar_t c : piece) {
-            if (c < L'0' || c > L'9') {
-              return false;
-            }
-            value = value * 10 + static_cast<long long>(c - L'0');
-          }
-          *out = value;
-          return true;
+        // 与记录文件同一套带上下界解析：越界只拒绝，不会先溢出回绕。
+        const auto parse = [](std::wstring_view piece, long long upperInclusive, long long* out) {
+          return app::ParseNonNegativeDecimal(piece, upperInclusive, out);
         };
         const size_t comma = text.find(L',');
         if (comma == std::wstring::npos) {
@@ -3908,12 +4001,11 @@ void MainWindow::ShowOperationHistory(HWND window) {
         }
         long long days = 0;
         long long records = 0;
-        if (!parse(std::wstring_view(text).substr(0, comma), &days) ||
-            !parse(std::wstring_view(text).substr(comma + 1), &records)) {
-          return L"天数与条数都必须是非负整数。";
-        }
-        if (days > app::kMaxHistoryRetentionDays || records < 1 ||
-            records > static_cast<long long>(app::kMaxHistoryRecords)) {
+        if (!parse(std::wstring_view(text).substr(0, comma), app::kMaxHistoryRetentionDays,
+                   &days) ||
+            !parse(std::wstring_view(text).substr(comma + 1),
+                   static_cast<long long>(app::kMaxHistoryRecords), &records) ||
+            records < 1) {
           return L"超出可接受范围（天数≤3650；条数 1.." +
                  std::to_wstring(app::kMaxHistoryRecords) + L"）。";
         }
@@ -3930,15 +4022,15 @@ void MainWindow::ShowOperationHistory(HWND window) {
       const size_t comma = value->find(L',');
       long long days = 0;
       long long records = 0;
-      const auto toNumber = [](std::wstring_view piece) {
-        long long value = 0;
-        for (const wchar_t c : piece) {
-          value = value * 10 + static_cast<long long>(c - L'0');
-        }
-        return value;
-      };
-      days = toNumber(std::wstring_view(*value).substr(0, comma));
-      records = toNumber(std::wstring_view(*value).substr(comma + 1));
+      // 校验通过的值再按同一套解析读一遍：两处用同一个函数，不会再出现「一处限长、
+      // 一处不限长」的差异；读不回来就当没改过，不落盘。
+      if (!app::ParseNonNegativeDecimal(std::wstring_view(*value).substr(0, comma),
+                                        app::kMaxHistoryRetentionDays, &days) ||
+          !app::ParseNonNegativeDecimal(
+              std::wstring_view(*value).substr(comma + 1),
+              static_cast<long long>(app::kMaxHistoryRecords), &records)) {
+        return;
+      }
       historyLog_.retentionDays = static_cast<int>(days);
       historyLog_.maxRecords = static_cast<size_t>(records);
       app::ApplyHistoryRetention(&historyLog_, platform::CurrentLocalInstant().utcEpochSeconds);
@@ -4002,8 +4094,9 @@ void MainWindow::ShowOperationHistory(HWND window) {
     const int answer = ::MessageBoxW(
         window,
         (L"这条记录涉及已推送到远端的历史：\n\n" + record.restoreNote +
-         L"\n\n本程序不会自动 force push / hard reset / clean。你可以复制那条命令、自行看清目标与风险后"
-         L"再决定执行。\n\n是＝复制命令；否＝关闭。")
+         L"\n\n本程序不会自动 force push / hard reset / clean，也不提供这种命令。"
+         L"可以复制的是这条记录的说明与目标信息（一段说明文字，不是可直接执行的命令），"
+         L"由你自己看清目标与风险后再决定怎么做。\n\n是＝复制说明；否＝关闭。")
             .c_str(),
         L"涉及远端历史：只解释与复制", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     if (answer == IDYES) {
@@ -4019,13 +4112,29 @@ void MainWindow::ShowOperationHistory(HWND window) {
                : record.restoreNote);
 }
 
+namespace {
+// 记录 → 恢复线索：只有一处拷贝代码。「开始恢复」与「复制恢复命令」都从它出发，
+// 于是这两条路看到的必须是同一个目标（分支、两个完整对象 ID、是否删除形态）。
+git::RestoreClues CluesFromRecord(const app::OperationRecord& record) {
+  git::RestoreClues clues;
+  clues.valid = true;
+  clues.repositoryRoot = record.workTreeRoot;
+  clues.branchRef = record.restoreBranchRef;
+  clues.expectedCurrentOid = record.restoreExpectedCurrentId;
+  clues.moveToOid = record.restoreUndoToObjectId;
+  clues.isRootDeletion = record.restoreIsRoot;
+  clues.originalNote = record.restoreNote;
+  return clues;
+}
+}  // namespace
+
 void MainWindow::BeginRestoreFromRecord(HWND window, const app::OperationRecord& record) {
   if (record.restoreKind != app::HistoryRestoreKind::refMove) {
     return;
   }
-  if (restoreFlow_.Active()) {
-    state_.SetStatusNote(L"已经有一次恢复预检在走，请等它的确认框出现或先取消那一次。");
-    RefreshTexts(window);
+  // 准入走与其它六个入口同一套规则（app/operation_gate）：恢复等全部六个在途流程，
+  // 自己已在走时也给出「再点不会排队」的明确说法——不在按钮里零散加条件。
+  if (!AdmitGitFlow(window, app::GitFlow::restore, L"按记录恢复")) {
     return;
   }
   const OperationContext ctx = CaptureOperationContext();
@@ -4038,40 +4147,50 @@ void MainWindow::BeginRestoreFromRecord(HWND window, const app::OperationRecord&
     RefreshTexts(window);
     return;
   }
-  git::RestoreClues clues;
-  clues.valid = true;
-  clues.repositoryRoot = record.workTreeRoot;
-  clues.branchRef = record.restoreBranchRef;
-  clues.expectedCurrentOid = record.restoreExpectedCurrentId;
-  clues.moveToOid = record.restoreUndoToObjectId;
-  clues.isRootDeletion = record.restoreIsRoot;
-  clues.originalNote = record.restoreNote;
-  restoreFlow_.Start(*this, ctx, std::move(clues));
+  restoreFlow_.Start(*this, ctx, CluesFromRecord(record));
 }
 
 void MainWindow::CopyRestoreCommandForRecord(HWND window, const app::OperationRecord& record) {
-  std::wstring command;
+  // 复制的两条路要分清：引用级恢复复制的是「与实际执行同一份构造」的命令；涉及远端历史的记录
+  // 压根没有可执行命令，复制的只是说明与目标信息——文案必须这么说。
+  std::wstring payload;
+  std::wstring note;
   if (record.restoreKind == app::HistoryRestoreKind::refMove) {
-    command = L"git -C \"" + record.workTreeRoot + L"\" ";
-    if (record.restoreIsRoot || record.restoreUndoToObjectId.empty()) {
-      command += L"update-ref -d -m \"EvernightCommit:restore\" " + record.restoreBranchRef + L" " +
-                 record.restoreExpectedCurrentId;
+    const git::RestoreCopyText copy = git::DescribeRestoreCopy(CluesFromRecord(record),
+                                                               git::ShellDialect::cmdInteractive);
+    if (!copy.cluesUsable) {
+      state_.SetStatusNote(L"这条记录的恢复线索不成立，没有可复制的命令：" + copy.refusal);
+      RefreshTexts(window);
+      return;
+    }
+    if (!copy.copyableCommand.empty()) {
+      payload = copy.copyableCommand;
+      note = L"已复制" + copy.dialectLabel +
+             L"的一行恢复命令（未执行，也不代表已恢复远端）。" + copy.copyNote +
+             L"粘贴前请核对目标与风险；换到别的 shell 就要重新核对这一行的写法。";
     } else {
-      command += L"update-ref --create-reflog -m \"EvernightCommit:restore\" " +
-                 record.restoreBranchRef + L" " + record.restoreUndoToObjectId + L" " +
-                 record.restoreExpectedCurrentId;
+      // 不能安全粘成一行：复制字段清单，不替换任何字符，也不替用户决定换哪个 shell。
+      payload = copy.structuredFacts;
+      note = L"这一串参数不能安全地粘成一行（" + copy.copyRefusal +
+             L"），所以复制的是逐段列出的字段清单，不是命令。本程序没有替换任何字符；"
+             L"要执行请在终端里自己按段输入。";
     }
   } else {
-    command = record.restoreNote;
-  }
-  if (command.empty()) {
-    state_.SetStatusNote(L"这条记录没有可复制的恢复命令。");
-    RefreshTexts(window);
-    return;
+    payload = record.restoreNote;
+    if (payload.empty()) {
+      state_.SetStatusNote(L"这条记录没有可复制的恢复说明。");
+      RefreshTexts(window);
+      return;
+    }
+    // 历史里的自由文本按外部输入对待：它是给人看的线索，绝不包装成「可执行命令」。
+    note = L"已复制这条记录的恢复说明（一段说明文字，不是可直接执行的命令，也没有执行任何东西）。";
+    if (record.restoreKind == app::HistoryRestoreKind::manualRemote) {
+      note += L"涉及远端历史的回退要你自己判断协作影响；本程序不提供 force push 这类命令。";
+    }
   }
   std::wstring failure;
-  if (platform::CopyTextToClipboard(window, command, &failure)) {
-    state_.SetStatusNote(L"已复制恢复命令（未执行，也不代表已恢复远端）：请核对目标与风险后自行决定。");
+  if (platform::CopyTextToClipboard(window, payload, &failure)) {
+    state_.SetStatusNote(note);
   } else {
     state_.SetStatusNote(L"复制到剪贴板失败：" + failure);
   }

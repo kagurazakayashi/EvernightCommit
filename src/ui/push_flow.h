@@ -8,6 +8,7 @@
 #include "git/push_plan.h"
 #include "platform/windows/push_probe.h"
 #include "ui/operation_host.h"
+#include "ui/upstream_write_flow.h"
 
 namespace gc::ui {
 
@@ -36,7 +37,8 @@ public:
     firstPushTargets,    // 首次推送：正在逐个远端问实际发布地址（本地只读）
     firstPushProbe,      // 首次推送：选定目标之后的只读预检在跑（含只读 ls-remote）
     firstPushRecheck,    // 首次推送：点头之后的执行前复核在跑（同一组查询原样重发）
-    writingUpstream,     // 首次推送：推送与核实都走完，正在命令窗口里逐条写上游配置
+    upstreamRecheck,     // 首次推送：推送与核实都结束后，写配置之前再问一次现场（前提是否还在）
+    writingUpstream,     // 首次推送：正在命令窗口里逐条写上游配置
   };
 
   // 入口。调用前主窗口已通过准入判定。
@@ -102,9 +104,16 @@ private:
                             const platform::FirstPushProbeOutcome& outcome);
   void HandleFirstPushRecheck(OperationHost& host, const OperationContext& ctx,
                               const platform::FirstPushProbeOutcome& outcome);
-  // 上游写入：按 firstPlan_.upstreamSteps 逐条发（一条一个命令窗口）。
-  void LaunchUpstreamStep(OperationHost& host, const OperationContext& ctx, size_t index);
-  void FinishUpstreamWrites(OperationHost& host, std::wstring_view summary);
+  // 上游写入：推送与核实都结束之后，先用与预检同族的只读查询再问一次现场（这条分支还是不是
+  // 当初那条、上游是不是已经被人设好），前提还在才逐条发 git config。参数一律取
+  // firstPlan_.upstreamSteps 里那份已审查过的数组——发第几条、发给哪个仓库、带什么参数由
+  // UpstreamWriteFlow 统一装配（那一段接线单独可测，见 ui/upstream_write_flow.h）。
+  void StartUpstreamRecheck(OperationHost& host, const OperationContext& ctx);
+  void HandleUpstreamRecheck(OperationHost& host, const OperationContext& ctx,
+                             const platform::PushProbeOutcome& outcome);
+  void StartUpstreamWrites(OperationHost& host, const OperationContext& ctx);
+  // 这一段彻底结束（成功写完 / 某条失败 / 拒绝覆盖 / 一条都没发出）：清掉推送侧的现场状态。
+  void SettlePushFlow() noexcept;
 
   // 在命令窗口里启动一条确定的推送方案（复核已通过）。绑定核实用的那份依据一并记下。
   struct LaunchRequest {
@@ -139,7 +148,9 @@ private:
   bool firstPushSetUpstream_ = false;
   platform::FirstPushProbeOutcome firstPreflight_;
   git::FirstPushPlan firstPlan_;
-  size_t upstreamStep_ = 0;             // 正在等第几条（0 = 还没开始）
+  // 上游写入那几条命令的接线（第几条在等终态、下一条发不发）由它自己管，
+  // 推送控制器只负责「什么时候轮到它」和「这一段结束后清理现场」。
+  UpstreamWriteFlow upstreamWrites_;
   bool upstreamPending_ = false;        // 推送成功后要不要写上游（核实结束之后才执行）
   std::wstring upstreamPushConclusion_;  // 推送那一步的结论文字，供最后一段总结引用
 
