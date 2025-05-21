@@ -34,6 +34,7 @@ add_executable(gc_tests
   git_probe_tests.cpp
   layout_tests.cpp
   list_view_memory_tests.cpp
+  list_redraw_tests.cpp
   local_time_tests.cpp
   machine_output_completeness_tests.cpp
   operation_conclusions_tests.cpp

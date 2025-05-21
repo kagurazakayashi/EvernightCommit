@@ -4,15 +4,12 @@
 #include <string>
 
 #include "ui/commands.h"
+#include "ui/controls.h"
 
 namespace gc::ui {
 namespace {
 
-void Place(HWND target, const RECT& rect) {
-  if (target != nullptr) {
-    ::MoveWindow(target, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
-  }
-}
+void Place(HWND target, const RECT& rect) { PlaceIfChanged(target, rect); }
 
 constexpr RECT Box(int left, int top, int width, int height) noexcept {
   return RECT{left, top, left + width, top + height};

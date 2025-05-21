@@ -133,6 +133,7 @@ constexpr const char* kWindowsFiles[] = {
     "subprocess_capture_fixture_tests.cpp",
     "upstream_write_flow_tests.cpp",  // UI 层控制器的接线断言（假宿主，不起子进程、不启动 Git、不碰文件系统）。
     "win_path_probe_tests.cpp",  // 真实文件系统上的预览预检（存在性/可读性/二进位），只用测试自己的临时目录；不启动 Git。
+    "list_redraw_tests.cpp",  // 真实窗口上的消息级断言：重绘暂停必须恢复、布局与文本设置不重复发消息。不起子进程、不碰文件系统。
 };
 
 // 引用 GitFixture/RemoteRig 的文件；未列入下方只读名单的用例默认含提交/推送。
