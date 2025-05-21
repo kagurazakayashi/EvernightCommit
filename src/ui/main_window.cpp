@@ -451,8 +451,11 @@ bool MainWindow::Create(HINSTANCE instance, int showCommand) {
     width = prefs_.window.width;
     height = prefs_.window.height;
   }
-  HWND created = ::CreateWindowExW(0, kMainWindowWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW, x, y, width,
-                                   height, nullptr, nullptr, instance, this);
+  // WS_CLIPCHILDREN：客户区里被子控件占住的格子不归父窗口擦。没有这一条，父窗口每次擦背景都会把
+  // 分组框、列表这些子控件的区域先刷成一片底色，等子控件自己重绘——用户看到的就是一块块矩形闪。
+  HWND created = ::CreateWindowExW(0, kMainWindowWindowClass, kWindowTitle,
+                                   WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width, height, nullptr, nullptr,
+                                   instance, this);
   if (created == nullptr) {
     return false;
   }
@@ -1404,7 +1407,8 @@ void MainWindow::ResumeRepoDetectionWhenGitReady(HWND window) {
 
 void MainWindow::InitializeCommandWatching(HWND window) {
   commandRunner_.Startup(window);
-  ::SetTimer(window, kGitOperationTimer, kGitOperationTickMs, nullptr);
+  // 看门狗定时器只在「确实有一个命令窗口操作在跑」期间挂着（见 LaunchCommandWindowOperation）：
+  // 常驻的 500 毫秒轮询会一遍遍重画整个界面，空闲时就是可看见的闪烁。
 }
 
 bool MainWindow::LaunchCommandWindowOperation(HWND window,
@@ -1478,6 +1482,9 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                      options.conflictAbortOperation,
                                      options.restoreOperation,
                                      options.history};
+  // Git 已经在命令窗口里跑起来了，才挂这枚看门狗：它兜的是「完成通知永远没来」那一种事故，
+  // 到 TickActiveOperations 发现没有在途操作时会自己摘掉，空闲期间一秒两次的整屏重画就此结束。
+  ::SetTimer(window, kGitOperationTimer, kGitOperationTickMs, nullptr);
   // 记下启动时刻：终态落账时用「启动→终态」这对时间，而不是让 startedEpoch 空着。
   if (options.history.record) {
     const platform::LocalInstant now = platform::CurrentLocalInstant();
@@ -2844,8 +2851,13 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
 void MainWindow::TickActiveOperations(HWND window) {
   // 轮询只负责把“执行中”刷成最新可见文本，并兜住完成通知丢失的场合
   // （真正的完成判定来自观察线程的通知，不靠这里的文案匹配）。
-  if (activeOperation_.serial != 0 &&
-      !commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
+  if (activeOperation_.serial == 0) {
+    // 没有在途的命令窗口操作就不该有这一拍：定时器随启动挂上，这里就地摘掉，
+    // 否则它会一直每 500 毫秒把整个界面重画一遍。
+    ::KillTimer(window, kGitOperationTimer);
+    return;
+  }
+  if (!commandRunner_.DescribeOperation(activeOperation_.runnerId, nullptr, nullptr)) {
     const unsigned long long serial = activeOperation_.serial;
     const std::wstring name = activeOperation_.displayName;
     const std::wstring inFlightHistoryId = activeOperation_.historyRecordId;

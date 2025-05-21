@@ -3,6 +3,7 @@
 #include <windowsx.h>
 
 #include "ui/commands.h"
+#include "ui/controls.h"
 
 namespace gc::ui {
 namespace {
@@ -69,10 +70,7 @@ bool Splitter::Create(HWND parent, int id) {
 }
 
 void Splitter::SetBounds(const RECT& bounds) {
-  if (window_ == nullptr) {
-    return;
-  }
-  ::MoveWindow(window_, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top, TRUE);
+  PlaceIfChanged(window_, bounds);
 }
 
 LRESULT CALLBACK Splitter::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {

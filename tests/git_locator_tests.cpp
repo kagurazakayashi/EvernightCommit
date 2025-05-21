@@ -75,3 +75,64 @@ GC_TEST(resolve_keeps_path_with_spaces_and_slashes) {
   GC_CHECK(gc::git::ResolveExecutableInput(mixed, L"C:\\Windows", probe) == mixed);
   GC_CHECK(gc::git::ResolveExecutableInput(L"   ", L"C:\\Windows", probe).empty());
 }
+
+GC_TEST(classify_git_candidate_families) {
+  using Family = gc::git::GitCandidateFamily;
+  // Git for Windows 面向命令行的入口优先；判断只看目录段，不看大小写，也不把 "Git" 当成 msys。
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\Program Files\\Git\\cmd\\git.exe") == Family::cmdShim);
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"c:\\program files\\git\\CMD\\git.exe") == Family::cmdShim);
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:/Program Files/Git/cmd/git.exe") == Family::cmdShim);
+  // MSYS2 那一套：靠 msys64 这个目录段认出来，哪怕它装在 C:\tools 下。
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\tools\\msys64\\usr\\bin\\git.exe") == Family::msys);
+  // <...>\usr\bin 是 MSYS 运行时的布局（同目录就是 msys-2.0.dll），装在 Git 里也一样垫后。
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\Program Files\\Git\\usr\\bin\\git.exe") == Family::msys);
+  // msys 树里的 cmd 目录仍然是 msys 的那一个：来源比目录名更有决定性。
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\msys64\\cmd\\git.exe") == Family::msys);
+  // 其余形态（原生 64 位实体、第三方前端口、只有文件名）留在中间档。
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\Program Files\\Git\\ucrt64\\bin\\git.exe") == Family::other);
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"C:\\Program Files\\Git\\bin\\git.exe") == Family::other);
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"git.exe") == Family::other);
+  GC_CHECK(gc::git::ClassifyGitCandidate(L"") == Family::other);
+}
+
+GC_TEST(sort_git_candidates_prefers_cmd_and_defers_msys) {
+  // 输入按这台机器 PATH 的真实形态：msys 的 git 排在最前，Git for Windows 的 cmd 入口在后面。
+  std::vector<std::wstring> candidates{L"C:\\tools\\msys64\\usr\\bin\\git.exe",
+                                       L"C:\\Program Files\\Git\\ucrt64\\bin\\git.exe",
+                                       L"C:\\Program Files\\Git\\cmd\\git.exe",
+                                       L"C:\\Program Files\\Git\\bin\\git.exe",
+                                       L"C:\\tools\\msys64\\mingw64\\bin\\git.exe"};
+  gc::git::SortGitCandidatesByPreference(candidates);
+
+  // 档位决定先后，同档内保持原来的 PATH 顺序（稳定排序，不重新发明第二套排序规则）。
+  const std::vector<std::wstring> expected{L"C:\\Program Files\\Git\\cmd\\git.exe",
+                                           L"C:\\Program Files\\Git\\ucrt64\\bin\\git.exe",
+                                           L"C:\\Program Files\\Git\\bin\\git.exe",
+                                           L"C:\\tools\\msys64\\usr\\bin\\git.exe",
+                                           L"C:\\tools\\msys64\\mingw64\\bin\\git.exe"};
+  GC_CHECK(candidates == expected);
+
+  // 空表与单元素表都是原地无操作。
+  std::vector<std::wstring> empty;
+  gc::git::SortGitCandidatesByPreference(empty);
+  GC_CHECK(empty.empty());
+  std::vector<std::wstring> single{L"C:\\tools\\msys64\\usr\\bin\\git.exe"};
+  gc::git::SortGitCandidatesByPreference(single);
+  GC_CHECK(single.size() == 1 && single.front() == L"C:\\tools\\msys64\\usr\\bin\\git.exe");
+}
+
+GC_TEST(resolve_bare_name_prefers_cmd_over_msys_ordering) {
+  // 用户只输「git」时没有表达过偏好：PATH 里 msys 的在前，也要按档位选 cmd 的那一个。
+  const auto probe = MakeFakeFs({L"C:\\tools\\msys64\\usr\\bin\\git.exe", L"C:\\Program Files\\Git\\cmd\\git.exe"});
+  const std::wstring pathEnv = L"C:\\tools\\msys64\\usr\\bin;C:\\Program Files\\Git\\cmd";
+
+  GC_CHECK(gc::git::ResolveExecutableInput(L"git", pathEnv, probe) == L"C:\\Program Files\\Git\\cmd\\git.exe");
+}
+
+GC_TEST(search_path_still_reports_raw_path_order) {
+  // 排序是显式的一步，不悄悄改变 SearchPathForExecutable 的语义（它对应 `where git` 的作答顺序）。
+  const auto probe = MakeFakeFs({L"C:\\tools\\msys64\\usr\\bin\\git.exe", L"C:\\Program Files\\Git\\cmd\\git.exe"});
+  const auto found = gc::git::SearchPathForExecutable(L"C:\\tools\\msys64\\usr\\bin;C:\\Program Files\\Git\\cmd",
+                                                     L"git.exe", probe);
+  GC_CHECK(found.size() == 2 && found.front() == L"C:\\tools\\msys64\\usr\\bin\\git.exe");
+}

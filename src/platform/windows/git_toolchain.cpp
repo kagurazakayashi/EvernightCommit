@@ -23,7 +23,11 @@ git::FsProbe MakeFsProbe() {
 }  // namespace
 
 std::vector<std::wstring> DiscoverGitCandidates() {
-  return git::SearchPathForExecutable(GetPathVariable(), kGitExecutableName, MakeFsProbe());
+  // 收集按 PATH 顺序，交给界面之前按档位排一次：cmd 入口在最前，也就是下拉列表的第一项与默认值；
+  // msys / usr\bin 那一套留在列表末尾，可用但不抢默认。
+  auto candidates = git::SearchPathForExecutable(GetPathVariable(), kGitExecutableName, MakeFsProbe());
+  git::SortGitCandidatesByPreference(candidates);
+  return candidates;
 }
 
 std::wstring NormalizeGitExeInput(std::wstring_view input) {

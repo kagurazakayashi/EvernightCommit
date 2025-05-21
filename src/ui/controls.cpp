@@ -108,8 +108,37 @@ void SetControlText(HWND target, std::wstring_view text) {
   if (target == nullptr) {
     return;
   }
+  // 文本一致就不发 WM_SETTEXT：静态控件与按钮收到 WM_SETTEXT 必然连带重绘自己（在没有
+  // WS_CLIPCHILDREN 之前还会擦到父窗口区域），而状态刷新会把同一份文本一遍遍重设回去。
+  if (static_cast<size_t>(::GetWindowTextLengthW(target)) == text.size()) {
+    const std::wstring current = GetControlText(target);
+    if (current == text) {
+      return;
+    }
+  }
   const std::wstring value(text);
   ::SetWindowTextW(target, value.c_str());
+}
+
+void PlaceIfChanged(HWND target, const RECT& rect) {
+  if (target == nullptr) {
+    return;
+  }
+  RECT screen{};
+  if (::GetWindowRect(target, &screen) != 0) {
+    // MoveWindow 收的是父窗口客户区坐标，先把当前屏幕位置换算到同一坐标系再比较。
+    POINT origin{screen.left, screen.top};
+    const HWND parent = ::GetParent(target);
+    if (parent != nullptr) {
+      ::ScreenToClient(parent, &origin);
+    }
+    if (origin.x == rect.left && origin.y == rect.top &&
+        (screen.right - screen.left) == (rect.right - rect.left) &&
+        (screen.bottom - screen.top) == (rect.bottom - rect.top)) {
+      return;
+    }
+  }
+  ::MoveWindow(target, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
 }
 
 std::wstring GetControlText(HWND target) {
@@ -230,13 +259,16 @@ void RestoreListSelection(HWND list, const std::vector<int>& rows) {
 
 ListRedrawPause::ListRedrawPause(HWND list) : list_(list) {
   if (list_ != nullptr) {
-    // 返回 TRUE 表示原本开启，析构时才能只在这里恢复，不把别人关掉的重绘打开。
-    paused_ = ::SendMessageW(list_, WM_SETREDRAW, FALSE, 0) == TRUE;
+    ::SendMessageW(list_, WM_SETREDRAW, FALSE, 0);
+    paused_ = true;
   }
 }
 
 ListRedrawPause::~ListRedrawPause() {
   if (paused_) {
+    // 恢复不能按 WM_SETREDRAW 的返回值决定「原来开没开」：报表视图在重绘本来是开的情况下也返回 0
+    //（本机 comctl32 实测），照返回值判断就等于关过之后再也不开——行明明在控件里，界面却永远是空白，
+    // 只剩上一次画出来的空状态说明。作用域一层用一次，这里无条件开回来并整块失效。
     ::SendMessageW(list_, WM_SETREDRAW, TRUE, 0);
     ::InvalidateRect(list_, nullptr, TRUE);
   }

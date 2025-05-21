@@ -32,6 +32,11 @@ HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly);
 void SetControlText(HWND target, std::wstring_view text);
 [[nodiscard]] std::wstring GetControlText(HWND target);
 
+// 摆放子控件：位置与尺寸已经一致时什么都不做。
+// 布局函数会被状态刷新反复调用，而无条件的 MoveWindow 会让控件连同父窗口区域一起重绘——
+// 文本没变、格子也没动的时候，这份重绘就是用户眼里的闪烁；组合框正在展开的下拉列表更会被直接收起。
+void PlaceIfChanged(HWND target, const RECT& rect);
+
 // 报表视图的行读写：行内容一律由调用方给出「单元格文本」，界面不从单元格文本反解操作参数。
 // 整列作废只用于“内容确实要全部丢掉”的场合（例如重建合作者清单）。
 void ClearListItems(HWND list);
@@ -49,6 +54,7 @@ void RemoveListRow(HWND list, int row);
 // 未列出的行一律取消选中；列表为空时什么都不做。
 void RestoreListSelection(HWND list, const std::vector<int>& rows);
 // 重建整列期间的重绘暂停：逐行插入的中间状态如果被绘制出来就是可感知的闪烁。
+// 作用域结束时一律恢复重绘并整块失效——本类只按「一层作用域」使用，不做嵌套。
 class ListRedrawPause {
 public:
   explicit ListRedrawPause(HWND list);
