@@ -101,21 +101,36 @@ namespace gc::git {
 
 // ---- 目標引用自身的形態與佔用（撤回與「按記錄恢復」共用這一份，兩條鏈路的保證必須同口徑）----
 //
-// 為什麼還要多問這兩條：`git update-ref` 按**名字**改引用，而名字有兩件事實不問就不知道。
+// 為什麼還要多問這三條：`git update-ref` 按**名字**改引用，而關於這個名字有三件事不問就不知道。
 //   1) 那個名字本身可能是一條符號引用（`git symbolic-ref refs/heads/x refs/heads/y` 做出來的
 //      「分支指向另一個分支」）。默認形態的 update-ref 會**追隨**它去改 y：預期舊值核對的是
-//      解引用之後的值，所以「核對了 x 的舊值」並不等於「只動 x」。實測（一次性裸倉庫，兩個提交 C）：
-//      `update-ref -d -m <reason> refs/heads/alias C`（alias→victim）刪掉的是 **victim**，
+//      解引用之後的值，所以「核對了 x 的舊值」並不等於「只動 x」。實測（一次性裸倉庫，本機 Git 2.53）：
+//      `update-ref -d -m <reason> refs/heads/alias C`（alias→victim@C）刪掉的是 **victim**，
 //      alias 仍然留著並繼續指向那個已被刪的 victim。本程序把命令一律加上 `--no-deref`，
 //      並在預檢與確認後復核裡明確問「這個名字是不是符號引用」——是就拒絕，絕不無聲當普通分支處理。
-//      加了 `--no-deref` 之後，Git 讀寫與比對都按名字自己那一條記錄，確認之間被人改成符號引用的場合
-//      會因為舊值對不上而被拒；這不是完整事務（完整事務要 `update-ref --stdin`，命令窗口沒有
-//      標準輸入通道），残余窗口只有在「不追隨別人」這一點上是不變量。
+//      加 `--no-deref` 之後的實測形態（一次性倉庫，本機 Git 2.53，逐條跑過）：
+//        * 寫入目標永遠是**那個名字本身**，不會去改它指向的分支；
+//        * 預期舊值仍按**解引用後**的值比對（報錯資訊形如 `is at <彼分支的值> but expected <old-oid>`）：
+//          对不上就以非 0 拒；比得上時，**移動**形態是把那個名字改寫成新的對象 ID（那條符號引用就此
+//          變成普通引用），**刪除**形態是刪掉那個名字，兩種都碰不到背後的分支；
+//        * 那條符號引用指向一個不存在的引用時，Git 報 `unable to resolve reference` 直接拒（128）。
+//      這仍然不是完整事務（完整事務要 `update-ref --stdin`，命令窗口沒有標準輸入通道）：
+//      残余窗口裡可發生的事只限於「確認過的那一個名字」——要嘛被 Git 拒掉，要嘛按名字本身處理，
+//      不會擴及別的分支。預檢與確認後復核都把符號引用本身拒絕掉，那種「按名字處理」只在競爭窗口裡出現。
 //   2) 那條分支可能正被另一個 linked worktree 檢出。移動它等於隔空改動別人的工作樹 HEAD 落點，
-//      那種場合一律拒絕（本程序只動「這個工作樹自己確認過的那條分支」）。
-// 兩條查詢都是只讀：symbolic-ref 帶 --quiet（不是符號引用 = 退出碼 1 + 空輸出，是明確答案）；
-// worktree list --porcelain 一行一條記錄，解析不出來就判「讀不回來」，絕不当「沒有別的佔用」。
+//      那種場合一律拒絕（本程序只動「這個工作樹自己確認過的那條分支」）。同一份 porcelain 輸出
+//      還帶有「這個工作樹自己檢出的是哪條分支」，恢復的確認文字要用它說清：移動**本工作樹正檢出的
+//      那條分支**時，索引與工作區的字節都不動，但它們相對新的 HEAD 會呈現出不一樣的差異。
+//   3) 名字合不合格最終要由 Git 自己說話。歷史記錄文件裡的引用名按**外部輸入**對待，本模組的形狀
+//      規則只是前置過濾（含 `refs/heads/` 這段命名空間限制——那是產品契約，Git 本身不管標籤、
+//      遠端跟蹤引用、`refs/notes/` 這些命名空間），權威裁定是 `git check-ref-format`。
+// 三條查詢都是只讀：symbolic-ref 帶 --quiet（不是符號引用 = 退出碼 1 + 空輸出，是明確答案）；
+// check-ref-format 實測合格 = 退出碼 0、不合格 = 退出碼 1 且無輸出，且它不認 `--`（帶它會死在
+// 自己的參數解析上），所以這裡一律送 `refs/heads/…` 的完整形態；worktree list --porcelain 一行
+// 一條記錄，解析不出來就判「讀不回來」，絕不当「沒有別的佔用」。
 [[nodiscard]] std::vector<std::wstring> BuildRefSymbolicProbeArguments(
+    std::wstring_view repositoryDirectory, std::wstring_view branchRef);
+[[nodiscard]] std::vector<std::wstring> BuildRefFormatProbeArguments(
     std::wstring_view repositoryDirectory, std::wstring_view branchRef);
 [[nodiscard]] std::vector<std::wstring> BuildWorktreeListArguments(
     std::wstring_view repositoryDirectory);
@@ -139,6 +154,10 @@ struct WorktreeRecord {
 struct RefIntegrityFacts {
   bool branchRefUsable = false;  // 有合格完整分支引用名可問（沒有時下面幾條一律不發）
 
+  bool formatRan = false;        // check-ref-format 得到了明確答案（合格與不合格都算問到）
+  bool formatAccepted = false;   // formatRan 時有效：Git 認定這個引用名合格
+  std::wstring formatDetail;     // 「Git 說這個名字不合格」或「這條查詢沒問成」的具體說明
+
   bool symrefRan = false;        // symbolic-ref <branchRef> 得到了明確答案（含明確「不是符號引用」）
   bool symrefIsSymbolic = false; // answered → 這個名字本身是符號引用
   std::wstring symrefTarget;     // 是符號引用時它指向哪裡（只用於措辭）
@@ -148,14 +167,27 @@ struct RefIntegrityFacts {
   bool worktreesReadable = false;  // 且輸出解析成功
   std::wstring worktreeHolder;   // 這條分支被「別的」工作樹檢出：那个工作樹根（空 = 沒有）
   std::wstring worktreesDetail;  // 問不成/解析不成時的具體原因
+  // 綁定的那個工作樹自己檢出的是哪條分支（porcelain 裡路徑等於綁定根的那條記錄的 branch 欄位）。
+  // 空 = 這一輪沒讀到那條記錄、或它是裸倉庫/游離 HEAD（游離另由 currentWorktreeDetached 表達）。
+  // 只用於確認文字：「移動本工作樹正檢出的那條分支」要老實交代相對 HEAD 的差異會變。
+  std::wstring currentWorktreeBranch;
+  bool currentWorktreeDetached = false;
 };
 
-// 把兩條查詢判成 RefIntegrityFacts。currentWorktreeRoot 是本次操作綁定的工作樹根，
-// 「同一條分支被本工作樹自己檢出」不是佔用，只有**別的**工作樹才算。
-[[nodiscard]] RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
-                                                     const GitQueryResult& worktrees,
-                                                     std::wstring_view branchRef,
-                                                     std::wstring_view currentWorktreeRoot);
+// 「這個引用名本身」要問的三條只讀查詢，打包傳遞：三個 GitQueryResult 同型，
+// 按位置傳參遲早會把「符號引用探測」與「引用名裁定」接錯，判讀層就整個反過來了。
+struct RefIntegrityQueries {
+  GitQueryResult branchSymref;      // symbolic-ref --quiet <branchRef>
+  GitQueryResult refFormat;         // check-ref-format <branchRef>
+  GitQueryResult worktrees;         // worktree list --porcelain
+  std::wstring branchRef;           // 要問的那個完整引用名（不合格時三條都不判）
+  // 本次操作綁定的工作樹根：「同一條分支被本工作樹自己檢出」不是佔用，只有**別的**工作樹才算。
+  // 留空時任何命中都算別的佔用（寧可拒絕也不多動）。
+  std::wstring currentWorktreeRoot;
+};
+
+// 把三條查詢判成 RefIntegrityFacts。
+[[nodiscard]] RefIntegrityFacts InterpretRefIntegrity(const RefIntegrityQueries& queries);
 
 // 一句話說清「為什麼這份現場不能移動這條引用」；回空串 = 可以按已確認的名字移動。
 // 順序：問不到就先拒絕（不知道不是可以）；是符號引用拒絕；被別的工作樹佔用拒絕。
@@ -290,8 +322,9 @@ struct UndoPreflightQueries {
   GitQueryResult headSummary;
   GitQueryResult remoteRefs;
   GitQueryResult remoteContains;
-  // 目標引用自身的形態與佔用（都必須先問出分支名才發得出來；不是分支時兩條都不發）。
+  // 目標引用自身的形態與佔用（三條都必須先問出分支名才發得出來；不是分支時一條都不發）。
   GitQueryResult branchSymref;
+  GitQueryResult branchRefFormat;
   GitQueryResult worktrees;
   // 本次操作綁定的工作樹根：用它辨別「worktree list 裡的這條分支是不是本工作樹自己檢出的」。
   // 留空時任何命中都算別的佔用（寧可拒絕也不多動）。
@@ -351,8 +384,10 @@ struct UndoCommitPlan {
 // 撤回/恢復目標的引用名校驗：**必須是完整的地方分支引用**（refs/heads/<分支>，分支段不為空）。
 // 之前只要求 refs/ 開頭，於是 refs/tags/…、refs/remotes/…、refs/notes/… 這類命名空間也被放行，
 // 與界面承諾的「只動用戶確認的那一條本地分支」對不上；歷史記錄文件裡的引用名按**外部輸入**對待，
-// 不因「這份文件是本程序寫的」而放寬。輪廓校验在这里，Git 自己的 check-ref-format 在預檢裡再核一次
-// （非法名以非 0 拒絕）；兩者口徑一致的規則在此實作：不許 `..`、不許 @\{、不許以 / 結尾或含空段、
+// 不因「這份文件是本程序寫的」而放寬。這一層只是**形狀前置過濾**（命名空間由產品契約決定，Git 本身
+// 不管標籤與遠端跟蹤引用算不算「分支」）；Git 自己的 `check-ref-format` 才是權威裁定，
+// 已由 `BuildRefFormatProbeArguments` 進入預檢與確認後復核兩輪（實測：合格 0、不合格 1 且無輸出），
+// 兩邊任一關没过就不產生任何命令。兩邊口徑一致的規則在此實作：不許 `..`、不許 @\{、不許以 / 結尾或含空段、
 // 不許以 .lock 結尾、不許純數字段、控制字符/空白/引號/`~^:?*[\/` 一律拒絕。
 // 注意：`&`、`%`、`!` 這些 Git 認為合法的字符**不得**被這裡攔下（界面走 Unicode 參數數組，
 // 它們不是 shell 語法）；需要 shell 安全的是「復制給人的命令文本」，那由 FormatCopyableCommand 另行裁定。

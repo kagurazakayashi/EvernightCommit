@@ -129,9 +129,11 @@ UndoPreflightQueries HealthyQueries() {
   queries.remoteRefs = Answer(0, L"refs/remotes/origin/main\n");
   queries.remoteContains = Answer(0, L"");
   queries.status = Answer(0, L"");
-  // 名字自身的形态与占用（R2 起属于撤回的必需证据）：symbolic-ref 明确答「不是符号引用」（退出码 1 + 空输出），
+  // 名字自身的形态与占用（R2 起属于撤回的必需证据；R4 又加了 Git 对名字本身的裁定）：
+  // check-ref-format 以退出码 0 认可这个名字，symbolic-ref 明确答「不是符号引用」（退出码 1 + 空输出），
   // worktree list 里这条分支只由本工作树自己检出。
   queries.worktreeRoot = std::wstring(kWorktreeRoot);
+  queries.branchRefFormat = Answer(0);
   queries.branchSymref = Answer(1);
   queries.worktrees = Answer(0,
                              L"worktree " + std::wstring(kWorktreeRoot) + L"\nHEAD " +
@@ -181,6 +183,7 @@ GC_TEST(undo_probe_arguments_are_read_only_and_bound_to_repository) {
       gc::git::BuildUndoRemoteRefsArguments(dir),
       gc::git::BuildUndoRemoteContainsArguments(dir, kShaA),
       gc::git::BuildRefSymbolicProbeArguments(dir, L"refs/heads/main"),
+      gc::git::BuildRefFormatProbeArguments(dir, L"refs/heads/main"),
       gc::git::BuildWorktreeListArguments(dir),
   };
   for (const std::vector<std::wstring>& arguments : probeGroups) {
@@ -217,6 +220,16 @@ GC_TEST(undo_probe_arguments_are_read_only_and_bound_to_repository) {
   GC_CHECK(gc::git::BuildUndoParentObjectArguments(dir, L"HEAD").empty());
   GC_CHECK(gc::git::BuildUndoRemoteContainsArguments(dir, L"deadbeef").empty());
   GC_CHECK(gc::git::BuildUndoRemoteContainsArguments(dir, L"").empty());
+  // 引用名的 Git 裁定：一律送 refs/heads/… 的完整形態，不帶 `--`（實測 check-ref-format 不認 `--`，
+  // 帶著它死在自己的參數解析上＝退出碼 129，那条链路的这道关就废了）。形状不合格的名字根本不送進 Git。
+  const std::vector<std::wstring> formatProbe =
+      gc::git::BuildRefFormatProbeArguments(dir, L"refs/heads/main");
+  GC_CHECK(Contains(formatProbe, L"check-ref-format"));
+  GC_CHECK(Contains(formatProbe, L"refs/heads/main"));
+  GC_CHECK(!Contains(formatProbe, L"--"));
+  GC_CHECK(gc::git::BuildRefFormatProbeArguments(dir, L"refs/tags/v1").empty());
+  GC_CHECK(gc::git::BuildRefFormatProbeArguments(dir, L"main").empty());
+  GC_CHECK(gc::git::BuildRefFormatProbeArguments(L"", L"refs/heads/main").empty());
 }
 
 GC_TEST(undo_first_reported_parent_reads_the_history_view_only) {
@@ -970,6 +983,39 @@ GC_TEST(undo_plan_refuses_unmovable_target_ref) {
   GC_CHECK(TextContains(junkPlan.blockedReason, L"读不出可靠形态"));
 }
 
+GC_TEST(undo_plan_defers_to_gits_own_refname_verdict) {
+  // 基准：两道关都过（形状过滤 + Git 的 check-ref-format 以退出码 0 认可）→ 可出方案。
+  const UndoCommitPlan ok = gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries()));
+  GC_CHECK_MESSAGE(!ok.blocked, "Git 认可的名字才走到得出方案这一步");
+  // 确认文字里那句「只动这一条」要说得出实际依据：Git 自己的裁定也是其中一道关。
+  GC_CHECK(TextContains(ok.previewText, L"check-ref-format"));
+
+  // Git 明确回答不合格（退出码 1 + 无输出）：本程序的形状过滤放过、但 Git 不认的名字必须拦下。
+  // 「历史文件/仓库里读回来的名字」按外部输入对待，不能只信本程序自己那套规则。
+  UndoPreflightQueries rejected = HealthyQueries();
+  rejected.branchRefFormat = Answer(1);
+  const UndoCommitPlan rejectedPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(rejected));
+  GC_CHECK_MESSAGE(rejectedPlan.blocked, "Git 说不合格就必须拒绝");
+  GC_CHECK(TextContains(rejectedPlan.blockedReason, L"过不了 Git 自己的引用名规则"));
+  GC_CHECK(rejectedPlan.arguments.empty());
+
+  // 这条查询压根没问成（启动失败/超时/其它非 0）：那是「不知道」，不是「没问题」。
+  UndoPreflightQueries unasked = HealthyQueries();
+  unasked.branchRefFormat = LaunchFailed();
+  const UndoCommitPlan unaskedPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(unasked));
+  GC_CHECK(unaskedPlan.blocked);
+  GC_CHECK(TextContains(unaskedPlan.blockedReason, L"没能问出 Git 对这个引用名本身的裁定"));
+  GC_CHECK(unaskedPlan.arguments.empty());
+
+  // 问到了但答复不合约定（退出码 0 却带输出，或退出码 1 还吐了字）：按语义各归各位——
+  // 退出码 1 且有输出走「查询失败」分支，同样不能当成「Git 说合格」。
+  UndoPreflightQueries noisy = HealthyQueries();
+  noisy.branchRefFormat = Answer(1, L"fatal: missing value for 'check-ref-format'\n");
+  const UndoCommitPlan noisyPlan = gc::git::BuildUndoCommitPlan(InputFromQueries(noisy));
+  GC_CHECK(noisyPlan.blocked);
+  GC_CHECK(!TextContains(noisyPlan.blockedReason, L"认定这个名字合格"));
+}
+
 GC_TEST(undo_command_carries_no_deref_with_expected_old_value) {
   const UndoCommitPlan plan = gc::git::BuildUndoCommitPlan(InputFromQueries(HealthyQueries()));
   GC_REQUIRE(!plan.blocked, "健康现场应可撤回");
@@ -1016,6 +1062,15 @@ GC_TEST(undo_recheck_refuses_ref_kind_changed_after_confirm) {
   UndoHeadFacts becameHeld = preflight.head;
   becameHeld.refIntegrity.worktreeHolder = L"D:\\另一个工作树";
   GC_CHECK(TextContains(gc::git::DescribeUndoRecheckMismatch(becameHeld, preflight), L"另一个工作树"));
+
+  // 期间这个名字连 Git 的裁定都不过了（预检时是合格的）：同样拦下，不复用预检那一份答案。
+  UndoHeadFacts becameRejected = preflight.head;
+  becameRejected.refIntegrity.formatAccepted = false;
+  becameRejected.refIntegrity.formatDetail =
+      L"Git 的 check-ref-format 明确回答它不是一个合格的引用名（退出码 1）。";
+  const std::wstring rejectedRefusal = gc::git::DescribeUndoRecheckMismatch(becameRejected, preflight);
+  GC_CHECK(!rejectedRefusal.empty());
+  GC_CHECK(TextContains(rejectedRefusal, L"过不了 Git 自己的引用名规则"));
 
   // 复核这一轮没问到形态：不知道就不动。
   UndoHeadFacts unasked = preflight.head;

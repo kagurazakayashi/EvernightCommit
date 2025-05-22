@@ -78,8 +78,9 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
     queries.remoteContains =
         RunQuery(deps.runner, request.exePath, dir, git::BuildUndoRemoteContainsArguments(dir, headSha));
   }
-  // 「这个名字本身是不是符号引用」与「这条分支有没有被别的工作树用着」：只有问出了完整分支引用名
-  // 才发得出去。判读层把「没问过」一律当成不能放行，所以这里不问就不能假装问过。
+  // 「这个名字本身是不是符号引用」「Git 认不认这个名字」与「这条分支有没有被别的工作树用着」：
+  // 只有问出了完整分支引用名才发得出去。判读层把「没问过」一律当成不能放行，所以这里不问
+  // 就不能假装问过（三条一起算「问过」，半途停下的那一条按没问到处理）。
   if (StopRequested(request.stopFlag)) {
     return FailedFacts(L"程序正在退出，预检中止");
   }
@@ -87,10 +88,22 @@ git::UndoPreflightFacts CollectUndoPreflight(const UndoProbeRequest& request,
       git::InterpretUndoHeadSnapshot(queries.symbolicRef, queries.headCommit);
   queries.worktreeRoot = dir;
   if (earlyHead.onBranch) {
-    queries.branchSymref =
+    git::RefIntegrityQueries integrityRequests;
+    integrityRequests.branchRef = earlyHead.branchRef;
+    integrityRequests.currentWorktreeRoot = dir;
+    integrityRequests.branchSymref =
         RunQuery(deps.runner, request.exePath, dir,
                  git::BuildRefSymbolicProbeArguments(dir, earlyHead.branchRef));
-    queries.worktrees = RunQuery(deps.runner, request.exePath, dir, git::BuildWorktreeListArguments(dir));
+    integrityRequests.refFormat =
+        RunQuery(deps.runner, request.exePath, dir,
+                 git::BuildRefFormatProbeArguments(dir, earlyHead.branchRef));
+    integrityRequests.worktrees =
+        StopRequested(request.stopFlag)
+            ? git::GitQueryResult{}
+            : RunQuery(deps.runner, request.exePath, dir, git::BuildWorktreeListArguments(dir));
+    queries.branchSymref = integrityRequests.branchSymref;
+    queries.branchRefFormat = integrityRequests.refFormat;
+    queries.worktrees = integrityRequests.worktrees;
   }
   if (StopRequested(request.stopFlag)) {
     return FailedFacts(L"程序正在退出，预检中止");
@@ -118,15 +131,19 @@ git::UndoHeadFacts CaptureUndoHeadSnapshot(const std::wstring& exePath,
   const git::GitQueryResult headCommit =
       RunQuery(deps.runner, exePath, dir, git::BuildUndoHeadCommitArguments(dir));
   git::UndoHeadFacts head = git::InterpretUndoHeadSnapshot(symbolicRef, headCommit);
-  // 确认后这一轮问的不只是「分支和那份提交还没变」：名字本身是不是符号引用、这条分支有没有被
-  // 别的工作树检出，都得按此刻的现场重问一次（预检那一刻的答案不属于现在）。
+  // 确认后这一轮问的不只是「分支和那份提交还没变」：名字本身是不是符号引用、Git 认不认这个名字、
+  // 这条分支有没有被别的工作树检出，都得按此刻的现场重问一次（预检那一刻的答案不属于现在）。
   if (head.onBranch && git::IsSafeUndoTargetRef(head.branchRef)) {
-    const git::GitQueryResult branchSymref =
+    git::RefIntegrityQueries integrityRequests;
+    integrityRequests.branchRef = head.branchRef;
+    integrityRequests.currentWorktreeRoot = dir;
+    integrityRequests.branchSymref =
         RunQuery(deps.runner, exePath, dir, git::BuildRefSymbolicProbeArguments(dir, head.branchRef));
-    const git::GitQueryResult worktrees =
+    integrityRequests.refFormat =
+        RunQuery(deps.runner, exePath, dir, git::BuildRefFormatProbeArguments(dir, head.branchRef));
+    integrityRequests.worktrees =
         RunQuery(deps.runner, exePath, dir, git::BuildWorktreeListArguments(dir));
-    head.refIntegrity =
-        git::InterpretRefIntegrity(branchSymref, worktrees, head.branchRef, dir);
+    head.refIntegrity = git::InterpretRefIntegrity(integrityRequests);
   }
   return head;
 }

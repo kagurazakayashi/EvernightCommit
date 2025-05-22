@@ -49,9 +49,9 @@ void RestoreFlow::Start(OperationHost& host, const OperationContext& ctx, git::R
                        [](const platform::RestoreProbeRequest& pending) {
                          return platform::RunRestoreProbeLoad(pending);
                        });
-  host.SetStatus(L"按记录恢复之前，先在后台重读：这条分支现在指着什么、这个引用名本身是不是符号引用、"
-                 L"这条分支有没有被别的工作树检出、要挪回去的对象还在不在、有没有流程停着"
-                 L"（只读查询，不弹命令窗口、不改动仓库），读回来后给出确认框…");
+  host.SetStatus(L"按记录恢复之前，先在后台重读：这条分支现在指着什么、Git 认不认这个引用名、"
+                 L"这个引用名本身是不是符号引用、这条分支有没有被别的工作树检出、要挪回去的对象还在不在、"
+                 L"有没有流程停着（只读查询，不弹命令窗口、不改动仓库），读回来后给出确认框…");
 }
 
 void RestoreFlow::OnProbeCompleted(OperationHost& host, const OperationContext& ctx,
@@ -113,8 +113,8 @@ void RestoreFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ct
                          [](const platform::RestoreProbeRequest& pending) {
                            return platform::CaptureRestoreRecheck(pending);
                          });
-  host.SetStatus(L"点头之后、发出命令之前，正在后台重问同一组事实（分支现值、引用形态与占用、"
-                 L"流程痕迹），确认确认框上写的那一份现状仍然成立…（只读查询，不弹命令窗口）…" +
+  host.SetStatus(L"点头之后、发出命令之前，正在后台重问同一组事实（分支现值、Git 对这个引用名的裁定、"
+                 L"引用形态与占用、流程痕迹），确认确认框上写的那一份现状仍然成立…（只读查询，不弹命令窗口）…" +
                  std::wstring(L"要挪回去的那个对象是固定的完整 ID，不随外部进程改变，"
                               L"这一轮不重问；命令里带的预期旧值由 Git 原子核对。"));
 }

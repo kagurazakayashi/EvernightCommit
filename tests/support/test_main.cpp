@@ -209,6 +209,17 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     "restore_branch_probe_accepts_the_query_shape_on_a_fresh_repository",
     // R2：符号引用探测与 worktree list 两条只读查询的真实形态核对（都不改动仓库）。
     "restore_ref_integrity_queries_match_real_git_contract",
+    // R4（本轮）：逐行核实过——用例体只调用 GitFixture::SeedCommitObject（write-tree + hash-object，
+    // 夹具注释写明它不执行 git commit/git push、不动 HEAD），以及 init / add（StageAll）/
+    // update-ref / symbolic-ref / rev-parse / ls-files / status / for-each-ref /
+    // check-ref-format / worktree list / `worktree add -b`（建 linked worktree：不建提交、不推送、
+    // 不联网，远端相关的一条都没用）。没有 commit、没有 push。
+    // 四条分别是：引用名闸门与 Git 裁定的口径一致性、程序参数数组的实际效果与越界断言、
+    // 符号引用（含符号链）的拒绝与「背后分支一动不动」、linked worktree 占用由真实输出判出。
+    "undo_restore_refname_gate_matches_gits_authoritative_verdict",
+    "restore_update_ref_forms_come_from_the_program_and_touch_nothing_else",
+    "restore_refuses_symbolic_refs_and_never_moves_the_branch_behind_them",
+    "restore_refuses_branches_checked_out_in_a_linked_worktree_on_real_git",
     // repo_detect_fixture_tests.cpp —— 无提交形态的识别
     "detect_empty_repository_as_without_commits",
     "detect_plain_directory_as_not_repository",

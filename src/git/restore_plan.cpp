@@ -148,18 +148,26 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
   }
   // 历史文件里的引用名按外部输入对待，光有名字合格还不够：默认形态的 `update-ref` 会追随符号引用
   // 去改「它指向的那条分支」，而这条分支也可能正被另一个 linked worktree 用着。
-  // 这两件事必须这一轮问过；没问过（refKindRan=false）不是「没问题」，而是「不知道」。
+  // 这三件事（外加 Git 自己对这个名字的裁定）必须这一轮问过；没问过（refKindRan=false）
+  // 不是「没问题」，而是「不知道」。判出来的这份事实后面还要用：本工作树检出的是哪条分支，
+  // 决定确认文字里「相对 HEAD 的差异会变」那一段怎么说。
+  RefIntegrityFacts integrity;
   {
     std::wstring refusal;
     if (!queries.refKindRan) {
       refusal = L"这一轮没能问出「" + clues.branchRef +
-                L"」这个引用名本身的形态（是不是符号引用、有没有被别的工作树用着）。"
+                L"」这个引用名本身的形态（Git 认不认这个名字、是不是符号引用、"
+                L"有没有被别的工作树用着）。"
                 L"不知道就不动它——恢复需要按名字移动且只移动这一条，因此本次不产生任何命令。";
     } else {
-      refusal = DescribeRefIntegrityRefusal(
-          InterpretRefIntegrity(queries.branchSymref, queries.worktrees, clues.branchRef,
-                                queries.currentWorktreeRoot),
-          clues.branchRef);
+      RefIntegrityQueries integrityRequests;
+      integrityRequests.branchSymref = queries.branchSymref;
+      integrityRequests.refFormat = queries.refFormat;
+      integrityRequests.worktrees = queries.worktrees;
+      integrityRequests.branchRef = clues.branchRef;
+      integrityRequests.currentWorktreeRoot = queries.currentWorktreeRoot;
+      integrity = InterpretRefIntegrity(integrityRequests);
+      refusal = DescribeRefIntegrityRefusal(integrity, clues.branchRef);
     }
     if (!refusal.empty()) {
       return conclude(RestoreFeasibility::refNotMovable, refusal);
@@ -316,18 +324,48 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
   plan.copyRefusal = copy.copyRefusal;
   plan.copyNote = copy.copyNote;
   plan.dialectLabel = copy.dialectLabel;
+
+  // 「这条分支是不是本工作树正检出的那一条」是确认文字必须交代的一件事：`update-ref` 只写那一个
+  // 引用名，索引与工作区的字节一个都不动，可 HEAD 的落点变了，于是「相对 HEAD 的差异」跟着变。
+  // 这不构成拒绝理由（撤回动的本来就是当前分支），但藏着不说就是把「不动索引」写成了误导。
+  const bool checkedOutHere = !queries.currentWorktreeRoot.empty() &&
+                              integrity.currentWorktreeBranch == clues.branchRef;
+  std::wstring headEffect;
+  if (checkedOutHere) {
+    headEffect = clues.isRootDeletion
+                     ? std::wstring(L"这条分支正是当前工作树检出的那一条：引用删掉后这个工作树回到"
+                                    L"「该分支尚无提交」的形态（与 git init 之后一样），文件字节一动不动，"
+                                    L"原本已提交的内容全部表现为「已暂存的更改」。")
+                     : std::wstring(L"这条分支正是当前工作树检出的那一条：索引与工作区的字节一动不动，"
+                                    L"但它们相对新的 HEAD 会呈现出不一样的差异——往回挪会把那次提交的内容"
+                                    L"改动重新显示为「已暂存的更改」，界面随后刷新看到的就是这份差异。");
+  } else if (integrity.currentWorktreeDetached) {
+    headEffect = L"当前工作树处于游离 HEAD（它的 worktree 记录带着 detached），这次移动不改这个工作树"
+                 L"的落点；索引与工作区的字节也一动不动。";
+  } else if (!integrity.currentWorktreeBranch.empty()) {
+    headEffect = L"当前工作树检出的是另一条分支（" + integrity.currentWorktreeBranch +
+                 L"），这次移动不改这个工作树的落点；索引与工作区的字节也一动不动。";
+  } else {
+    headEffect = L"这一轮没能在 worktree 记录里认出「当前工作树检出的是哪条分支」，因此不能断言这个"
+                 L"工作树的显示不受影响；能确定的是命令只写上面那一个引用名，索引与工作区的字节都不动。";
+  }
+
   if (clues.isRootDeletion) {
     plan.commandLabel = L"git update-ref -d";
     plan.newObjectId.clear();
     plan.notice = L"只删除分支引用 " + clues.branchRef + L"（仅本地，按这个名字本身删除、不追随符号引用，"
                   L"并带预期旧值 " + ShortObjectId(clues.expectedCurrentOid) +
-                  L"）：索引与工作区保持原样。";
+                  L"）：索引与工作区的字节都不动";
+    plan.notice += checkedOutHere ? L"；这条分支正是当前工作树检出的那一条，它相对 HEAD 的差异会变。"
+                                  : L"。";
   } else {
     plan.commandLabel = L"git update-ref";
     plan.newObjectId = clues.moveToOid;
     plan.notice = L"只移动分支引用 " + clues.branchRef + L"（仅本地，按这个名字本身移动、不追随符号引用，"
                   L"并带预期旧值 " + ShortObjectId(clues.expectedCurrentOid) +
-                  L"）：索引与工作区保持原样。";
+                  L"）：索引与工作区的字节都不动";
+    plan.notice += checkedOutHere ? L"；这条分支正是当前工作树检出的那一条，它相对 HEAD 的差异会变。"
+                                  : L"。";
   }
 
   std::wstring preview;
@@ -351,14 +389,24 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
     preview += L"恢复动作：把这条分支引用挪回 " + ShortObjectId(clues.moveToOid) + L"（完整 ID " +
                clues.moveToOid + L"）。\n";
   }
-  preview += L"预期旧值核对：Git 只在上面那条引用**本身**（--no-deref：不解引用）确实还指向 " +
-             clues.expectedCurrentOid + L" 时才动它，值对不上就以非 0 原样拒绝。"
-             L"这一步是原子核对，不是先读后写；确认之间这个名字被换成符号引用时，"
-             L"Git 读到的不是那个对象 ID，于是同样被拒。\n";
+  preview += L"这个名字过了两道关：本程序只接受 refs/heads/… 的完整本地分支引用（标签、远端跟踪引用、"
+             L"HEAD 与伪引用都不在这里，历史文件里的名字也按外部输入对待），Git 自己的 "
+             L"check-ref-format 也当场裁定它合格；两道关任一没过、或任一没问回来，都不会打开命令窗口。\n";
+  preview += L"预期旧值核对：命令带 --no-deref，Git 写入的目标就是上面写明的这个名字本身，"
+             L"并带着预期旧值 " + clues.expectedCurrentOid +
+             L" 核对（本机实测：这个名字若已被人换成符号引用，移动形态是把那个名字本身改写成新的"
+             L"对象 ID、删除形态是删掉那个名字本身，背后的分支一动不动；预期旧值仍按解引用后的值比对，"
+             L"对不上就以非 0 原样拒绝，它指向的东西不存在时 Git 直接报错拒掉）。"
+             L"这一步由 Git 在锁住那条引用之后自己核对，不是本程序先读后写，"
+             L"所以「确认之后分支被别人推进」不会让这次恢复落错位置。\n";
   preview += L"这条分支现在归哪个工作树用，也已经在本轮按 git worktree list 问过：被别的"
              L"工作树检用时直接拒绝，不跨工作树动分支。\n";
-  preview += L"影响：这条命令只移动（或删除）这一个本地分支引用，索引与工作区一个字节都不动；"
+  preview += headEffect + L"\n";
+  preview += L"影响：这条命令只移动（或删除）这一个本地分支引用，索引与工作区的字节都不动；"
              L"不产生反向提交，不丢弃任何改动，不触碰远端，更不会自动 force push。\n";
+  preview += L"仍然锁不住的部分：复核与本程序启动 Git 之间那一小段窗口里，别的进程仍可以改这个仓库"
+             L"（完整的引用事务要 git update-ref --stdin，而命令窗口没有标准输入通道）。那种场合可能发生"
+             L"的是「这个名字的写入被 Git 拒掉」或「按这个名字本身处理」，不会是「别的分支被动到」。\n";
   if (!clues.originalNote.empty()) {
     preview += L"\n当初记录里留下的恢复线索：" + clues.originalNote + L"\n";
   }

@@ -38,8 +38,14 @@ namespace gc::git {
 //     都不算「没有流程停着」。
 //   * 引用名不合格（不是 `refs/heads/` 下的完整名字）：标签、远端跟踪引用、`refs/` 之外的名字
 //     即使来自历史文件也不复现成命令——那类引用的移动语义与这里承诺的「只挪一条本地分支」不同。
+//     形状过滤之外还有 Git 的权威裁定：`git check-ref-format` 说这个名字不合格（或这条查询
+//     压根没问回来）时同样拒绝，绝不因为「这份文件是本程序写的」就跳过 Git 的判断。
 //   * 这个名字本身是符号引用，或被另一个 `git worktree` 检出着：都会让「只动这一条」落空或
 //     隔空改动别处的现场，与撤回同一判据（复用 `undo_commit_plan` 的那份完整性裁决），问不到即拒绝。
+//   * 反过来，「这条分支正是当前工作树检出的那一条」不是拒绝理由，而是必须在确认里讲清的后果：
+//     命令只改引用，索引与工作区的字节一个都不动，可它们相对新的 HEAD 呈现出的差异会变（往回挪
+//     会把那次提交的内容改动重新显示为「已暂存的更改」，删除形态则让这个工作树回到「该分支尚无
+//     提交」的形态）。这份现状取自同一条 `git worktree list --porcelain` 回答里本工作树那条记录。
 //   * 实况读不回来（超时、启动失败、输出不完整）：判成「不知道」，绝不当成「干净」或「没有」。
 //
 // 本模块不产生、也绝不暗示任何 force push / hard reset / clean / 批量撤销：涉及远端历史的恢复
@@ -88,10 +94,12 @@ struct RestorePreflightQueries {
   bool workflowReadable = false;
   std::wstring workflowFailure;
   // 目标引用自身的形态与占用（R2：`update-ref` 默认会追随符号引用去改「它指向的那条分支」，
-  // 而这条分支也可能正被另一个 linked worktree 用着）。两条查询都必须问过：
-  // refKindRan=false 表示压根没问，判读层按「不知道」拒绝，绝不按「没问题」放行。
+  // 而这条分支也可能正被另一个 linked worktree 用着；R4 起还问 Git 自己对这个名字的裁定）。
+  // 三条查询都必须问过：refKindRan=false 表示压根没问（或只问到一半），判读层按「不知道」拒绝，
+  // 绝不按「没问题」放行。
   bool refKindRan = false;
   GitQueryResult branchSymref;
+  GitQueryResult refFormat;   // check-ref-format <branchRef>：名字的权威裁定
   GitQueryResult worktrees;
   // 发起恢复时界面绑定的工作树根：用于辨别「worktree list 里那条分支是不是这个工作树自己检出的」。
   std::wstring currentWorktreeRoot;
@@ -150,8 +158,11 @@ struct RestorePlan {
 //   * previewCommand —— 给人读的预览，每段用 [ ] 框住，不能粘回终端；
 //   * copyableCommand —— 在该 shell 里可以原样粘贴的那一行；表达不了时为空，refusal 说清原因，
 //     structuredFacts 仍然给出逐段列出的字段清单供复制（绝不静默替换字符、绝不代替用户换 shell）。
-// 这条路径与 BuildRestorePlan 共用同一套引用名校验与同一个 reflog 说明：修一处不会漏一处。
-// 它服务于「历史里点复制」这个入口——那里没有跑过预检，只有记录里的线索本身。
+// 这条路径与 BuildRestorePlan 共用同一套引用名形状校验与同一个 reflog 说明：修一处不会漏一处。
+// 它服务于「历史里点复制」这个入口——那里没有跑过预检，只有记录里的线索本身，因此这里只做形状
+// 过滤，**Git 的 `check-ref-format` 裁定与符号引用/占用探查都发生在可执行的那条链路上**
+// （`BuildRestorePlan` 预检 + `DescribeRestoreRecheckMismatch` 复核）。复制出去的一行从不被报告为
+// 「已执行」，这一点由界面与 AGENTS 约束共同保证；不能把这里的形状闸门当成权威裁定。
 struct RestoreCopyText {
   bool cluesUsable = false;
   std::wstring refusal;              // 线索本身不成立（引用名/对象 ID 不合格）时的原因

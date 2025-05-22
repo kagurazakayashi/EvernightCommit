@@ -36,20 +36,30 @@ git::RestorePreflightQueries CollectRestoreFacts(const RestoreProbeRequest& requ
     }
   }
 
-  // 引用名自身的形态与占用：`update-ref` 默认追随符号引用，而这条分支也可能正被别的工作树用着。
-  // 这两条都在问分支现值之后问，任何一条没答上，判读层就只能按「不知道」拒绝（不是「没问题」）。
+  // 引用名自身的形态与占用：`update-ref` 默认追随符号引用，而这条分支也可能正被别的工作树用着，
+  // 而这个名字合不合格最终要由 Git 的 check-ref-format 说话（记录里的名字按外部输入对待）。
+  // 三条都在问分支现值之后问；任何一条没答上或压根没问，判读层就只能按「不知道」拒绝
+  // （不是「没问题」），所以只问到一半时把 refKindRan 收回 false。
   if (queries.branchRan && !request.branchRef.empty()) {
     if (StopRequested(request.stopFlag)) {
       return queries;
     }
     const std::vector<std::wstring> symrefArguments =
         git::BuildRefSymbolicProbeArguments(dir, request.branchRef);
+    const std::vector<std::wstring> formatArguments =
+        git::BuildRefFormatProbeArguments(dir, request.branchRef);
     const std::vector<std::wstring> worktreeArguments = git::BuildWorktreeListArguments(dir);
-    if (!symrefArguments.empty() && !worktreeArguments.empty()) {
+    if (!symrefArguments.empty() && !formatArguments.empty() && !worktreeArguments.empty()) {
       queries.refKindRan = true;
       queries.currentWorktreeRoot = dir;
       queries.branchSymref =
           RunGitBackgroundQuery(request.exePath, symrefArguments, dir, request.timeoutMilliseconds);
+      if (StopRequested(request.stopFlag)) {
+        queries.refKindRan = false;
+        return queries;
+      }
+      queries.refFormat =
+          RunGitBackgroundQuery(request.exePath, formatArguments, dir, request.timeoutMilliseconds);
       if (!StopRequested(request.stopFlag)) {
         queries.worktrees =
             RunGitBackgroundQuery(request.exePath, worktreeArguments, dir, request.timeoutMilliseconds);
@@ -99,18 +109,28 @@ git::RestoreRecheckScene CaptureRestoreRecheck(const RestoreProbeRequest& reques
   }
   const std::vector<std::wstring> symrefArguments =
       git::BuildRefSymbolicProbeArguments(dir, request.branchRef);
+  const std::vector<std::wstring> formatArguments =
+      git::BuildRefFormatProbeArguments(dir, request.branchRef);
   const std::vector<std::wstring> worktreeArguments = git::BuildWorktreeListArguments(dir);
-  if (!symrefArguments.empty() && !worktreeArguments.empty()) {
-    const git::GitQueryResult symref =
+  if (!symrefArguments.empty() && !formatArguments.empty() && !worktreeArguments.empty()) {
+    git::RefIntegrityQueries integrityRequests;
+    integrityRequests.branchRef = request.branchRef;
+    integrityRequests.currentWorktreeRoot = dir;
+    integrityRequests.branchSymref =
         RunGitBackgroundQuery(request.exePath, symrefArguments, dir, request.timeoutMilliseconds);
+    // 三条都问齐才算「这一轮问过」；停下时剩下的那几条保持默认值（没问过），
+    // 判读层据此拒绝，绝不拿半份现场放行写命令。
     scene.integrityRan = !StopRequested(request.stopFlag);
-    const git::GitQueryResult worktrees =
-        scene.integrityRan
-            ? RunGitBackgroundQuery(request.exePath, worktreeArguments, dir,
-                                    request.timeoutMilliseconds)
-            : git::GitQueryResult{};
-    scene.integrity =
-        git::InterpretRefIntegrity(symref, worktrees, request.branchRef, dir);
+    if (scene.integrityRan) {
+      integrityRequests.refFormat =
+          RunGitBackgroundQuery(request.exePath, formatArguments, dir, request.timeoutMilliseconds);
+      scene.integrityRan = !StopRequested(request.stopFlag);
+    }
+    if (scene.integrityRan) {
+      integrityRequests.worktrees = RunGitBackgroundQuery(
+          request.exePath, worktreeArguments, dir, request.timeoutMilliseconds);
+    }
+    scene.integrity = git::InterpretRefIntegrity(integrityRequests);
   }
   if (!request.absoluteGitDir.empty() && !StopRequested(request.stopFlag)) {
     const git::WorkflowProbeResult probe =

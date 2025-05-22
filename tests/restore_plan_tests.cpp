@@ -47,6 +47,16 @@ g::GitQueryResult Failed() {
   return r;
 }
 
+// check-ref-format 的回答形态（本机实测）：合格 = 退出码 0 且无输出；不合格 = 退出码 1 且无输出。
+g::GitQueryResult FormatVerdict(int exitCode) {
+  g::GitQueryResult r;
+  r.started = true;
+  r.exited = true;
+  r.outputComplete = true;
+  r.exitCode = exitCode;
+  return r;
+}
+
 g::RestoreClues MakeClues() {
   g::RestoreClues clues;
   clues.valid = true;
@@ -80,6 +90,7 @@ g::RestorePreflightQueries MakeQueries(const g::GitQueryResult& branch, const g:
   queries.moveToValue = moveTo;
   // 引用形态与占用：默认给「问过且没问题」的答复，专门测拒绝的用例自己改这几项。
   queries.refKindRan = true;
+  queries.refFormat = FormatVerdict(0);      // Git 认可这个名字
   queries.branchSymref = NoResult();  // 明确「不是符号引用」
   queries.worktrees = WorktreesHeldBy(kRoot);
   queries.currentWorktreeRoot = kRoot;
@@ -233,6 +244,8 @@ g::RestoreRecheckScene HealthyScene(const g::GitQueryResult& branchValue) {
   scene.branchValue = branchValue;
   scene.integrityRan = true;
   scene.integrity.branchRefUsable = true;
+  scene.integrity.formatRan = true;
+  scene.integrity.formatAccepted = true;
   scene.integrity.symrefRan = true;
   scene.integrity.worktreesRan = true;
   scene.integrity.worktreesReadable = true;
@@ -383,6 +396,104 @@ GC_TEST(restore_plan_refuses_unmovable_reference) {
   plan = g::BuildRestorePlan(clues, junk);
   GC_CHECK(plan.feasibility == g::RestoreFeasibility::refNotMovable);
   GC_CHECK(plan.explanation.find(L"读不出可靠形态") != std::wstring::npos);
+}
+
+// 记录文件里的引用名按外部输入对待：本程序的形状过滤只是前置关，权威裁定是 Git 自己。
+GC_TEST(restore_plan_defends_the_refname_with_gits_verdict) {
+  const g::RestoreClues clues = MakeClues();
+
+  // Git 明确回答不合格（退出码 1 + 无输出）：即使形状过关，也不复现成任何命令。
+  g::RestorePreflightQueries rejected = MakeQueries(Answered(kOidC), Answered(kOidP));
+  rejected.refFormat = FormatVerdict(1);
+  const g::RestorePlan rejectedPlan = g::BuildRestorePlan(clues, rejected);
+  GC_CHECK(rejectedPlan.blocked);
+  GC_CHECK(rejectedPlan.feasibility == g::RestoreFeasibility::refNotMovable);
+  GC_CHECK(rejectedPlan.explanation.find(L"过不了 Git 自己的引用名规则") != std::wstring::npos);
+  GC_CHECK(rejectedPlan.arguments.empty());
+  GC_CHECK(rejectedPlan.copyableCommand.empty());
+
+  // 这条查询没问成（启动失败）：是「不知道」，不是「没问题」。
+  g::RestorePreflightQueries unasked = MakeQueries(Answered(kOidC), Answered(kOidP));
+  unasked.refFormat = Failed();
+  const g::RestorePlan unaskedPlan = g::BuildRestorePlan(clues, unasked);
+  GC_CHECK(unaskedPlan.blocked);
+  GC_CHECK(unaskedPlan.explanation.find(L"没能问出 Git 对这个引用名本身的裁定") != std::wstring::npos);
+  GC_CHECK(unaskedPlan.arguments.empty());
+
+  // 两道关都过：确认文字里必须说得出这个依据（保证来自实际命令与实际查询，不是措辞）。
+  const g::RestorePlan ok = g::BuildRestorePlan(clues, MakeQueries(Answered(kOidC), Answered(kOidP)));
+  GC_REQUIRE(!ok.blocked, "健康现场应给出可执行方案");
+  GC_CHECK(ok.previewText.find(L"check-ref-format") != std::wstring::npos);
+  GC_CHECK(ok.previewText.find(L"refs/heads/") != std::wstring::npos);
+
+  // 复核那一侧同样：确认之间 Git 的裁定不再成立（或这一轮压根没问到）都不许发命令。
+  g::RestoreRecheckScene rejectedScene = HealthyScene(Answered(kOidC));
+  rejectedScene.integrity.formatAccepted = false;
+  rejectedScene.integrity.formatDetail = L"Git 的 check-ref-format 明确回答它不是一个合格的引用名（退出码 1）。";
+  GC_CHECK(g::DescribeRestoreRecheckMismatch(rejectedScene, kOidC, kB).find(L"过不了 Git 自己的引用名规则") !=
+           std::wstring::npos);
+  g::RestoreRecheckScene unranScene = HealthyScene(Answered(kOidC));
+  unranScene.integrity.formatRan = false;
+  GC_CHECK(g::DescribeRestoreRecheckMismatch(unranScene, kOidC, kB).find(L"没能问出 Git 对这个引用名本身的裁定") !=
+           std::wstring::npos);
+}
+
+// 恢复确认必须讲清「移动本工作树正检出的那条分支」的实际后果：字节不动，相对 HEAD 的差异会变。
+GC_TEST(restore_plan_states_what_moves_relative_to_head) {
+  const g::RestoreClues clues = MakeClues();
+
+  auto worktreeAnswer = [](const std::wstring& root, const std::wstring& branch,
+                           const std::wstring& flag = {}) {
+    g::GitQueryResult r;
+    r.started = true;
+    r.exited = true;
+    r.outputComplete = true;
+    r.exitCode = 0;
+    r.utf16Output = L"worktree " + root + L"\nHEAD " + kOidC + L"\n" +
+                     (branch.empty() ? std::wstring() : L"branch " + branch + L"\n") +
+                     (flag.empty() ? std::wstring() : flag + L"\n") + L"\n";
+    return r;
+  };
+
+  // 本工作树检出的就是这条分支（基线现场正是如此）：确认与随操作显示的说明都要点出差异会变。
+  const g::RestorePlan here = g::BuildRestorePlan(clues, MakeQueries(Answered(kOidC), Answered(kOidP)));
+  GC_REQUIRE(!here.blocked, "基线现场应可执行");
+  GC_CHECK(here.previewText.find(L"这条分支正是当前工作树检出的那一条") != std::wstring::npos);
+  GC_CHECK(here.previewText.find(L"已暂存的更改") != std::wstring::npos);
+  GC_CHECK(here.notice.find(L"相对 HEAD 的差异会变") != std::wstring::npos);
+
+  // 删除形态要说的是另一种现场：引用没了之后这个工作树回到「该分支尚无提交」。
+  g::RestoreClues deleteClues = MakeClues();
+  deleteClues.isRootDeletion = true;
+  deleteClues.moveToOid.clear();
+  const g::RestorePlan deleted = g::BuildRestorePlan(
+      deleteClues, MakeQueries(Answered(kOidC), g::GitQueryResult{}, false));
+  GC_REQUIRE(!deleted.blocked, "删除形态的基线现场应可执行");
+  GC_CHECK(deleted.previewText.find(L"该分支尚无提交") != std::wstring::npos);
+
+  // 本工作树检出的是另一条分支：这次移动不改这边的落点，说明要跟着变。
+  g::RestorePreflightQueries otherQueries = MakeQueries(Answered(kOidC), Answered(kOidP));
+  otherQueries.worktrees = worktreeAnswer(kRoot, L"refs/heads/other");
+  const g::RestorePlan other = g::BuildRestorePlan(clues, otherQueries);
+  GC_REQUIRE(!other.blocked, "本工作树检出别的分支不构成拒绝理由");
+  GC_CHECK(other.previewText.find(L"当前工作树检出的是另一条分支（refs/heads/other）") !=
+           std::wstring::npos);
+  GC_CHECK(other.notice.find(L"相对 HEAD 的差异会变") == std::wstring::npos);
+
+  // 本工作树处于游离 HEAD：同样不改这边的落点。
+  g::RestorePreflightQueries detachedQueries = MakeQueries(Answered(kOidC), Answered(kOidP));
+  detachedQueries.worktrees = worktreeAnswer(kRoot, L"", L"detached");
+  const g::RestorePlan detached = g::BuildRestorePlan(clues, detachedQueries);
+  GC_REQUIRE(!detached.blocked, "游离 HEAD 不构成拒绝理由");
+  GC_CHECK(detached.previewText.find(L"游离 HEAD") != std::wstring::npos);
+
+  // 认不出本工作树那一条记录（裸仓库/输出里就是没有 branch 行）：不能断言「不影响这边」，
+  // 只能说出能确定的那半句。
+  g::RestorePreflightQueries unknownQueries = MakeQueries(Answered(kOidC), Answered(kOidP));
+  unknownQueries.worktrees = worktreeAnswer(kRoot, L"");
+  const g::RestorePlan unknown = g::BuildRestorePlan(clues, unknownQueries);
+  GC_REQUIRE(!unknown.blocked, "认不出检出分支不是拒绝理由，但措辞必须收窄");
+  GC_CHECK(unknown.previewText.find(L"没能在 worktree 记录里认出") != std::wstring::npos);
 }
 
 GC_TEST(restore_command_carries_no_deref_with_expected_old_value) {
