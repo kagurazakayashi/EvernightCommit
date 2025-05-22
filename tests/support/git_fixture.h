@@ -130,6 +130,15 @@ public:
   // 固定身份与递增的确定时间提交；提交前不自动 add，暂存状态由用例显式控制。
   void Commit(std::wstring_view subject);
 
+  // 用 plumbing 造一枚真实的提交对象并返回它的完整 ID：**不执行 git commit / git push**，
+  // 不移动 HEAD，也不碰索引与工作区（树取自当前索引的 write-tree，空索引就是空树）。
+  // 存在的意义：引用移动类用例（update-ref / 符号引用 / worktree 占用）要的是「一枚既有提交
+  // 反复复用」，不是再造一份历史——所以宁可走对象层的 plumbing，也不去跑会被归进 git-mutating
+  // 的真实提交。身份与时间沿用夹具固定的测试身份（时间按序号递增，保证多枚对象互不相同）。
+  // 母本文件写在临时根内、仓库之外（plumbing\ 子目录），不会出现在工作区状态里。
+  [[nodiscard]] std::wstring SeedCommitObject(std::wstring_view subject,
+                                              std::wstring_view parentOid = {});
+
   // ---- 只读查询（验证真实 Git 对象，而不是桩返回值） ----
   [[nodiscard]] std::wstring HeadSha();       // HEAD 不可解析时返回空串
   [[nodiscard]] long CommitCount();           // 无提交时返回 -1

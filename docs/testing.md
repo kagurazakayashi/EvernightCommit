@@ -69,6 +69,11 @@ build\ninja-x64\bin\Debug\gc_tests.exe --group git-mutating
 - 传输限制：`GIT_ALLOW_PROTOCOL=file`；远端 URL 必须通过 `IsAllowedTestRemote` 守卫——
   含 `://` 的（含 `file://` 网络共享形态）、UNC、scp 形态一律拒绝，只允许「盘符绝对路径且
   折叠后仍在临时根内」。开发仓库与用户真实仓库永远不会成为夹具的目标。
+- 需要「一枚既有提交对象」而不需要真实提交流程的用例，用 `GitFixture::SeedCommitObject`：
+  它只做 `write-tree`（树取自当前索引）+ 把提交对象头写成临时根内、**仓库之外**的母本文件 +
+  `hash-object -t commit -w` 三个动作，不执行 `git commit`/`git push`，不移动 HEAD，
+  也不碰索引与工作区。这样造出来的对象可以直接喂给 `update-ref` 做引用移动类断言，
+  用例因此留在可自跑的 `git-readonly` 组，不必把「建历史」这件事也拖进 `git-mutating`。
 - 串行前提：`environment_block_tests.cpp` 与个别绑定用例会在**测试进程作用域**内临时改
   `HOME`/`USERPROFILE`/`GIT_*` 并以 RAII 精确复原；这些用例不得并发运行。
   当前运行器是单进程串行，若将来并行化必须先把这类用例标注隔离域。

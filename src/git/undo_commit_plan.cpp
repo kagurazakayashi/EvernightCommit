@@ -297,6 +297,17 @@ std::vector<std::wstring> BuildRefSymbolicProbeArguments(std::wstring_view repos
                                    L"symbolic-ref", L"--quiet", std::wstring(branchRef)};
 }
 
+std::vector<std::wstring> BuildRefFormatProbeArguments(std::wstring_view repositoryDirectory,
+                                                      std::wstring_view branchRef) {
+  if (!RefnameShaped(branchRef) || repositoryDirectory.empty()) {
+    return {};  // 引用名連形狀關都沒過，或不確定問哪個倉庫：根本不送進 Git。
+  }
+  // 一律送 refs/heads/… 的完整形態，不加 `--`：實測本機 Git 的 check-ref-format 不認 `--`
+  // （帶著它死在自己的參數解析上），而完整形態本身也不會被当成選項。
+  return std::vector<std::wstring>{L"-C", std::wstring(repositoryDirectory), L"--no-optional-locks",
+                                   L"check-ref-format", std::wstring(branchRef)};
+}
+
 std::vector<std::wstring> BuildWorktreeListArguments(std::wstring_view repositoryDirectory) {
   if (repositoryDirectory.empty()) {
     return {};
@@ -394,14 +405,38 @@ bool ParseWorktreeListPorcelain(const GitQueryResult& result, std::vector<Worktr
   return true;
 }
 
-RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
-                                        const GitQueryResult& worktrees,
-                                        std::wstring_view branchRef,
-                                        std::wstring_view currentWorktreeRoot) {
+RefIntegrityFacts InterpretRefIntegrity(const RefIntegrityQueries& requests) {
   RefIntegrityFacts facts;
-  facts.branchRefUsable = RefnameShaped(branchRef);
-  if (facts.branchRefUsable) {
-    const UndoQueryRead symref = ReadUndoQuery(branchSymref);
+  facts.branchRefUsable = RefnameShaped(requests.branchRef);
+  if (!facts.branchRefUsable) {
+    return facts;  // 名字連形狀關都沒過：三條問答一律不採信，調用方在那一步就已經拒絕。
+  }
+  const std::wstring_view branchRef = requests.branchRef;
+  const std::wstring_view currentWorktreeRoot = requests.currentWorktreeRoot;
+
+  // Git 對這個名字本身的權威裁定：0 = 合格，1 + 空輸出 = Git 明確說不合格，其餘 = 問不成。
+  {
+    const UndoQueryRead format = ReadUndoQuery(requests.refFormat);
+    switch (format.outcome) {
+      case UndoQueryOutcome::answered:
+        facts.formatRan = true;
+        facts.formatAccepted = true;
+        facts.formatDetail = L"Git 的 check-ref-format 认定这个名字合格（退出码 0）。";
+        break;
+      case UndoQueryOutcome::noResult:
+        facts.formatRan = true;
+        facts.formatAccepted = false;
+        facts.formatDetail = L"Git 的 check-ref-format 明确回答它不是一个合格的引用名（退出码 1）。";
+        break;
+      case UndoQueryOutcome::failed:
+        facts.formatDetail =
+            format.detail.empty() ? std::wstring(L"查询没有成功") : format.detail;
+        break;
+    }
+  }
+
+  {
+    const UndoQueryRead symref = ReadUndoQuery(requests.branchSymref);
     switch (symref.outcome) {
       case UndoQueryOutcome::answered:
         facts.symrefRan = true;
@@ -420,7 +455,7 @@ RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
 
   std::vector<WorktreeRecord> records;
   std::wstring parseFailure;
-  const UndoQueryRead read = ReadUndoQuery(worktrees);
+  const UndoQueryRead read = ReadUndoQuery(requests.worktrees);
   if (read.outcome == UndoQueryOutcome::failed) {
     // 根本没问到（启动失败、超时、Git 报了问题）：谁在用这条分支无从知道。
     facts.worktreesDetail = read.detail.empty() ? std::wstring(L"查询没有成功") : read.detail;
@@ -428,17 +463,20 @@ RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
   }
   // 问到了明确答案（含「输出是空的」这种反常答复）：能不能解析是另一件事，分开记。
   facts.worktreesRan = true;
-  if (!ParseWorktreeListPorcelain(worktrees, &records, &parseFailure)) {
+  if (!ParseWorktreeListPorcelain(requests.worktrees, &records, &parseFailure)) {
     facts.worktreesDetail = parseFailure;
     return facts;
   }
   facts.worktreesReadable = true;
   for (const WorktreeRecord& record : records) {
-    if (record.branchRef.empty() || record.branchRef != branchRef) {
+    if (!currentWorktreeRoot.empty() && PathsEqualFolded(record.path, currentWorktreeRoot)) {
+      // 绑定的这个工作树自己：它检出哪条分支、是不是游离，只用于确认文字，不构成「占用」。
+      facts.currentWorktreeBranch = record.branchRef;
+      facts.currentWorktreeDetached = record.detached;
       continue;
     }
-    if (!currentWorktreeRoot.empty() && PathsEqualFolded(record.path, currentWorktreeRoot)) {
-      continue;  // 就是本工作树自己检出的那条分支：不是「被别人占着」。
+    if (record.branchRef.empty() || record.branchRef != branchRef) {
+      continue;
     }
     facts.worktreeHolder = record.path;
     break;
@@ -449,6 +487,17 @@ RefIntegrityFacts InterpretRefIntegrity(const GitQueryResult& branchSymref,
 std::wstring DescribeRefIntegrityRefusal(const RefIntegrityFacts& facts, std::wstring_view branchRef) {
   if (!facts.branchRefUsable) {
     return {};  // 引用名本身不合格时，调用方在那一步就已经拒绝了，这里不重复措辞。
+  }
+  // 名字的权威裁定排在最前：形状过滤是本程序的产品契约，Git 说不合格就根本没有「这条分支」可言。
+  if (!facts.formatRan) {
+    return L"没能问出 Git 对这个引用名本身的裁定（git check-ref-format：" +
+           (facts.formatDetail.empty() ? std::wstring(L"查询没有结果") : facts.formatDetail) +
+           L"）。这个名字最终由 Git 说话，问不到就不动它，本次没有产生任何命令。";
+  }
+  if (!facts.formatAccepted) {
+    return L"「" + std::wstring(branchRef) + L"」这个名字过不了 Git 自己的引用名规则（" +
+           facts.formatDetail + L"）。撤回与恢复只按 Git 认得的完整本地分支引用名移动那一条分支，"
+           L"这个名字不会复现成任何命令。";
   }
   if (!facts.symrefRan) {
     return L"没能问出「" + std::wstring(branchRef) +
@@ -829,12 +878,17 @@ void InterpretUndoTarget(const UndoPreflightQueries& queries, UndoHeadFacts* fac
 UndoPreflightFacts InterpretUndoPreflight(const UndoPreflightQueries& queries) {
   UndoPreflightFacts facts;
   facts.head = InterpretUndoHeadSnapshot(queries.symbolicRef, queries.headCommit);
-  // 「这个名字是不是符号引用」「这条分支有没有被别的工作树占着」：都在问出分支名之后才发得出去，
-  // 不是分支时两条都不问（下面那一步的拒绝会先落在「不在分支上」上）。
+  // 「这个名字是不是符号引用」「Git 认不认这个名字」「这条分支有没有被别的工作树占着」：
+  // 都在问出完整分支引用名之后才发得出去，不是分支时三条都不问（下面那一步的拒绝会先落在
+  // 「不在分支上」上）。
   if (facts.head.onBranch && RefnameShaped(facts.head.branchRef)) {
-    facts.head.refIntegrity =
-        InterpretRefIntegrity(queries.branchSymref, queries.worktrees, facts.head.branchRef,
-                              queries.worktreeRoot);
+    RefIntegrityQueries integrityRequests;
+    integrityRequests.branchSymref = queries.branchSymref;
+    integrityRequests.refFormat = queries.branchRefFormat;
+    integrityRequests.worktrees = queries.worktrees;
+    integrityRequests.branchRef = facts.head.branchRef;
+    integrityRequests.currentWorktreeRoot = queries.worktreeRoot;
+    facts.head.refIntegrity = InterpretRefIntegrity(integrityRequests);
   }
 
   if (facts.head.headResolved) {
@@ -1063,9 +1117,10 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
   plan.newObjectId = newOid;
   plan.targetKind = target.kind;
   if (rootUndo) {
-    // --no-deref：按**这个名字**删，不追随符号引用去删它指向的另一条分支。
-    // 预期旧值同样按不解引用的形态核对：确认之间这个名字被换成符号引用时，Git 读到的
-    // 是「ref: …」而不是那个对象 ID，于是以非 0 拒绝，另一条分支一个字节都不会被动。
+    // --no-deref：按**这个名字**删，绝不追随符号引用去删它指向的另一条分支。
+    // 实测（本机 Git 2.53）这一笔的边界：预期旧值仍按**解引用后**的值比对，所以确认之间这个名字
+    // 被换成符号引用时，对不上就以非 0 拒；恰好对得上时 Git 删的是**这个名字本身**（那条符号引用），
+    // 背后的分支一个字节都不动。两种落点都还在确认过的那一条引用之内。
     plan.arguments = {L"update-ref", L"--no-deref", L"-d", L"-m", std::wstring(kReflogReason),
                       head.branchRef, head.headObjectId};
     plan.commandLabel = L"git update-ref -d";
@@ -1091,9 +1146,12 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
   preview += L"将撤回的提交：" + ShortObjectId(head.headObjectId) + L"（完整 ID " + head.headObjectId +
              L"）「" + (head.headSummary.empty() ? std::wstring(L"（无标题）") : head.headSummary) +
              L"」\n";
-  preview += L"预期旧值核对：Git 只在上面那个引用确实还指向 " + head.headObjectId +
-             L" 时才动它，值对不上就原样拒绝（非 0 退出）。这一步是原子核对，不是先读后写，"
-             L"所以「确认之后分支被别人推进」不会让这次撤回落错位置。\n";
+  preview += L"预期旧值核对：Git 只在「" + head.branchRef + L"」这个名字现值对得上 " + head.headObjectId +
+             L" 时才动它，值对不上就原样拒绝（非 0 退出）。这一步是 Git 自己的核对，不是本程序"
+             L"先读后写，所以「确认之后分支被别人推进」不会让这次撤回落错位置。\n";
+  preview += L"这个名字过了两道关：本程序只接受 refs/heads/… 的完整本地分支引用（标签、远端跟踪引用、"
+             L"HEAD 与伪引用都不在这里），Git 自己的 check-ref-format 也当场裁定它合格；"
+             L"两道关任一没过、或任一没问回来，都不会打开命令窗口。\n";
   if (rootUndo) {
     preview += L"目标是回到「尚无提交」：这条提交的对象与 Git 的历史视图都记录它没有父提交，"
                L"而且仓库明确不是浅仓库，因此它是真正的第一个提交（git reset --soft 表达不了那种状态）。\n";
@@ -1115,12 +1173,17 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
     preview += L"注意：Git 没有回答「这个仓库是不是浅仓库」，因此本程序不会把「看不见父提交」"
                L"当成「这就是第一个提交」——真正根提交的删除路径在这种仓库里一律不开放。\n";
   }
-  preview += L"关于竞争：这条命令带 --no-deref，Git 按「上面写明的这个名字」本身读写与核对，"
-             L"不会追随符号引用去改它指向的另一条分支；预期旧值也按这个不解引用的形态比对，"
-             L"确认之间这个名字被换成符号引用或分支被别人推进时，Git 会以非 0 原样拒绝。"
-             L"HEAD 是否还指向这个分支由执行前的同步复核保证，复核与本程序启动 Git 之间的极短窗口"
-             L"无法由本程序锁住（完整的引用事务需要 git update-ref --stdin，而命令窗口没有标准输入通道）。"
-             L"这个窗口里可能发生的是「同一条名字的写入被 Git 拒掉」，不会是「别的分支被动到」。\n\n";
+  preview += L"关于竞争：这条命令带 --no-deref，Git 写入的目标就是上面写明的这个名字本身，"
+             L"不会追随符号引用去改它指向的另一条分支（本机实测：这个名字若已被人换成符号引用，"
+             L"移动形态是把那个名字本身改写成新的对象 ID、删除形态是删掉那个名字本身，"
+             L"背后的分支一动不动；而预期旧值仍按解引用后的值比对，对不上就以非 0 原样拒绝，"
+             L"它指向的东西不存在时 Git 直接报错拒掉）。"
+             L"分支被别人推进时，预期旧值对不上，Git 同样以非 0 原样拒绝。"
+             L"这个名字还合不合格、还是不是普通分支、有没有被别的工作树检出，由执行前的后台复核重问保证；"
+             L"复核与本程序启动 Git 之间的极短窗口无法由本程序锁住（完整的引用事务需要 "
+             L"git update-ref --stdin，而命令窗口没有标准输入通道）。"
+             L"这个窗口里可能发生的是「这个名字的写入被 Git 拒掉」或「按这个名字本身处理」，"
+             L"不会是「别的分支被动到」。\n\n";
 
   if (!model.staged.empty() || !model.unstaged.empty()) {
     preview += L"工作区/索引现状：已暂存 " + std::to_wstring(model.staged.size()) + L" 项、未暂存 " +
@@ -1206,11 +1269,13 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
 
   std::wstring notice = rootUndo
                             ? L"只删除分支引用 " + head.branchRef +
-                                  L"（仅本地，带预期旧值 " + ShortObjectId(head.headObjectId) +
-                                  L"）：索引与工作区保持原样。"
+                                  L"（仅本地，按这个名字本身删除、不追随符号引用，带预期旧值 " +
+                                  ShortObjectId(head.headObjectId) +
+                                  L"）：索引与工作区的字节都不动，但它们相对新的 HEAD 会呈现出差异。"
                             : L"只移动分支引用 " + head.branchRef +
-                                  L"（仅本地，带预期旧值 " + ShortObjectId(head.headObjectId) +
-                                  L"）：索引与工作区保持原样。";
+                                  L"（仅本地，按这个名字本身移动、不追随符号引用，带预期旧值 " +
+                                  ShortObjectId(head.headObjectId) +
+                                  L"）：索引与工作区的字节都不动，但它们相对新的 HEAD 会呈现出差异。";
   if (input.workflow.indexLocked) {
     notice += L"（注意：仓库里已有 index.lock，另一个 Git 进程可能正在写索引；撤回本身只动引用，"
               L"但结果以 Git 的回答为准）";

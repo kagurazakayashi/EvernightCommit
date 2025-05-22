@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "git/commit_history.h"  // LooksLikeFullObjectId：plumbing 造出来的对象 ID 也按同一形态校验
 #include "git/repository.h"
 #include "platform/windows/environment_block.h"
 #include "platform/windows/git_toolchain.h"
@@ -592,6 +593,55 @@ void GitFixture::Commit(std::wstring_view subject) {
   PutEnvironmentEntry(baseEnvironment_, L"GIT_AUTHOR_DATE=" + date);
   PutEnvironmentEntry(baseEnvironment_, L"GIT_COMMITTER_DATE=" + date);
   RunCheckedInRepo({L"commit", L"--quiet", L"--no-verify", L"-m", std::wstring(subject)});
+}
+
+std::wstring GitFixture::SeedCommitObject(std::wstring_view subject, std::wstring_view parentOid) {
+  if (repoDir_.empty()) {
+    throw PrerequisiteFailure("夹具尚未初始化仓库，SeedCommitObject 需要已初始化的工作区");
+  }
+  // 树取自当前索引：write-tree 不改任何引用，空索引得到的就是那个众所周知的空树。
+  const std::wstring treeOid = FirstLineTrimmed(RunCheckedInRepo({L"write-tree"}).out);
+  if (treeOid.empty()) {
+    throw PrerequisiteFailure("write-tree 没有答出树对象 ID");
+  }
+  ++commitSequence_;
+  const long long when = kCommitEpochBase + commitSequence_ * 60;
+  const std::wstring identity = L"Evernight Test <test@example.invalid>";
+  std::wstring text = L"tree " + treeOid + L"\n";
+  if (!parentOid.empty()) {
+    text += L"parent " + std::wstring(parentOid) + L"\n";
+  }
+  text += L"author " + identity + L" " + std::to_wstring(when) + L" +0000\n";
+  text += L"committer " + identity + L" " + std::to_wstring(when) + L" +0000\n\n";
+  text += std::wstring(subject) + L"\n";
+
+  // 母本写在临时根内、仓库之外：它既不进工作区，也不会被 status 看见。
+  const std::wstring seedPath =
+      PathInRoot(L"plumbing\\commit-" + std::to_wstring(commitSequence_) + L".txt");
+  std::error_code ec;
+  std::filesystem::create_directories(std::filesystem::path(seedPath).parent_path(), ec);
+  if (ec) {
+    throw PrerequisiteFailure("创建 plumbing 母本目录失败：" + WideToUtf8(seedPath) + "（" +
+                              ec.message() + "）");
+  }
+  {
+    std::ofstream file(std::filesystem::path(seedPath), std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+      throw PrerequisiteFailure("无法写入提交对象母本：" + WideToUtf8(seedPath));
+    }
+    file << WideToUtf8(text);
+    if (file.fail()) {
+      throw PrerequisiteFailure("写入提交对象母本失败：" + WideToUtf8(seedPath));
+    }
+  }
+  // `-t commit` 直接按文件字节造对象（不套任何过滤器）；`--` 挡住以 - 开头的路径形态。
+  const GitRun hashed = RunCheckedInRepo({L"hash-object", L"-t", L"commit", L"-w", L"--", seedPath});
+  const std::wstring commitOid = FirstLineTrimmed(hashed.out);
+  if (!git::LooksLikeFullObjectId(commitOid)) {
+    throw PrerequisiteFailure("hash-object 没有答出完整的提交对象 ID：" + WideToUtf8(hashed.out) +
+                              "（stderr：" + WideToUtf8(hashed.err) + "）");
+  }
+  return commitOid;
 }
 
 std::wstring GitFixture::HeadSha() {
