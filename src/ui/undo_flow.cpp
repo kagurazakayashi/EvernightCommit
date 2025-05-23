@@ -126,12 +126,9 @@ void UndoFlow::OnRecheckCompleted(OperationHost& host, const OperationContext& c
 
 void UndoFlow::Launch(OperationHost& host, const OperationContext& ctx,
                       const git::UndoCommitPlan& plan, const git::UndoPreflightFacts& facts) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
-  operation.arguments = plan.arguments;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan.operationId, plan.displayName, ctx.gitExecutable, ctx.detection.root, plan.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" +
@@ -142,10 +139,8 @@ void UndoFlow::Launch(OperationHost& host, const OperationContext& ctx,
   options.restoreHint = plan.restoreHint;
   // 操作历史：撤回是「移动一个本地分支引用」，带完整对象 ID，因此是唯一可审查回退的一类。
   // 反手恢复就是把那条分支从「撤回后的父提交」挪回「被撤回的原提交」——同一条原子 update-ref 命令族。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::undo;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = plan.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::undo, ctx.detection.root,
+                                                 plan.displayName);
   options.history.sourceRef = plan.targetRef;
   options.history.sourceObjectId = plan.expectedOldObjectId;  // 撤回前该分支指着的原提交
   if (!plan.newObjectId.empty()) {
@@ -154,7 +149,8 @@ void UndoFlow::Launch(OperationHost& host, const OperationContext& ctx,
     options.history.restoreExpectedCurrentId = plan.newObjectId;        // 撤回后分支应指（父提交）
     options.history.restoreUndoToObjectId = plan.expectedOldObjectId;   // 恢复要挪回的原提交
   } else {
-    // 根提交撤回删掉了引用：恢复它等于「无预期旧值地重建引用」，不属于自动回退范围。
+    // 根提交撤回删掉了引用：重建它属于「零值旧 OID 的创建」形态——Git 支持那种形态，
+    // 但本程序不提供自动重建的入口（支持范围，不是 Git 的能力限制；见 restore_plan 同段措辞）。
     options.history.restoreKind = app::HistoryRestoreKind::none;
   }
   options.history.restoreNote = plan.restoreHint;

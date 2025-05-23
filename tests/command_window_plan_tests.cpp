@@ -730,3 +730,65 @@ GC_TEST(command_observer_keeps_running_until_result_written) {
   long exitCode = 0;
   GC_CHECK(gc::git::DecideCommandCompletion(facts, &exitCode) == gc::git::CommandCompletion::running);
 }
+
+GC_TEST(make_command_window_operation_carries_all_five_required_parts) {
+  // 统一装配点：五个必需字段按位置传入，漏任何一个首先是编译错误。参数数组必须逐元素原样带走，
+  // 这正是 R1 缺陷（「参数已生成却没传入」）的反面：这一行里不存在「忘了写 arguments」的写法。
+  const std::vector<std::wstring> arguments{L"config", L"branch.demo.remote", L"origin"};
+  const gc::git::CommandWindowOperation operation = gc::git::MakeCommandWindowOperation(
+      L"upstream-1", L"上游设置第 1 条", L"C:\\Program Files\\Git\\cmd\\git.exe",
+      L"D:\\仓库 with spaces\\工作区", arguments);
+  GC_CHECK(operation.operationId == L"upstream-1");
+  GC_CHECK(operation.displayName == L"上游设置第 1 条");
+  GC_CHECK(operation.gitExecutable == L"C:\\Program Files\\Git\\cmd\\git.exe");
+  GC_CHECK(operation.repositoryDirectory == L"D:\\仓库 with spaces\\工作区");
+  GC_CHECK(operation.arguments == arguments);
+  GC_CHECK(operation.environmentOverrides.empty());  // 覆盖仍由调用方按方案补充。
+  // 装配完整的请求在启动边界上必须放行。
+  GC_CHECK(gc::git::DescribeCommandWindowOperationRefusal(operation).empty());
+}
+
+GC_TEST(command_launch_boundary_refusal_names_operation_for_each_missing_part) {
+  // 启动边界的核对覆盖每个必需字段：漏哪一个都能点名「是哪条操作的哪一段」，
+  // 并明说这是接线缺陷而不是 Git 拒绝。
+  struct Case {
+    std::wstring_view what;
+    CommandWindowOperation operation;
+  };
+  CommandWindowOperation complete = MakeOperation(L"C:\git.exe", {L"status"});
+  complete.operationId = L"undo-ref";
+  complete.displayName = L"撤回最近提交";
+
+  std::vector<Case> cases;
+  auto noArgs = complete;
+  noArgs.arguments.clear();
+  cases.push_back({L"参数表", noArgs});
+  auto noExe = complete;
+  noExe.gitExecutable.clear();
+  cases.push_back({L"Git 路径", noExe});
+  auto noRepo = complete;
+  noRepo.repositoryDirectory.clear();
+  cases.push_back({L"工作目录", noRepo});
+  auto noId = complete;
+  noId.operationId.clear();
+  cases.push_back({L"操作 ID", noId});
+  auto badId = complete;
+  badId.operationId = L"ops&1";
+  cases.push_back({L"非法 ID", badId});
+  auto noName = complete;
+  noName.displayName.clear();
+  cases.push_back({L"操作名称", noName});
+
+  for (const Case& testCase : cases) {
+    const std::wstring refusal = gc::git::DescribeCommandWindowOperationRefusal(testCase.operation);
+    GC_CHECK_MESSAGE(!refusal.empty(), "缺失字段必须被点名：" + Describe(testCase.what));
+    GC_CHECK_MESSAGE(refusal.find(L"接线缺陷") != std::wstring::npos,
+                     "要说清是接线缺陷不是 Git 拒绝：" + Describe(refusal));
+    // 名字可辨认时，拒绝文案必须带着「这一份操作自己的」名字与 ID（坏 ID 用例带的是坏的那一个）。
+    if (!testCase.operation.displayName.empty() && !testCase.operation.operationId.empty()) {
+      GC_CHECK_MESSAGE(refusal.find(testCase.operation.displayName) != std::wstring::npos &&
+                           refusal.find(testCase.operation.operationId) != std::wstring::npos,
+                       "拒绝文案要带操作名与 ID：" + Describe(refusal));
+    }
+  }
+}

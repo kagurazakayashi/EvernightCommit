@@ -28,7 +28,7 @@ struct RestoreProbeOutcome {
   std::wstring repositoryDirectory;
 };
 
-// 只读地发起恢复预检（分支现在指着什么 + 要挪去的对象可达性 + 有没有流程停着）。
+// 只读地发起恢复预检（分支现在指着什么 + 要挪去的对象本地读不读得到 + 有没有流程停着）。
 // 全程隐藏窗口子进程，不弹命令窗口、不写对象库、不访问远端。
 [[nodiscard]] git::RestorePreflightQueries CollectRestoreFacts(const RestoreProbeRequest& request);
 

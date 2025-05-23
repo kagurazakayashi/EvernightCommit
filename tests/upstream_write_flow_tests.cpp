@@ -193,3 +193,24 @@ GC_TEST(upstream_write_flow_ignores_out_of_order_and_late_terminals) {
   GC_CHECK(!flow.Active());
   GC_REQUIRE(host.launches.size() == 2, "结案之后不再发任何命令");
 }
+
+GC_TEST(upstream_write_flow_launches_pass_the_host_boundary_validator) {
+  // 控制器↔宿主的接线合同：假宿主「收下的每一份操作」都必须能过真实宿主在启动边界上的
+  // 同一份核对（git::DescribeCommandWindowOperationRefusal，MainWindow 在占槽之前调的就是它）。
+  // 这一条把「测试里被接受」与「真窗口里会被接受」钉成同一件事——R1 那类漏字段装配在这里
+  // 当场变红，而不是等真机点一次推送才发现命令窗口里跑的是裸 git。
+  FakeOperationHost host;
+  UpstreamWriteFlow flow;
+  OperationContext ctx = MakeContext(std::wstring(kBoundRoot));
+  GC_CHECK(flow.Begin(host, ctx, MakePlan(NormalSteps())));
+  GC_REQUIRE(host.launches.size() == 1, "Begin 后应发出第一条");
+  GC_CHECK(gc::git::DescribeCommandWindowOperationRefusal(host.launches[0].operation).empty());
+  GC_CHECK(flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"));
+  GC_REQUIRE(host.launches.size() == 2, "第一条成功后应发出第二条");
+  GC_CHECK(gc::git::DescribeCommandWindowOperationRefusal(host.launches[1].operation).empty());
+  // 这两步本来就不落历史：record 位没被顺手置起，边界核对也就不会替它兜住一条无主记录。
+  for (const auto& launch : host.launches) {
+    GC_CHECK(!launch.options.history.record);
+  }
+  flow.OnStepSettled(host, ctx, 2, true, L"退出码 0");
+}

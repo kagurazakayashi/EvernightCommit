@@ -141,7 +141,7 @@ inline constexpr UINT kSubmodulePointerProbeCompleted = WM_APP + 18;
 inline constexpr UINT kConflictProbeCompleted = WM_APP + 19;
 // 「首次使用」持久化说明的弹出通知：WM_CREATE 里不弹模态框，创建完成后由这条消息补上。
 inline constexpr UINT kPersistentConsentNotice = WM_APP + 23;
-// 「按记录恢复引用」的只读预检（分支现值／要挪回的对象可达性／有没有流程停着，全部本地只读）
+// 「按记录恢复引用」的只读预检（分支现值／要挪回的对象本地可读性——问的是能不能解析，不是可达——／有没有流程停着，全部本地只读）
 // 完成通知；wParam 为请求序号。命令本身在命令窗口里跑，不走这条通知。
 inline constexpr UINT kRestoreProbeCompleted = WM_APP + 24;
 // 恢复「点头之后、发命令之前」的分支现值复核完成通知；wParam 为请求序号。走后台，没回来不发命令。

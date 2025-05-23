@@ -45,15 +45,14 @@ void UpstreamWriteFlow::LaunchStep(OperationHost& host, const OperationContext& 
   const git::UpstreamWriteStep& step = plan_.steps[index];
   waitingStep_ = index + 1;
 
-  git::CommandWindowOperation operation;
-  operation.operationId = step.operationId;
-  operation.displayName = step.displayName;
-  operation.gitExecutable = plan_.gitExecutable.empty() ? ctx.gitExecutable : plan_.gitExecutable;
-  // 仍然绑在这次推送那个仓库根上：中途界面换了仓库，剩下的配置命令就不该发给另一个仓库。
-  operation.repositoryDirectory = plan_.repositoryDirectory;
   // 这一行是 R1 的全部内容：已审查的参数必须原样交给执行器。参数走 Unicode 数组，
   // 不进任何 shell 字符串，所以键名/值里的特殊字符都不需要（也不允许）再做转义。
-  operation.arguments = step.arguments;
+  // 五个必需字段走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      step.operationId, step.displayName,
+      plan_.gitExecutable.empty() ? ctx.gitExecutable : plan_.gitExecutable,
+      // 仍然绑在这次推送那个仓库根上：中途界面换了仓库，剩下的配置命令就不该发给另一个仓库。
+      plan_.repositoryDirectory, step.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + step.commandLabel + L"（上游设置第 " +

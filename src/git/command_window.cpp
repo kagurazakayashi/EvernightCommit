@@ -318,6 +318,46 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
   return true;
 }
 
+CommandWindowOperation MakeCommandWindowOperation(std::wstring_view operationId,
+                                                  std::wstring_view displayName,
+                                                  std::wstring_view gitExecutable,
+                                                  std::wstring_view repositoryDirectory,
+                                                  std::vector<std::wstring> arguments) {
+  CommandWindowOperation operation;
+  operation.operationId = std::wstring(operationId);
+  operation.displayName = std::wstring(displayName);
+  operation.gitExecutable = std::wstring(gitExecutable);
+  operation.repositoryDirectory = std::wstring(repositoryDirectory);
+  operation.arguments = std::move(arguments);
+  return operation;
+}
+
+std::wstring DescribeCommandWindowOperationRefusal(const CommandWindowOperation& operation) {
+  // 操作名称不在 BuildGitCommandLine 的判定范围里（标题由 MakeSafeConsoleTitle 另行清洗），
+  // 但空名称意味着装配层漏了字段：它会进窗口标题、状态栏与历史记录标签，这里补上这一条。
+  if (operation.displayName.empty()) {
+    std::wstring text = L"这份命令窗口请求在装配层就不成立，没有启动：操作名称为空";
+    text += operation.operationId.empty() ? std::wstring(L"（操作 ID 也为空）")
+                                          : L"（ID " + operation.operationId + L"）";
+    text += L"。这是接线缺陷，不是 Git 拒绝；没有打开命令窗口，仓库没有被改动。";
+    return text;
+  }
+  std::wstring line;
+  CommandPlanReject reject = CommandPlanReject::none;
+  std::wstring detail;
+  if (BuildGitCommandLine(operation, &line, &reject, &detail)) {
+    return {};
+  }
+  // 空参数表的 detail 里已经带着操作名与 ID（BuildGitCommandLine 的既有措辞），不再重复拼一次；
+  // 其余判定（ID 形态、程序/目录为空、字符安全、数量与长度）由这里统一点名。
+  std::wstring text = L"这份命令窗口请求在装配层就不成立，没有启动";
+  if (reject != CommandPlanReject::emptyArguments) {
+    text += L"（操作「" + operation.displayName + L"」，ID " + operation.operationId + L"）";
+  }
+  text += L"：" + detail + L"。这是接线缺陷，不是 Git 拒绝；没有打开命令窗口，仓库没有被改动。";
+  return text;
+}
+
 std::wstring MakeSafeConsoleTitle(std::wstring_view prefix, std::wstring_view displayName,
                                   std::wstring_view operationId) {
   // 会改变 shell 行解析或说明书行形态的字符：引号、控制字符，以及 & | < > ^ % （% 还可能被

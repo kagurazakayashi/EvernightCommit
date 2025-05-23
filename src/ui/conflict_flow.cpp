@@ -141,12 +141,9 @@ void ConflictFlow::OnRecheckCompleted(OperationHost& host, const OperationContex
 }
 
 void ConflictFlow::Launch(OperationHost& host, const OperationContext& ctx) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan_.operationId;
-  operation.displayName = plan_.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
-  operation.arguments = plan_.arguments;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan_.operationId, plan_.displayName, ctx.gitExecutable, ctx.detection.root, plan_.arguments);
 
   const bool continuing = entry_ == Entry::continueFlow;
   CommandLaunchOptions options;
@@ -158,10 +155,9 @@ void ConflictFlow::Launch(OperationHost& host, const OperationContext& ctx) {
   options.conflictAbortOperation = !continuing;
   // 操作历史：继续/中止都是多提交重放或工作区重写，不是单条能安全「挪回」的本地引用，
   // 恢复类别为 none；中止本身已是回退动作，本程序不在其上再叠加任何自动撤销。
-  options.history.record = true;
-  options.history.flow = continuing ? app::HistoryFlow::conflictContinue : app::HistoryFlow::conflictAbort;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = plan_.displayName;
+  options.history = app::MakeWriteHistoryCapture(
+      continuing ? app::HistoryFlow::conflictContinue : app::HistoryFlow::conflictAbort,
+      ctx.detection.root, plan_.displayName);
   options.history.restoreKind = app::HistoryRestoreKind::none;
   options.history.restoreNote =
       continuing ? L"「继续该流程」会让 Git 建立提交并改动索引/工作区：那是合并/重放的结果，"
