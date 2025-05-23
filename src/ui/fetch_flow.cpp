@@ -74,13 +74,10 @@ void FetchFlow::OnProbeCompleted(OperationHost& host, const OperationContext& ct
 }
 
 void FetchFlow::Launch(OperationHost& host, const OperationContext& ctx, const git::FetchPlan& plan) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
   // 参数按数组提交，不进任何 shell 字符串；目标只认名字，URL 由 Git 自己按配置解析。
-  operation.arguments = plan.arguments;
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan.operationId, plan.displayName, ctx.gitExecutable, ctx.detection.root, plan.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（目标：" + plan.remoteName +
@@ -90,10 +87,8 @@ void FetchFlow::Launch(OperationHost& host, const OperationContext& ctx, const g
   options.scopeNotice = plan.notice;
   options.fetchOperation = true;
   // 操作历史：fetch 的边界就是它不改的那些东西，因此没有「挪回」的对象，恢复类别为 none。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::fetch;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = plan.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::fetch, ctx.detection.root,
+                                                 plan.displayName);
   options.history.remoteName = plan.remoteName;
   options.history.restoreKind = app::HistoryRestoreKind::none;
   options.history.restoreNote =

@@ -32,7 +32,9 @@ namespace gc::git {
 //   * 目标分支已被移动（现值 ≠ 预期的「操作后应指对象」）：如实说它现在在哪，判定为不可自动执行；
 //     发出的命令也会被 Git 用预期旧值挡下，因此这里默认不发、只说明（复制命令时同样标注这一点）。
 //   * 目标分支已被删除：按「回到无引用」与「重建引用」两种方向分别判断，绝不臆测它该在哪。
-//   * 要挪去的那个对象不可达（被回收、或本就不在本地）：拒绝，不联网补、不自动 fetch。
+//   * 要挪去的那个对象在本地读不到（`<ID>^{commit}` 问不出一个能解析的提交对象；可能已被回收、
+//     也可能这份历史本就不完整——「读不到」不等于「不可达」，这条查询只回答能不能解析）：
+//     拒绝，不联网补、不自动 fetch。
 //   * 有 Git 流程停着（merge/rebase/cherry-pick/…）：那种状态下引用被流程当进度记录用，
 //     此时移动引用会搅乱现场，一律拒绝，让用户先把原流程走完。痕迹没问过或有任何一处读不回来
 //     都不算「没有流程停着」。
@@ -62,8 +64,10 @@ namespace gc::git {
 [[nodiscard]] std::vector<std::wstring> BuildRestoreBranchValueArguments(std::wstring_view repositoryDirectory,
                                                                          std::wstring_view branchRef);
 
-// 要挪去的那个对象可达吗：复用撤回里同族的 <ID>^{commit} 剥离问法（BuildUndoParentObjectArguments）。
-// 这里只是给一个语义名字，实现就是那条已实测的查询，不另发明命令形态。
+// 要挪去的那个对象在本地读得到吗：复用撤回里同族的 <ID>^{commit} 剥离问法
+// （BuildUndoParentObjectArguments）。这里只是给一个语义名字，实现就是那条已实测的查询，
+// 不另发明命令形态。注意这条查询验证的是「Git 能把这个 ID 解析成本地存在的一个提交对象」，
+// 它不回答、也不需要回答「该对象是否从某条分支可达」——措辞不要把两件事混同。
 [[nodiscard]] std::vector<std::wstring> BuildRestoreTargetObjectArguments(std::wstring_view repositoryDirectory,
                                                                          std::wstring_view targetObjectId);
 
@@ -113,7 +117,7 @@ enum class RestoreFeasibility {
   branchMissing,      // 目标分支已不存在（读回来是明确的「没有」）
   branchMoved,        // 目标分支还在，但已不指向「操作后应指的那个对象」：现场已变
   moveToMissing,      // 要挪回去的那个对象在本地读不到：历史不完整，拒绝且不联网补
-  feasible,           // 分支仍停在预期位置、要挪去的对象可达（或按删除处理）：可以给一条带预期旧值的命令
+  feasible,           // 分支仍停在预期位置、要挪去的对象本地读得到（或按删除处理）：可以给一条带预期旧值的命令
 };
 
 [[nodiscard]] std::wstring_view RestoreFeasibilityLabel(RestoreFeasibility feasibility) noexcept;

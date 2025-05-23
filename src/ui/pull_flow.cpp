@@ -72,12 +72,10 @@ void PullFlow::HandleFetchProbe(OperationHost& host, const OperationContext& ctx
     return;
   }
 
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
-  operation.arguments = plan.arguments;  // 目标只认远端名字，URL 由 Git 自己按配置解析。
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  // 目标只认远端名字，URL 由 Git 自己按配置解析。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan.operationId, plan.displayName, ctx.gitExecutable, ctx.detection.root, plan.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第一步：获取；" +
@@ -85,10 +83,8 @@ void PullFlow::HandleFetchProbe(OperationHost& host, const OperationContext& ctx
   options.scopeNotice = plan.notice;
   options.pullFetchOperation = true;
   // 操作历史：获取步与 fetch 同边界，不动本地引用，恢复类别为 none。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::pull;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = plan.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::pull, ctx.detection.root,
+                                                 plan.displayName);
   options.history.remoteName = plan.remoteName;
   options.history.restoreKind = app::HistoryRestoreKind::none;
   options.history.restoreNote =
@@ -238,12 +234,9 @@ void PullFlow::HandleRecheck(OperationHost& host, const OperationContext& ctx,
 
 void PullFlow::LaunchIntegrate(OperationHost& host, const OperationContext& ctx,
                                const git::PullIntegratePlan& plan) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
-  operation.arguments = plan.arguments;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan.operationId, plan.displayName, ctx.gitExecutable, ctx.detection.root, plan.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（pull 的第二步：整合；工作目录 " +
@@ -252,10 +245,8 @@ void PullFlow::LaunchIntegrate(OperationHost& host, const OperationContext& ctx,
   options.pullIntegrateOperation = true;
   // 操作历史：整合会移动 HEAD/分支并重写索引/工作区，是多提交合并/重放，不是单条能安全
   // 「挪回」的本地引用；恢复类别为 none，本程序不自动撤销。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::pull;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = plan.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::pull, ctx.detection.root,
+                                                 plan.displayName);
   options.history.targetObjectId = plan.targetObjectId;
   options.history.restoreKind = app::HistoryRestoreKind::none;
   options.history.restoreNote =

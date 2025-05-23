@@ -276,14 +276,12 @@ void CommitFlow::HandleRecheckProbe(CommitOperationHost& host, const OperationCo
 
 void CommitFlow::Launch(CommitOperationHost& host, const git::CommitPlan& plan,
                         const git::CommitFormData& committedForm) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  // 启动参数一律取自这份「确认框上写的、并且刚刚复核过的」身份，不再回读界面此刻的状态：
-  // 命令属于那个仓库，就不能因为界面后来换了显示而跑到别的目录去。
-  operation.gitExecutable = plan.identity.gitExecutable;
-  operation.repositoryDirectory = plan.identity.repositoryDirectory;
-  operation.arguments = plan.arguments;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan.operationId, plan.displayName,
+      // 启动参数一律取自这份「确认框上写的、并且刚刚复核过的」身份，不再回读界面此刻的状态：
+      // 命令属于那个仓库，就不能因为界面后来换了显示而跑到别的目录去。
+      plan.identity.gitExecutable, plan.identity.repositoryDirectory, plan.arguments);
   operation.environmentOverrides = plan.environmentOverrides;
 
   CommandLaunchOptions options;
@@ -297,10 +295,8 @@ void CommitFlow::Launch(CommitOperationHost& host, const git::CommitPlan& plan,
   options.committedForm = committedForm;
   // 操作历史：记下这次提交「确认时到底是哪一份」——分支与提交前 HEAD 都取自复核过的那份身份。
   // 新提交的对象 ID 此刻还没生成（由 Git 造），因此不做引用级自动回退；反悔交给「撤回最近提交」。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::commit;
-  options.history.workTreeRoot = plan.identity.repositoryDirectory;
-  options.history.operationLabel = plan.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::commit,
+                                                 plan.identity.repositoryDirectory, plan.displayName);
   options.history.sourceRef = plan.identity.branchRef;
   options.history.sourceObjectId = plan.identity.headObjectId;
   options.history.restoreKind = app::HistoryRestoreKind::none;

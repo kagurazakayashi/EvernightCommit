@@ -111,7 +111,8 @@ GC_TEST(restore_plan_arguments_shape) {
   GC_CHECK(g::BuildRestoreBranchValueArguments(L"P:\\repo", L"main").empty());
   GC_CHECK(g::BuildRestoreBranchValueArguments(L"P:\\repo", L"bad name").empty());
   GC_CHECK(g::BuildRestoreBranchValueArguments(L"", kB).empty());
-  // 对象可达性复用撤回同族查询：合格 ID 有参数，非 ID 返回空。
+  // 对象本地可读性复用撤回同族查询：合格 ID 有参数，非 ID 返回空。
+  // 这条查询问的是「能不能解析成一个提交对象」，不是「从分支可达」。
   GC_CHECK(!g::BuildRestoreTargetObjectArguments(L"P:\\repo", kOidP).empty());
   GC_CHECK(g::BuildRestoreTargetObjectArguments(L"P:\\repo", L"not-hex!").empty());
 }

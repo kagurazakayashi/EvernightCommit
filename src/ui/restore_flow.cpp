@@ -75,7 +75,7 @@ void RestoreFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ct
                                  const git::RestorePreflightQueries& queries) {
   plan_ = git::BuildRestorePlan(clues_, queries);
   if (plan_.blocked) {
-    // 不可行（分支已移动/删除、对象不可达、引用形态或占用不能放行、有流程停着、读不回来）：
+    // 不可行（分支已移动/删除、对象在本地读不到、引用形态或占用不能放行、有流程停着、读不回来）：
     // 只把话说清楚，不生成任何命令。
     host.ShowInfo(L"无法按记录恢复",
                   L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan_.explanation);
@@ -146,12 +146,11 @@ void RestoreFlow::OnRecheckCompleted(OperationHost& host, const OperationContext
 }
 
 void RestoreFlow::Launch(OperationHost& host, const OperationContext& ctx) {
-  git::CommandWindowOperation operation;
-  operation.operationId = plan_.operationId;
-  operation.displayName = plan_.displayName;
-  operation.gitExecutable = binding_.gitExePath;
-  operation.repositoryDirectory = binding_.workTreeRoot;
-  operation.arguments = plan_.arguments;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
+  // Git 程序路径与工作区根都取绑定快照的值，不取界面此刻的——那份方案只属于它绑定的那个仓库。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      plan_.operationId, plan_.displayName, binding_.gitExePath, binding_.workTreeRoot,
+      plan_.arguments);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan_.commandLabel + L"（" + binding_.workTreeRoot +
@@ -161,10 +160,8 @@ void RestoreFlow::Launch(OperationHost& host, const OperationContext& ctx) {
   // 这次恢复本身也是一次引用移动，落一条历史；仓库身份取绑定值，不取界面此刻的根。
   // 反悔线索指向「恢复之前的位置」：恢复后分支应指 newObjectId，若再要退回去就挪回
   // expectedOldObjectId（都带完整对象 ID）。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::restore;
-  options.history.workTreeRoot = binding_.workTreeRoot;
-  options.history.operationLabel = plan_.displayName;
+  options.history = app::MakeWriteHistoryCapture(app::HistoryFlow::restore, binding_.workTreeRoot,
+                                                 plan_.displayName);
   options.history.sourceRef = plan_.targetRef;
   options.history.sourceObjectId = plan_.expectedOldObjectId;
   options.history.targetRef = plan_.targetRef;
@@ -179,11 +176,14 @@ void RestoreFlow::Launch(OperationHost& host, const OperationContext& ctx) {
         L" 挪到 " + plan_.newObjectId + L"。如需再反悔，可把它挪回 " + plan_.expectedOldObjectId +
         L"（本程序不会自动执行）。";
   } else {
-    // 删除形态：恢复把引用删掉了；重建不在本程序自动执行的范围内。
+    // 删除形态：恢复把引用删掉了。「按创建事务重建它」Git 是做得到的——零值旧 OID 就是
+    // 「确实还不存在」的原子核对（git-update-ref 官方语义）——但那种形态不在本程序自动执行的
+    // 范围内：这是当前支持范围的说法，不是 Git 做不到。
     options.history.restoreKind = app::HistoryRestoreKind::none;
     options.history.restoreNote =
         L"按记录删除了分支引用 " + plan_.targetRef + L"（原指向 " + plan_.expectedOldObjectId +
-        L"）。要重建需你按完整对象 ID 自行执行，本程序不代做无预期旧值的引用写入。";
+        L"）。要重建需你按完整对象 ID 自行执行（Git 支持以零值旧 OID 做「确实还不存在」的创建事务）；"
+        L"本程序目前不提供自动重建的入口。";
   }
 
   stage_ = Stage::commandRunning;  // 先占住流程状态：启动失败会被下面清掉。

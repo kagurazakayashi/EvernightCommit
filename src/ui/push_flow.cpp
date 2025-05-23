@@ -366,15 +366,13 @@ void PushFlow::HandleFirstPushRecheck(OperationHost& host, const OperationContex
 
 void PushFlow::Launch(OperationHost& host, const OperationContext& ctx,
                       const LaunchRequest& request) {
-  git::CommandWindowOperation operation;
-  operation.operationId = request.operationId;
-  operation.displayName = request.displayName;
-  operation.gitExecutable = ctx.gitExecutable;
-  operation.repositoryDirectory = ctx.detection.root;
+  // 五个必需字段一律走统一装配点：参数漏传在这里首先是编译错误，不是运行期才发现的裸 git。
   // 参数按数组提交，不进任何 shell 字符串：命令源侧是复核确认过的完整提交 ID，目标远端只认名字，
   // URL 不进命令行（由 Git 自己按配置解析，界面展示与核实用的那份是 get-url --push --all 的展开
   // 回答），因此这条链路上都不会出现凭据。
-  operation.arguments = request.argumentList;
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      request.operationId, request.displayName, ctx.gitExecutable, ctx.detection.root,
+      request.argumentList);
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + request.commandLabel + L"（推送 " +
@@ -385,10 +383,11 @@ void PushFlow::Launch(OperationHost& host, const OperationContext& ctx,
   options.pushOperation = true;
   // 操作历史：绑定「确认要送出去的这一份提交、这一条远端引用、这一批发布地址」。
   // URL 在这里是未掩码原值，装配层逐条掩码后才落盘/展示。推送属远端历史，恢复只解释与复制。
-  options.history.record = true;
-  options.history.flow = app::HistoryFlow::push;
-  options.history.workTreeRoot = ctx.detection.root;
-  options.history.operationLabel = request.displayName;
+  // 「首次推送 + 写上游配置」与普通推送共享核实链，但写了上游配置这件事只属于首次推送，
+  // 因此按 HistoryFlow 的既有分类分开落（README 与 git-behavior 都按这两类列举）。
+  options.history = app::MakeWriteHistoryCapture(
+      firstPushActive_ ? app::HistoryFlow::firstPush : app::HistoryFlow::push, ctx.detection.root,
+      request.displayName);
   options.history.sourceRef = firstPushActive_ ? firstPlan_.localBranchRef : plan_.localBranchRef;
   options.history.sourceObjectId = request.pushedObjectId;
   options.history.targetRef = request.remoteBranchRef;

@@ -88,6 +88,25 @@ struct CommandWindowOperation {
   std::vector<EnvironmentOverride> environmentOverrides;  // 继承环境之上的受控覆盖
 };
 
+// 统一装配点：一次命令窗口操作的五个必需字段一律按位置传入，不做「先默认构造、再逐行补字段」。
+// 存在的理由是接线缺陷自身的形态：方案里已经把参数数组生成好、确认框文案也写着要跑那条命令，
+// 装配到 CommandWindowOperation 时却漏了 arguments——纯计划测试与夹具用例都不会因此变红，
+// 实际发给执行器的却是一条裸 git。把五个必需字段变成编译期绕不过去的函数参数后，
+// 「漏传任何一项」首先是编译错误；运行期还剩 DescribeCommandWindowOperationRefusal
+// 在启动边界上兜底。环境覆盖仍由调用方按方案补充（只有个别操作带它）。
+[[nodiscard]] CommandWindowOperation MakeCommandWindowOperation(
+    std::wstring_view operationId, std::wstring_view displayName, std::wstring_view gitExecutable,
+    std::wstring_view repositoryDirectory, std::vector<std::wstring> arguments);
+
+// 启动边界上的整体核对：复用 BuildGitCommandLine 的同一套判定（操作 ID 形态、Git 程序路径、
+// 工作目录、参数表、字符安全、数量与长度上限），另加「操作名称非空」这一条装配完整性要求。
+// 返回空串 = 这份请求可以交给执行器；否则返回一句把操作名与 ID 都点名的完整拒绝文案。
+// 执行器生成说明书时仍会用 BuildGitCommandLine 再核一次——这里的职责是在占用命令窗口槽位
+// **之前**拒绝，并把「参数已生成却没传入」这类接线缺陷指名道姓地报出来，
+// 绝不让它变成一次看起来像「Git 拒绝了操作」的裸 git。
+[[nodiscard]] std::wstring DescribeCommandWindowOperationRefusal(
+    const CommandWindowOperation& operation);
+
 // 请求在边界上被拒绝的原因；界面要能展示具体是哪一段、为什么。
 enum class CommandPlanReject {
   none = 0,

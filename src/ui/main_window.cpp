@@ -1414,6 +1414,17 @@ void MainWindow::InitializeCommandWatching(HWND window) {
 bool MainWindow::LaunchCommandWindowOperation(HWND window,
                                              const git::CommandWindowOperation& operation,
                                              const CommandLaunchOptions& options) {
+  // 公共边界上先核对「这份请求本身成立不成立」：五个必需字段任何一个在装配层漏了，
+  // 到这里都必须点名拒绝——参数没传到执行器的那条路（裸 git）与带着空归属信息去占槽位的路，
+  // 都不允许走通。这是接线缺陷，不是 Git 拒绝；拒绝在占用命令窗口槽位之前。
+  const std::wstring requestRefusal = git::DescribeCommandWindowOperationRefusal(operation);
+  if (!requestRefusal.empty()) {
+    state_.SetStatusNote(requestRefusal);
+    platform::RemoveNulPathspecFile(options.pathspecFile);
+    platform::RemoveCommitMessageFile(options.messageFile);
+    RefreshTexts(window);
+    return false;
+  }
   // 公共边界上先核对「这次要落的那条历史记录本身成立不成立」：漏了仓库工作区根或没说清是哪类
   // 操作，记录会在写盘时被整条拒掉——那等于一件做过的操作在历史里查无此事。宁可当场不启动，
   // 也不要「执行了但没有任何线索」。历史开关没开时一律放行（不落盘就没有可核对的记录）。
@@ -1512,13 +1523,9 @@ void MainWindow::LaunchStatusOperation(HWND window) {
     repository = state_.Info().repoPath;
   }
 
-  git::CommandWindowOperation operation;
-  operation.operationId = L"status";
-  operation.displayName = L"status";
-  operation.gitExecutable = gitExe;
-  operation.repositoryDirectory = repository;
   // 只读地查看工作区状态；参数按数组提交，不进任何 shell 字符串。
-  operation.arguments = {L"status"};
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      L"status", L"status", gitExe, repository, {L"status"});
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…";
@@ -1666,12 +1673,9 @@ bool MainWindow::RunStagingPlan(HWND window, const git::StagingPlan& plan, const
     }
   }
 
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = repositoryRoot;
-  operation.arguments = std::move(arguments);
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, std::move(arguments));
 
   CommandLaunchOptions options;
   options.startedNote = L"已在命令窗口启动 " + plan.commandLabel + L"（" + repositoryRoot +
@@ -2584,12 +2588,9 @@ void MainWindow::OnChangesListDoubleClicked(HWND window, HWND list, int row) {
     return;
   }
 
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = repositoryRoot;
-  operation.arguments = plan.arguments;
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
 
   CommandLaunchOptions options;
   options.policy = app::OperationExitPolicy::readOnlyView;
@@ -2653,12 +2654,9 @@ void MainWindow::OnHistoryCommitDoubleClicked(HWND window, int row) {
     return;
   }
 
-  git::CommandWindowOperation operation;
-  operation.operationId = plan.operationId;
-  operation.displayName = plan.displayName;
-  operation.gitExecutable = state_.Git().path;
-  operation.repositoryDirectory = repositoryRoot;
-  operation.arguments = plan.arguments;
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
 
   CommandLaunchOptions options;
   // 退出码按常规判定：git show 读到对象就是 0，报错误非 0——不像 --no-index 那样有「1 也算正常」的语义。

@@ -77,7 +77,9 @@ enum class HistoryTerminal {
   inProgress = 0,  // 已启动、尚未结案（崩溃残留；不等于完成）
   succeeded,       // 命令按退出码策略成功
   failed,          // 命令按退出码策略失败
-  canceled,        // 用户在确认框之前取消（没启动、没改动仓库）
+  canceled,        // 用户在确认框之前取消（没启动、没改动仓库）。注意：取消从不占用命令窗口槽位，
+                   // 因此生产链路上不会为它落一条记录——这个终态属于记录格式本身（可读回、可序列化），
+                   // 界面措辞里「已取消」说的是当次操作，不是历史里的一行。
   launchFailed,    // 命令窗口 / 执行器启动失败（没跑任何 Git）
   gitNotStarted,   // 辅助进程报告 Git 进程从未被创建
   unknown,         // 结果未知：可能生效也可能没有，无法判定
@@ -93,9 +95,11 @@ enum class HistoryTerminal {
 //   * none —— 这次操作不产生「把某个本地引用挪回去」的可审查恢复形态：
 //     fetch 不改 HEAD/分支/索引/工作区；pull 的整合与冲突流程会重写工作区/索引、涉及多提交重放，
 //     「挪一个引用回去」并不能安全还原，因此只解释、给线索，不自动生成恢复命令。
-//   * refMove —— 本地单引用的原子可逆（创建提交、撤回提交）：恢复形态就是一条带「预期旧值」的
-//     git update-ref，把目标分支从「操作产生/当前应指的那个对象」挪回「操作前它指的那个对象」，
-//     索引与工作区一个字节都不动。这与「撤回最近提交」同一条命令族，复用同一套原子保护。
+//   * refMove —— 本地单引用的原子可逆（撤回最近提交，以及按记录做的恢复本身；创建提交刻意不在
+//     这一档——它的反悔入口是另一次「撤回最近提交」操作，不是这条记录直接生成命令）：恢复形态
+//     就是一条带「预期旧值」的 git update-ref，把目标分支从「操作产生/当前应指的那个对象」挪回
+//     「操作前它指的那个对象」，索引与工作区一个字节都不动。这与「撤回最近提交」同一条命令族，
+//     复用同一套原子保护。
 //   * manualRemote —— 已推送到远端的历史（推送、首次推送）：本地能挪引用，但远端不受本地恢复影响。
 //     恢复入口只解释协作影响、给出精确命令供用户自行复制执行，绝不自动 force push。
 enum class HistoryRestoreKind {
@@ -311,6 +315,14 @@ struct HistoryCapture {
   bool restoreIsRoot = false;
   std::wstring restoreNote;       // 文字线索 / 协作影响说明（装配时脱敏）
 };
+
+// 写操作历史的统一装配点：record=true 与三个归属字段（哪一类流程、哪一个工作区根、操作展示名）
+// 一律按位置传入。「控制器把 record 置了 true 却漏填仓库工作区根」这类接线缺陷在装配那一行是
+// 一个可选的成员赋值、编译器不会拦；改成必选参数后漏传首先是编译错误，运行时再由
+// DescribeHistoryCaptureRefusal 在启动边界上兜底。其余细节字段（源/目标引用、对象 ID、
+// 发布地址、恢复线索）仍由各控制器按自己已确认的方案补充——那些不是每类操作都有的。
+[[nodiscard]] HistoryCapture MakeWriteHistoryCapture(HistoryFlow flow, std::wstring workTreeRoot,
+                                                     std::wstring operationLabel);
 
 // 命令窗口的终态信息（时刻由界面从系统时钟取，纯逻辑不碰时钟）。
 struct HistoryTerminalInfo {

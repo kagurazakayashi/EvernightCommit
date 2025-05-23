@@ -806,3 +806,25 @@ GC_TEST(operation_history_unknown_after_restart_is_shown_as_unknown) {
                         [](const h::OperationRecord& item) { return item.id == L"op-orphan"; }),
            "超上限时从最旧开始淘汰，在途那条同样在淘汰范围内");
 }
+
+GC_TEST(operation_history_write_capture_factory_requires_the_three_identity_fields) {
+  // 统一装配点（R5 的反面）：record=true 与三个归属字段按位置传入。
+  // 「置了 true 却漏填仓库根」这一类缺陷在控制器那一行不再存在——漏传首先是编译错误。
+  const h::HistoryCapture capture =
+      h::MakeWriteHistoryCapture(h::HistoryFlow::undo, L"D:\\仓库\\工作区", L"撤回最近提交");
+  GC_CHECK(capture.record);
+  GC_CHECK(capture.flow == h::HistoryFlow::undo);
+  GC_CHECK(capture.workTreeRoot == L"D:\\仓库\\工作区");
+  GC_CHECK(capture.operationLabel == L"撤回最近提交");
+  // 装配完整的捕获在启动边界上必须放行（历史开关开着时）。
+  GC_CHECK(h::DescribeHistoryCaptureRefusal(capture, true).empty());
+  // 工厂不替控制器决定细节字段：那些仍由各流程按自己已确认的方案补充，缺了也不影响归属判定。
+  GC_CHECK(capture.sourceRef.empty());
+  GC_CHECK(capture.restoreKind == h::HistoryRestoreKind::none);
+  // 空的工作区根即使走工厂传进来，也照样由边界当场点名——工厂不代替校验。
+  const h::HistoryCapture blankRoot =
+      h::MakeWriteHistoryCapture(h::HistoryFlow::commit, std::wstring(), L"创建提交");
+  const std::wstring refusal = h::DescribeHistoryCaptureRefusal(blankRoot, true);
+  GC_CHECK(!refusal.empty());
+  GC_CHECK(refusal.find(L"workTreeRoot") != std::wstring::npos);
+}

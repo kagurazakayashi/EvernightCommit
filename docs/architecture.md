@@ -48,7 +48,7 @@
 | `pull_plan` | pull 两阶段判读与方案：阶段一/阶段二查询的构造与判读、前提拒绝、四种关系、按 Git 原生解析矩阵把策略与快进意愿翻译成显式命令行参数、风险清单、执行前复核 `DescribePullChange`、未合并清单解析 |
 | `push_plan` | push 判读与方案：预检查询构造与判读（含 `config --list --null` 三种记录形态与三态布尔判读、`remote get-url --push --all` 逐条展开发布地址）、发布远端优先序裁定、命令形态与条件中和、前提拒绝、风险清单、执行前复核 `DescribePushChange`、推送后逐目标核实与四种结论、URL 内嵌凭据掩码；面向展示与**入库/导出**的掩码分开的两份（`MaskStoredPushUrl`／`MaskStoredPushUrlInText`：除 userinfo 外还丢弃 query 与 `#` 片段，scp 形态的 `user@host:path` 只掩用户名，本地/UNC/相对路径与邮箱、分支名不动） |
 | `first_push_plan` | 首次推送（分支还没有上游）判读与方案：向导可用性裁决、候选远端与逐远端发布地址的判读（与 `push_plan` 共用 `ResolvePushUrls`／`InspectPushScopeConfig`／形态判定）、目标分支名交给 `check-ref-format` 的裁定、逐发布地址 `ls-remote` 的「没有／问不到」三态聚合、可选的非快进关系查询、把「推送」与「两条 `git config` 上游写入」分成各自有结果的方案、执行前复核 `DescribeFirstPushChange`，以及**写配置之前**那一次前提复核 `DescribeUpstreamWriteStaleness`（分支是否还在、上游是否仍没配、要不要覆盖已有值） |
-| `restore_plan` | 按操作历史恢复的判读与方案：把记录里的恢复线索与刚读回的仓库实况合成「能不能安全恢复」的裁决（引用现值／目标对象可达性／有没有流程停着／引用名的 Git 权威裁定、形态与占用，并认出本工作树自己检出的那条分支以便讲清「相对 HEAD 的差异会变」），两种带预期旧值且 `--no-deref` 的 `update-ref` 命令形态、不可行与读不到的分类拒绝文字、确认后的现场复核 `DescribeRestoreRecheckMismatch`，以及三种命令表示的唯一构造点 `DescribeRestoreCopy`（数据数组／预览／按目标 shell 真实规则编排的可粘贴行，表达不了时只给逐段字段清单） |
+| `restore_plan` | 按操作历史恢复的判读与方案：把记录里的恢复线索与刚读回的仓库实况合成「能不能安全恢复」的裁决（引用现值／目标对象本地可读性——`<ID>^{commit}` 只回答能不能解析，不是「从分支可达」／有没有流程停着／引用名的 Git 权威裁定、形态与占用，并认出本工作树自己检出的那条分支以便讲清「相对 HEAD 的差异会变」），两种带预期旧值且 `--no-deref` 的 `update-ref` 命令形态、不可行与读不到的分类拒绝文字、确认后的现场复核 `DescribeRestoreRecheckMismatch`，以及三种命令表示的唯一构造点 `DescribeRestoreCopy`（数据数组／预览／按目标 shell 真实规则编排的可粘贴行，表达不了时只给逐段字段清单） |
 | `shell_text` | 把一份「已审查的参数数组」渲染成给人复制的命令文本：cmd 与 PowerShell 两种目标的引号规则、无法可靠表达的字符（`"` `%` `!`、控制字符、以反斜杠收尾的需引号参数等）一律拒绝而不是替换，另提供逐段字段清单与可读预览两种不执行的表示 |
 | `conflict_state` | 冲突与暂停流程判读：Git 目录痕迹（存在性 + 限长内容）判出停着的到底是哪一种流程（变基目录优先，`CHERRY_PICK_HEAD` 等同伴痕迹不算并存；认不出/不一致/`BISECT_LOG`/只有 `SQUASH_MSG` 一律拒绝且不猜恢复方式），未合并清单与分支/HEAD 的三态判读（与 `pull_plan` 共用那条 `diff --diff-filter=U` 查询），「继续前提」与「中止风险」两套确认文字、`-c submodule.recurse=false <子命令> --continue/--abort` 的命令形态（不传 `--no-verify`/`--no-edit`/`-m`），以及确认前后两份现场的执行前复核 `DescribeConflictStateChange` |
 | `submodule_navigation` | 子模块导航判读：`ls-files -s -z -- :(literal)<路径>` / `rev-parse --verify --quiet HEAD:<路径>` / 子模块自己 HEAD 三条只读查询的参数构造，gitlink 记录（`160000` + 完整对象 ID）判读，「索引 / 父提交 / 子模块 HEAD」三份位置合成六种结论，进入前的身份裁决（目录形态、父仓库是否同一个、未初始化与独立仓库分开拒绝），返回后的提示措辞与「不 add、不提交、不联网」声明 |
@@ -106,7 +106,7 @@ Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调�
 `pull_probe`（含整合失败后的只读取证）、
 `conflict_probe`（流程痕迹的存在性与限长内容读取 + 未合并条目/分支/HEAD 三条只读查询，
 预检与执行前复核、失败后的现场读取共用同一个函数，全程不写任何东西）、`push_probe`（预检 + 逐发布 URL 的核实链）、`submodule_probe`（进入前的目录形态 + 识别 + 父索引 gitlink，返回后的三份位置；全程只读）、
-`restore_probe`（按记录恢复的那一组只读事实：分支现在指着什么、要挪回去的对象可达吗、引用形态与
+`restore_probe`（按记录恢复的那一组只读事实：分支现在指着什么、要挪回去的对象在本地读不读得到、引用形态与
 占用、有没有流程停着；确认后复核复用同一份收集函数，输出 `git::RestoreRecheckScene`）。
 `win_path` 在这里额外提供 `ProbeRepositoryWorkflowStateStrict`：每个痕迹三态（ absent / present /
 unreadable），Git 目录读不动或任一痕迹读不回来时整轮 `readable=false` 并带上原因，绝不把

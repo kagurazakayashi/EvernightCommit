@@ -280,7 +280,7 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
     return plan;
   }
 
-  // ---- 分支仍停在预期位置：非删除形态还要确认「要挪回去的对象」本地可达 ----
+  // ---- 分支仍停在预期位置：非删除形态还要确认「要挪回去的对象」本地读得到 ----
   if (!clues.isRootDeletion) {
     if (!queries.moveToRan) {
       return conclude(RestoreFeasibility::undetermined, L"没有核对「要挪回去的那个对象」在不在本地，无法安全恢复。");

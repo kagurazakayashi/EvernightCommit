@@ -344,6 +344,16 @@ std::wstring SanitizeHistoryText(std::wstring_view text) {
   return masked;
 }
 
+HistoryCapture MakeWriteHistoryCapture(HistoryFlow flow, std::wstring workTreeRoot,
+                                       std::wstring operationLabel) {
+  HistoryCapture capture;
+  capture.record = true;
+  capture.flow = flow;
+  capture.workTreeRoot = std::move(workTreeRoot);
+  capture.operationLabel = std::move(operationLabel);
+  return capture;
+}
+
 std::wstring DescribeHistoryCaptureRefusal(const HistoryCapture& capture, bool historyEnabled) {
   if (!historyEnabled || !capture.record) {
     return {};  // 不落盘的场景没有可核对的记录，也就无权拦用户的操作。
