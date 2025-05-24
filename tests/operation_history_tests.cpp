@@ -768,6 +768,63 @@ GC_TEST(operation_history_in_progress_row_is_upgraded_by_the_same_id) {
   GC_CHECK(!h::TerminalHasSettled(h::HistoryTerminal::inProgress));
 }
 
+GC_TEST(operation_history_sparse_terminal_update_may_carry_only_the_id) {
+  // 「结果未知」那一类补记只有 ID、终态与一句原因：它没有理由重复携带仓库身份，
+  // 界面那一刻手上也只有这些。要求它带齐一份完整记录，等于让这条补记永远写不进去
+  // ——在途那一行会一直停在「执行中」，这正是本用例钉住的原缺陷。
+  h::OperationLog log = FreshLog();
+  const h::HistoryCapture capture = GoodCapture();
+  std::wstring refusal;
+  GC_REQUIRE(h::AppendHistoryRecord(&log,
+                                    h::ComposeHistoryRecord(L"op-sparse", capture.workTreeRoot, capture,
+                                                            TerminalFor(h::HistoryOutcome::inProgress, 0)),
+                                    &refusal),
+             "先落一条在途");
+  GC_REQUIRE(log.records.size() == 1, "在途一条");
+
+  h::OperationRecord note;
+  note.id = L"op-sparse";
+  note.terminal = h::HistoryTerminal::unknown;
+  note.terminalEpoch = 1700000123;
+  note.completionLabel = L"没有收到完成通知";
+  note.outcomeNote = L"界面在关闭前没有收到这次操作的完成通知";
+  GC_REQUIRE(h::AppendHistoryRecord(&log, note, &refusal), "稀疏补记应被接受");
+  GC_CHECK(refusal.empty());
+  GC_REQUIRE(log.records.size() == 1, "补记不得另起一行");
+  GC_CHECK(log.records[0].terminal == h::HistoryTerminal::unknown);
+  GC_CHECK(log.records[0].terminalEpoch == 1700000123);
+  GC_CHECK(log.records[0].outcomeNote == note.outcomeNote);
+  // 原记录的归属与恢复线索一个都不掉：补记只换终态那一段。
+  GC_CHECK(log.records[0].repositoryKey == gc::git::CanonicalPathKey(capture.workTreeRoot));
+  GC_CHECK(log.records[0].flow == h::HistoryFlow::restore);
+  GC_CHECK(log.records[0].restoreUndoToObjectId == FullOid('c'));
+  GC_CHECK(log.records[0].startedEpoch == 1700000000);
+
+  // 陌生 ID 又没有仓库身份：拒绝，绝不凭空造一条说不清属于哪个仓库的孤儿行。
+  h::OperationRecord orphan;
+  orphan.id = L"op-ghost";
+  orphan.terminal = h::HistoryTerminal::unknown;
+  GC_CHECK(!h::AppendHistoryRecord(&log, orphan, &refusal));
+  GC_CHECK(refusal.find(L"仓库") != std::wstring::npos);
+  GC_CHECK(log.records.size() == 1);
+
+  // 带着另一个工作区身份的补记：这不是「同一次操作」，拒绝合并、原记录一个字都不动。
+  h::OperationRecord wrongRepo = note;
+  wrongRepo.repositoryKey = gc::git::CanonicalPathKey(L"Q:\\另一个\\仓库");
+  GC_CHECK(!h::AppendHistoryRecord(&log, wrongRepo, &refusal));
+  GC_CHECK(log.records.size() == 1);
+  GC_CHECK(log.records[0].terminal == h::HistoryTerminal::unknown);
+  GC_CHECK(log.records[0].repositoryKey == gc::git::CanonicalPathKey(capture.workTreeRoot));
+
+  // 已结案的记录再被补一次更弱的观察：原终态保持（不降级），这条也不新增。
+  h::OperationRecord late = note;
+  late.terminal = h::HistoryTerminal::inProgress;
+  GC_REQUIRE(h::AppendHistoryRecord(&log, late, &refusal), "同 ID 补一次更弱的观察");
+  GC_REQUIRE(log.records.size() == 1, "仍然一条");
+  GC_CHECK_MESSAGE(log.records[0].terminal == h::HistoryTerminal::unknown,
+                   "已定的「结果未知」不被在途观察降级");
+}
+
 GC_TEST(operation_history_unknown_after_restart_is_shown_as_unknown) {
   // 进程被强杀/关窗后盘上留下的就是这条 inProgress：重启读回、按标签显示，
   // 既不猜成功也不猜失败；时刻未知的记录还不会被保留策略当成过期丢掉。
@@ -800,11 +857,11 @@ GC_TEST(operation_history_unknown_after_restart_is_shown_as_unknown) {
     GC_REQUIRE(h::AppendHistoryRecord(&crowded, extra, &refusal), "补几条更新的记录");
   }
   h::ApplyHistoryRetention(&crowded, 1800000100);
-  GC_CHECK(crowded.records.size() <= crowded.maxRecords,
-           "在途记录也参与容量裁剪：不能因为它没终态就让历史无限增长");
-  GC_CHECK(std::none_of(crowded.records.begin(), crowded.records.end(),
-                        [](const h::OperationRecord& item) { return item.id == L"op-orphan"; }),
-           "超上限时从最旧开始淘汰，在途那条同样在淘汰范围内");
+  GC_CHECK_MESSAGE(crowded.records.size() <= crowded.maxRecords,
+                   "在途记录也参与容量裁剪：不能因为它没终态就让历史无限增长");
+  GC_CHECK_MESSAGE(std::none_of(crowded.records.begin(), crowded.records.end(),
+                                [](const h::OperationRecord& item) { return item.id == L"op-orphan"; }),
+                   "超上限时从最旧开始淘汰，在途那条同样在淘汰范围内");
 }
 
 GC_TEST(operation_history_write_capture_factory_requires_the_three_identity_fields) {

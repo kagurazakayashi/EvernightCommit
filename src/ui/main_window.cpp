@@ -1456,8 +1456,11 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
     if (!failure.environmentNotice.empty()) {
       note += L"｜" + failure.environmentNotice;
     }
+    // 先写 Git 那一步的结论，再落历史：落账被拒时那句「操作历史没有记录」附在这句后面并列显示，
+    // 谁也不盖谁。启动失败本身也是一种终态：命令窗口没打开、Git 一个字都没跑。
+    state_.SetStatusNote(note);
+    std::wstring launchHistoryRefusal;
     if (options.history.record) {
-      // 启动失败也是一种终态：命令窗口没打开、Git 一个字都没跑，落一条明确「启动失败」的记录。
       const platform::LocalInstant now = platform::CurrentLocalInstant();
       const long long epoch = now.valid ? now.utcEpochSeconds : 0;
       app::HistoryTerminalInfo terminal;
@@ -1466,9 +1469,11 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
       terminal.terminalEpoch = epoch;
       terminal.completionLabel = std::wstring(git::CommandCompletionLabel(failure.completion));
       terminal.conclusion = note;
-      CommitHistoryRecord(options.history, terminal);
+      CommitHistoryRecord(options.history, terminal, std::wstring(), &launchHistoryRefusal);
     }
-    state_.SetStatusNote(note);
+    if (!launchHistoryRefusal.empty()) {
+      state_.AppendStatusNote(launchHistoryRefusal);
+    }
     UpdateCommandAvailability();
     RefreshTexts(window);
     return false;
@@ -1496,6 +1501,10 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
   // Git 已经在命令窗口里跑起来了，才挂这枚看门狗：它兜的是「完成通知永远没来」那一种事故，
   // 到 TickActiveOperations 发现没有在途操作时会自己摘掉，空闲期间一秒两次的整屏重画就此结束。
   ::SetTimer(window, kGitOperationTimer, kGitOperationTickMs, nullptr);
+  // 启动那句结论先写：在途记录当场要写盘，写不成时那句「操作历史这次没写成功」附在结论后面，
+  // 而不是被结论盖掉——Git 已经在跑了，记录只是它旁边的附属信息。
+  state_.SetStatusNote(options.startedNote);
+  std::wstring inFlightHistoryRefusal;
   // 记下启动时刻：终态落账时用「启动→终态」这对时间，而不是让 startedEpoch 空着。
   if (options.history.record) {
     const platform::LocalInstant now = platform::CurrentLocalInstant();
@@ -1503,11 +1512,15 @@ bool MainWindow::LaunchCommandWindowOperation(HWND window,
         now.valid ? static_cast<unsigned long long>(now.utcEpochSeconds) : 0ULL;
     // 当场落一条「已启动，未见结果」并立刻写盘：用户可能允许关掉界面让命令继续跑，进程也可能
     // 就在这几分钟里被强杀。没有这一条，发生过的事会在历史里读成「什么都没做」。
-    // 终态（或「通知丢失 → 结果未知」）之后都用同一个 ID 更新这一条。
-    activeOperation_.historyRecordId = BeginInProgressHistory(
-        window, options.history, activeOperation_.historyStartedEpoch);
+    // 终态（或「没能拿到终态 → 结果未知」）之后都用同一个 ID 更新这一条。
+    activeOperation_.historyRecordId =
+        BeginInProgressHistory(window, options.history, activeOperation_.historyStartedEpoch,
+                               &inFlightHistoryRefusal);
   }
-  state_.SetStatusNote(options.startedNote);
+  if (!inFlightHistoryRefusal.empty()) {
+    state_.AppendStatusNote(inFlightHistoryRefusal +
+                            L"（Git 这一步照常执行，但这次之后查不到它的线索。）");
+  }
   UpdateCommandAvailability();
   RefreshTexts(window);
   return true;
@@ -2713,9 +2726,10 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (!outcome.recognised) {
     return;
   }
-  // 一次写操作拿到终态就落一条历史（没勾「记录操作历史」时 CommitHistoryRecord 返回空、不写盘）。
+  // 一次写操作拿到终态就用同一个 ID 更新那条在途记录（没勾「记录操作历史」时不写盘）。
   // pull 整合失败、conflict 命令失败这两条提前结案的路径也各自调用它，绝不漏记某一种终态。
-  auto settleHistory = [&](const std::wstring& concl) {
+  // 落账被拒的那句并回结论本身：状态栏随后会被自动刷新重写，只有进了结论的那一句才能活过那一次。
+  auto settleHistory = [&](std::wstring& concl) {
     if (!historyCapture.record) {
       return;
     }
@@ -2728,7 +2742,12 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
     terminal.exitCode = result.exitCode;
     terminal.completionLabel = std::wstring(git::CommandCompletionLabel(result.completion));
     terminal.conclusion = concl;
-    const std::wstring recordId = CommitHistoryRecord(historyCapture, terminal, historyRecordId);
+    std::wstring refusal;
+    const std::wstring recordId =
+        CommitHistoryRecord(historyCapture, terminal, historyRecordId, &refusal);
+    if (!refusal.empty()) {
+      concl += L"｜" + refusal;
+    }
     if (pushOperation) {
       lastPushRecordId_ = recordId;
     }
@@ -2811,8 +2830,9 @@ void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (!result.environmentNotice.empty()) {
     conclusion += L"｜" + result.environmentNotice;
   }
-  tasks_.RememberOperationConclusion(conclusion);
+  // 历史落账排在「记住结论」之前：被拒那句要并进结论本身，再交给紧随其后的刷新显示。
   settleHistory(conclusion);
+  tasks_.RememberOperationConclusion(conclusion);
   // 已完成但保留的窗口不影响后续操作，只清理已取回的结果记录。
   commandRunner_.ClearAllResults();
   UpdateCommandAvailability();
@@ -2889,10 +2909,11 @@ void MainWindow::TickActiveOperations(HWND window) {
     const app::OperationOutcome outcome =
         tasks_.ForgetOperation(serial, L"本程序没有收到「" + name + L"」的完成通知");
     if (outcome.recognised) {
-      // 同一条在途记录补成「结果未知」：这句不是成功、不是失败，也不是「已撤销」。
-      MarkHistoryRecordUnknown(inFlightHistoryId, outcome.note);
       tasks_.RememberOperationConclusion(outcome.note);
       state_.SetStatusNote(outcome.note);
+      // 同一条在途记录补成「结果未知」：这句不是成功、不是失败，也不是「已撤销」。
+      // 排在结论写进状态之后——补记失败那句要附在它后面并列，不能被那次 SetStatus 抹掉。
+      MarkHistoryRecordUnknown(inFlightHistoryId, outcome.note);
       UpdateCommandAvailability();
       ScheduleRefresh(window);  // 结果未知时更要重读：仓库究竟被改到什么程度只有 Git 自己知道。
     }
@@ -2905,6 +2926,9 @@ void MainWindow::StopOperationWatching() {
     ::KillTimer(window_.get(), kGitOperationTimer);
     ::KillTimer(window_.get(), kRefreshTimer);
   }
+  // 这里清掉的只是「本窗口 ↔ 那次执行器操作」的对应关系，不会把历史里那条永远留在「执行中」：
+  // WM_CLOSE 在销毁窗口之前已经用同一个 ID 把它补成「结果未知」，并由那次保存落盘。
+  // 收尾也不强杀仍在跑的 Git——「让命令窗口继续执行」正是用户自己选的那条路。
   activeOperation_ = ActiveOperation{};
   commandRunner_.Shutdown();
 }
@@ -3616,6 +3640,10 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
       return 0;
     case WM_CLOSE:
       if (ConfirmCloseWithActiveOperations(window)) {
+        // 关窗收尾第一步：还在命令窗口里跑的那一步，本程序之后再也看不到它的结果了（记录 ID 带着
+        // 进程号，别的窗口更新不了它）。当场按「结果未知」结案，再由下面那次保存落盘——下一次启动
+        // 读到的就是「结果未知/待核实」，而不是一句「执行中」。这里不中断 Git，也不重放。
+        SettleUnfinishedHistoryOnShutdown();
         // 关窗前把防抖里没来得及写的记录补上：小文件、本线程、有界等待（锁占用最多约 0.6 秒），
         // 不启动任何子进程。写不成也只说明「这次没保存」，绝不阻塞退出。
         RunPersistentSave(window);
@@ -3722,7 +3750,8 @@ void MainWindow::ScheduleHistorySave() {
 
 std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
                                              const app::HistoryTerminalInfo& terminal,
-                                             const std::wstring& existingId) {
+                                             const std::wstring& existingId,
+                                             std::wstring* refusal) {
   if (!capture.record || !HistoryApplicable()) {
     return {};  // 没勾「记录操作历史」就一个字节都不写，也不在内存里堆记录。
   }
@@ -3730,9 +3759,11 @@ std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
   // 只有更确定的终态会替换已记录的终态，绝不会把已定结果降级）。
   const std::wstring id = existingId.empty() ? NextHistoryId() : existingId;
   app::OperationRecord record = app::ComposeHistoryRecord(id, capture.workTreeRoot, capture, terminal);
-  std::wstring refusal;
-  if (!app::AppendHistoryRecord(&historyLog_, std::move(record), &refusal)) {
-    state_.SetStatusNote(L"操作历史没有记录：" + refusal);
+  std::wstring reason;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(record), &reason)) {
+    if (refusal != nullptr) {
+      *refusal = L"操作历史没有记录：" + reason;
+    }
     return {};
   }
   ScheduleHistorySave();
@@ -3741,14 +3772,15 @@ std::wstring MainWindow::CommitHistoryRecord(const app::HistoryCapture& capture,
 
 std::wstring MainWindow::BeginInProgressHistory(HWND window,
                                                const app::HistoryCapture& capture,
-                                               unsigned long long startedEpoch) {
+                                               unsigned long long startedEpoch,
+                                               std::wstring* refusal) {
   app::HistoryTerminalInfo terminal;
   terminal.outcome = app::HistoryOutcome::inProgress;
   terminal.startedEpoch = static_cast<long long>(startedEpoch);
   terminal.terminalEpoch = 0;  // 还没有终态时刻：这一条只说明「发出去了」
   terminal.completionLabel = L"执行中";
   terminal.conclusion = L"命令窗口已经启动，本程序还没有拿到它的结果。";
-  const std::wstring id = CommitHistoryRecord(capture, terminal);
+  const std::wstring id = CommitHistoryRecord(capture, terminal, std::wstring(), refusal);
   if (id.empty()) {
     return {};
   }
@@ -3766,16 +3798,24 @@ void MainWindow::MarkHistoryRecordUnknown(const std::wstring& recordId,
   if (recordId.empty() || !HistoryApplicable()) {
     return;
   }
-  // 完成通知没送到：那次操作既没被报成功也没被报失败。把在途那条判成「结果未知」，
-  // 绝不猜成成功、失败或已撤销；命令窗口里 Git 可能还在跑，所以也不自动重发。
+  bool held = false;
   for (const app::OperationRecord& existing : historyLog_.records) {
-    if (existing.id == recordId) {
-      if (app::TerminalHasSettled(existing.terminal)) {
-        return;  // 已经有更确定的结论（迟到的终态先到）：不降级、不改写。
-      }
-      break;
+    if (existing.id != recordId) {
+      continue;
     }
+    held = true;
+    if (app::TerminalHasSettled(existing.terminal)) {
+      return;  // 已经有更确定的结论（迟到的终态先到、或另一条收尾先补过）：不降级、不改写。
+    }
+    break;
   }
+  // 这条在途记录已经不在了（被保留策略裁掉，或当场就没落下来）：只补终态的这一次没有仓库身份，
+  // 绝不拿它新建一条孤儿行——那会被读成「有一次说不清属于哪个仓库的操作」。
+  if (!held) {
+    return;
+  }
+  // 终态没拿到：那次操作既没被报成功也没被报失败。把在途那条判成「结果未知」，
+  // 绝不猜成成功、失败或已撤销；命令窗口里 Git 可能还在跑，所以也不自动重发。
   app::OperationRecord unknown;
   unknown.id = recordId;
   unknown.terminal = app::HistoryTerminal::unknown;
@@ -3783,13 +3823,27 @@ void MainWindow::MarkHistoryRecordUnknown(const std::wstring& recordId,
   unknown.terminalEpoch = now.valid ? now.utcEpochSeconds : 0;
   unknown.completionLabel = L"没有收到完成通知";
   unknown.outcomeNote = std::wstring(why);
-  std::wstring refusal;
-  if (!app::AppendHistoryRecord(&historyLog_, std::move(unknown), &refusal)) {
-    state_.AppendStatusNote(L"另外：这条在途操作的历史没能补成「结果未知」（" +
-                            refusal + L"）；Git 那一步的结果不受影响。");
+  std::wstring reason;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(unknown), &reason)) {
+    // 补记失败只说明「这条没记下」，Git 那一步的结果不受影响：附在结论后面并列显示。
+    state_.AppendStatusNote(L"另外：这条在途操作的历史没能补成「结果未知」（" + reason +
+                            L"）；Git 那一步的结果不受影响。");
     return;
   }
   ScheduleHistorySave();
+}
+
+void MainWindow::SettleUnfinishedHistoryOnShutdown() {
+  // 只在「已经启动、还没结案」时补这一句：OnCommandWindowCompleted 拿到终态后
+  // activeOperation_ 已清空，正常结束的轮次不会走到这里。
+  if (activeOperation_.serial == 0 || activeOperation_.historyRecordId.empty()) {
+    return;
+  }
+  MarkHistoryRecordUnknown(
+      activeOperation_.historyRecordId,
+      L"界面在关闭前没有收到「" + activeOperation_.displayName +
+          L"」的完成通知。按你的选择，命令窗口里的 Git 没有被中断、也没有被重放或撤销，"
+          L"本程序不再读取它的结果：这条操作的结果未知，请以仓库现状核实。");
 }
 
 void MainWindow::RecordPushVerification(std::wstring_view verificationSummary) {
@@ -3947,6 +4001,11 @@ std::wstring HistoryRowDetail(const app::OperationRecord& record) {
   }
   if (!record.sourceObjectId.empty()) {
     detail += L"　" + git::ShortObjectId(record.sourceObjectId);
+  }
+  // 终态那一行的来龙去脉（含「结果未知」是怎么来的）只有 outcomeNote 说得出；
+  // 只显示「结果未知」四个字不足以让人知道该去核实什么。
+  if (!record.outcomeNote.empty()) {
+    detail += L"　" + record.outcomeNote;
   }
   if (!record.restoreNote.empty()) {
     detail += L"　" + record.restoreNote;
