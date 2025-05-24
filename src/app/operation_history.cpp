@@ -380,12 +380,34 @@ bool AppendHistoryRecord(OperationLog* log, OperationRecord record, std::wstring
     }
     return false;
   }
-  if (record.repositoryKey.empty() ||
-      (!record.workTreeRoot.empty() && git::CanonicalPathKey(record.workTreeRoot) != record.repositoryKey)) {
-    if (refusal != nullptr) {
-      *refusal = L"这条历史没有记录：仓库工作区身份与规范键对不上。";
+  // 同 ID 的既有记录决定了这次是「新建一条」还是「补记那一条」。
+  OperationRecord* already = nullptr;
+  for (OperationRecord& item : log->records) {
+    if (item.id == record.id) {
+      already = &item;
+      break;
     }
-    return false;
+  }
+  if (already == nullptr) {
+    if (record.repositoryKey.empty() ||
+        (!record.workTreeRoot.empty() &&
+         git::CanonicalPathKey(record.workTreeRoot) != record.repositoryKey)) {
+      if (refusal != nullptr) {
+        *refusal = L"这条历史没有记录：仓库工作区身份与规范键对不上。";
+      }
+      return false;
+    }
+  } else if (!record.repositoryKey.empty() || !record.workTreeRoot.empty()) {
+    // 补记可以只带终态（见头文件说明），但既然带了仓库身份，就必须与原记录同一个工作区：
+    // 把另一个仓库的结论并进来，比漏记更糟。
+    if (record.repositoryKey != already->repositoryKey ||
+        (!record.workTreeRoot.empty() &&
+         git::CanonicalPathKey(record.workTreeRoot) != already->repositoryKey)) {
+      if (refusal != nullptr) {
+        *refusal = L"这条在途历史的补记指向了另一个仓库工作区，没有合并进原记录。";
+      }
+      return false;
+    }
   }
   for (const std::wstring* oid : {&record.sourceObjectId, &record.targetObjectId,
                                   &record.restoreUndoToObjectId, &record.restoreExpectedCurrentId}) {
@@ -431,11 +453,8 @@ bool AppendHistoryRecord(OperationLog* log, OperationRecord record, std::wstring
                                                        record.reviews.size() - kMaxHistoryReviewsPerRecord));
   }
 
-  for (OperationRecord& existing : log->records) {
-    if (existing.id != record.id) {
-      continue;
-    }
-    AbsorbIntoExisting(existing, std::move(record));
+  if (already != nullptr) {
+    AbsorbIntoExisting(*already, std::move(record));
     return true;
   }
   log->records.push_back(std::move(record));

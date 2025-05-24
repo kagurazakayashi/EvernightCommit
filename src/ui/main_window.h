@@ -235,16 +235,24 @@ private:
   // 一次写操作拿到终态后，把「已确认事实 + 终态」装配成一条记录并落账。
   // existingId 非空时沿用它（更新同一条在途记录），否则生成新 ID。返回落账记录的 ID
   // （未开启记录或被拒时为空）；推送用它把核实结果回补到同一条记录。
+  // 被拒时那句原因交给 *refusal 由调用方安置：这句话既不能盖掉 Git 那一步的结论，
+  // 也不能被随后的 SetStatus 抹掉——谁来并句、并进哪条通道是使用方的决定。
   std::wstring CommitHistoryRecord(const app::HistoryCapture& capture,
                                    const app::HistoryTerminalInfo& terminal,
-                                   const std::wstring& existingId = std::wstring());
-  // 命令窗口那次启动成功之后立刻落一条「已启动，未见结果」的在途记录，并当场写盘。
-  // 用户允许界面关掉而命令继续跑、进程被强杀、通知丢失——这些场合历史里仍有这一条可查，
-  // 不会被读成「没有发生过任何操作」。返回这条记录的 ID（不记历史时为空）。
+                                   const std::wstring& existingId = std::wstring(),
+                                   std::wstring* refusal = nullptr);
+  // 命令窗口那次启动成功之后立刻落一条「已启动，未见结果」并当场写盘。
+  // 用户可能允许关掉界面让命令继续跑、进程也可能就在这几分钟里没了。没有这一条，
+  // 发生过的事会在历史里读成「什么都没做」。返回这条记录的 ID（不记历史时为空）。
   std::wstring BeginInProgressHistory(HWND window, const app::HistoryCapture& capture,
-                                      unsigned long long startedEpoch);
-  // 拿不到终态（完成通知丢失）时把那条在途记录判成「结果未知」：不猜成败、不自动重发。
+                                      unsigned long long startedEpoch,
+                                      std::wstring* refusal = nullptr);
+  // 拿不到终态（完成通知丢失、界面关闭）时把那条在途记录判成「结果未知」：
+  // 不猜成败、不猜已撤销，更不自动重发。记录已经结案或早就不在就不动它，也绝不新建一条孤儿行。
   void MarkHistoryRecordUnknown(const std::wstring& recordId, std::wstring_view why);
+  // 关闭收尾：还有操作在命令窗口里跑而本程序已不会再看到它的结果时，当场把那一条补成
+  // 「结果未知」。只写记录——不中断 Git、不重放、不重推、不撤销，用户「让命令继续跑」的选择不变。
+  void SettleUnfinishedHistoryOnShutdown();
   // 「操作历史…」入口：选操作（查看/导出/清除/位置/保留）或选一条记录后恢复/复制。
   void ShowOperationHistory(HWND window);
   // 从一条 refMove 记录发起恢复：交给 RestoreFlow 走后台预检 → 强制确认 → 复核 → 命令窗口。

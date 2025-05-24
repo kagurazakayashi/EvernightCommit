@@ -134,6 +134,8 @@ unreadable），Git 目录读不动或任一痕迹读不回来时整轮 `readabl
 某条失败或界面换仓库时，把「推送那一步已成的部分」与「配置写到第几条」分开说，不自动重发也不自动回退。
 `action_bar` 右下角另有记录开关区（`保存记录`/`保存草稿` 复选框与 `清除已存记录`），
 主窗口据 `persistent_state` + `persistent_store` 做首次说明、防抖保存、恢复与关窗前 flush；
+操作历史走同样那条收尾：启动当场落那条在途行、终态用同一个 ID 改写，关闭时把还没结案的那一条
+补成「结果未知」再由那次保存落盘——只写记录，不中断仍在命令窗口里跑的 Git；
 它不属于七个被编排的 Git 操作，不占用命令窗口槽位。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
 
 ## tests/

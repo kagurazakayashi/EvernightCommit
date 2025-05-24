@@ -218,6 +218,14 @@ GC_TEST(push_probe_arguments_put_url_after_double_dash) {
   GC_CHECK(gc::git::BuildPushRemoteProbeArguments(kRoot, L"", L"refs/heads/main").empty());
   GC_CHECK(gc::git::BuildPushRemoteProbeArguments(kRoot, kUrl, L"main").empty());
   GC_CHECK(gc::git::BuildPushRemoteProbeArguments(kRoot, kUrl, L"refs/heads/a:b").empty());
+  // 脱敏只产生「给人看/给记录用」的副本：带签名查询串的地址进了执行参数也必须一字不改，
+  // 否则核实问的就不是确认框里承诺的那个地点。
+  const std::wstring kSigned =
+      L"https://u:TEST_SECRET@blob.example.invalid/repo.git?sig=TEST_SIG#frag";
+  const std::vector<std::wstring> signedProbe =
+      gc::git::BuildPushRemoteProbeArguments(kRoot, kSigned, L"refs/heads/main");
+  GC_CHECK(HasArgument(signedProbe, kSigned));
+  GC_CHECK(gc::git::MaskStoredPushUrl(kSigned) != kSigned);
 }
 
 GC_TEST(push_command_is_a_single_scoped_refspec_with_no_escalation) {
