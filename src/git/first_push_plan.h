@@ -138,7 +138,7 @@ struct UpstreamWriteStep {
   std::vector<std::wstring> arguments;  // {config, <鍵>, <值>}：工作目錄已由命令窗口綁定到倉庫根
   std::wstring operationId;  // 執行器操作 ID（純 ASCII）
   std::wstring displayName;  // L"設置上游（…）"
-  std::wstring commandLabel;  // 展示用命令
+  std::wstring commandLabel;  // 展示用的逐段预览（與該步 arguments 同一份構造）
   std::wstring conclusion;   // 這一步成功之後要補的那句結果說明
 };
 

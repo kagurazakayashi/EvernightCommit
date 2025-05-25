@@ -151,6 +151,9 @@ private:
   [[nodiscard]] bool RequireWritePrerequisites(HWND window, std::wstring_view actionLabel);
   // 被编排操作的统一入口裁决：共同前提 + 「谁正走在自己的流程里」。拒绝时写好状态栏并返回 false。
   [[nodiscard]] bool AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_view actionLabel);
+  // 导航（「进入子模块」/「返回父仓库」）的统一入口裁决：共同前提 + 七个流程逐个点名
+  // （app/DescribeNavigationRefusal）。两个入口共用这一份装配，不在按钮里零散加条件。
+  [[nodiscard]] bool AdmitNavigation(HWND window, std::wstring_view actionLabel);
   // 把界面上的可变状态在这一刻拷成只读快照，交给操作控制器；控制器全程只认这份快照。
   [[nodiscard]] OperationContext CaptureOperationContext() const;
   // 把选中的行号逐行核对成条目快照：行数、行号对应的条目、路径与状态都要和刚读回来的模型一致，

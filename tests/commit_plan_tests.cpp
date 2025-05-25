@@ -214,8 +214,8 @@ GC_TEST(commit_plan_happy_path_submits_index_only) {
   GC_CHECK(Contains(plan.previewText, L"仓库配置身份 <cfg@example.invalid>"));
   GC_CHECK(Contains(plan.previewText, L"--no-verify"));  // 「命令里没有 --no-verify」那句说明。
   GC_CHECK(Contains(plan.previewText, L"128 字节"));
-  // 确认框里列出的命令就是真正执行的那一条（参数逐个拼出，不重复写程序名）。
-  GC_CHECK(Contains(plan.previewText, L"git commit --cleanup=verbatim -F"));
+  // 确认框里列出的命令就是真正执行的那一条：逐个参数用方括号框住（数据边界可见，不是可粘贴的一行）。
+  GC_CHECK(Contains(plan.previewText, L"git [commit] [--cleanup=verbatim] [-F]"));
   GC_CHECK(!Contains(plan.previewText, L"git git"));
   GC_CHECK(Contains(plan.previewText, L"时间同步修改"));
   GC_CHECK(plan.stagedItems == 2);

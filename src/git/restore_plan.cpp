@@ -38,7 +38,10 @@ RestoreCopyText DescribeRestoreCopy(const RestoreClues& clues, ShellDialect dial
     return copy;
   }
   if (!IsSafeUndoTargetRef(clues.branchRef)) {
-    copy.refusal = L"记录里的分支引用名不合格（读到的是「" + clues.branchRef +
+    // 记录里的引用名是外部输入（历史文件可能被改坏）：把它点出来时按可见形态写，
+    // 一条换行或制表不许把这句拒绝劈成两段，也不许被当成命令的一部分。
+    copy.refusal = L"记录里的分支引用名不合格（读到的是「" +
+                   DescribeDataForDisplay(clues.branchRef) +
                    L"」），不把它复现成任何命令。";
     return copy;
   }
@@ -142,8 +145,11 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
                     L"这条记录的恢复线索缺少可用的仓库工作区根，无法判断恢复目标。");
   }
   if (!IsSafeUndoTargetRef(clues.branchRef)) {
+    // 这个名字是以外部输入的身份出现在拒绝文字里的：控制字符按可见形态写，
+    // 免得一条换行把这句拒绝劈成两段（与 DescribeRestoreCopy 同一口径）。
     return conclude(RestoreFeasibility::undetermined,
-                    L"记录里的分支引用名不合格（读到的是「" + clues.branchRef +
+                    L"记录里的分支引用名不合格（读到的是「" +
+                        DescribeDataForDisplay(clues.branchRef) +
                         L"」）。恢复只按完整引用名（refs/heads/…）移动一个分支，不碰别的。");
   }
   // 历史文件里的引用名按外部输入对待，光有名字合格还不够：默认形态的 `update-ref` 会追随符号引用

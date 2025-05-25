@@ -876,8 +876,8 @@ GC_TEST(push_plan_ready_shows_source_target_and_scoped_command) {
   GC_CHECK(TextContains(plan.confirmationText, L"目标分支：refs/heads/main"));
   GC_CHECK(TextContains(plan.confirmationText, kUrl));
   GC_CHECK(TextContains(plan.confirmationText,
-                        std::wstring(L"push --recurse-submodules=no origin ") + std::wstring(kHead) +
-                            L":refs/heads/main"));
+                        std::wstring(L"[push] [--recurse-submodules=no] [origin] [") + std::wstring(kHead) +
+                            L":refs/heads/main]"));
   GC_CHECK(TextContains(plan.confirmationText, L"领先 2 个提交"));
   // 边界要说实话：源已经钉死，剩下的窗口只有「去哪里」，并且由逐目标核实兜底。
   GC_CHECK(TextContains(plan.confirmationText, L"复核通过到 Git 自己启动并读取配置之间"));
@@ -886,8 +886,40 @@ GC_TEST(push_plan_ready_shows_source_target_and_scoped_command) {
   GC_CHECK(TextContains(plan.notice, std::wstring(kHead)));
   GC_CHECK(TextContains(plan.explanation, L"refs/heads/main"));
   // 展示的命令与实际发出的命令一字不差，且不含任何凭据。
-  GC_CHECK(plan.commandLabel == L"git -c push.followTags=false push --recurse-submodules=no origin " +
-                                    std::wstring(kHead) + L":refs/heads/main");
+  GC_CHECK(plan.commandLabel ==
+           L"git [-c] [push.followTags=false] [push] [--recurse-submodules=no] [origin] [" +
+               std::wstring(kHead) + L":refs/heads/main]");
+}
+
+GC_TEST(push_plan_shows_the_preview_from_the_argument_array_not_a_naked_join) {
+  // Git 认的分支名里可以带对 cmd 有语法意义的字符（本机 check-ref-format 实测
+  // refs/heads/demo&calc&rem 合法）。展示的那一串是「逐段列出的预览」，不是空格拼出来的
+  // 一行命令：裸拼时粘进 cmd 的 `&` 会变成「前一条跑完再跑下一条」，风险落在用户粘贴那一刻。
+  PushPreflightQueries ampersand = HealthyPushQueries();
+  ampersand.symbolicRef = Answer(0, L"refs/heads/demo&calc&rem\n");
+  ampersand.upstream =
+      Answer(0, L"origin\trefs/remotes/origin/demo&calc&rem\trefs/heads/demo&calc&rem\n");
+  ampersand.configListing = ConfigListingAnswer(
+      {{L"core.repositoryformatversion", L"0"},
+       {L"remote.origin.url", kUrl},
+       {L"remote.origin.fetch", L"+refs/heads/*:refs/remotes/origin/*"},
+       {L"branch.demo&calc&rem.remote", L"origin"},
+       {L"branch.demo&calc&rem.merge", L"refs/heads/demo&calc&rem"}});
+  const PushPlan plan = PlanFor(gc::git::InterpretPushPreflight(ampersand));
+  GC_REQUIRE_MESSAGE(plan.state == PushPlanState::ready, Narrow(plan.explanation));
+
+  const std::wstring refspec = std::wstring(kHead) + L":refs/heads/demo&calc&rem";
+  // ① 交给 CreateProcessW 的数组：原值，一个字符都没被改。
+  GC_CHECK(std::find(plan.arguments.begin(), plan.arguments.end(), refspec) != plan.arguments.end());
+  // ② 给人阅读的预览：那一段整体被方括号框住，边界一眼可见。
+  GC_CHECK(TextContains(plan.commandLabel, L"[" + refspec + L"]"));
+  GC_CHECK(TextContains(plan.confirmationText, L"[" + refspec + L"]"));
+  // ③ 旧的裸拼形态必须一处不留（`<token> ` 后面紧跟空格才是被空格分隔的命令行写法）。
+  GC_CHECK(!TextContains(plan.commandLabel, refspec + L" "));
+  GC_CHECK(!TextContains(plan.confirmationText, refspec + L" "));
+  GC_CHECK(!TextContains(plan.confirmationText, L"git push origin " + refspec));
+  // 预览与参数同源这一点由构造本身保证：去掉方括号后逐个 token 都还在。
+  GC_CHECK(TextContains(plan.commandLabel, L"git [-c] [push.followTags=false] [push]"));
 }
 
 GC_TEST(push_plan_lists_every_risk_and_never_escalates) {

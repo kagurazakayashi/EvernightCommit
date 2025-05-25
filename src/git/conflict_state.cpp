@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <string>
 
+#include "git/shell_text.h"  // FormatCommandPreview：展示的命令一律从实际参数数组复现
+
 namespace gc::git {
 namespace {
 
@@ -532,7 +534,7 @@ ConflictOperationPlan BuildConflictContinuePlan(const ConflictStateFacts& facts)
   plan.blocked = false;
 
   std::wstring text = L"接下来会在命令窗口里执行这一条（工作目录就是这个仓库的工作区根）：\n";
-  text += L"  git -c submodule.recurse=false " + subcommand + L" --continue\n\n";
+  text += L"  " + FormatCommandPreview(L"git", plan.arguments) + L"\n\n";
   text += L"这一步是「由 Git 建立提交」的那一步，不是一条只读命令：\n";
   text += L"  · Git 文档写明 merge --continue 会先确认这里真有一个中断中的合并，然后调用 git commit"
           L"（变基/拣选/撤销的 --continue 同样是把序列里剩下的那一步提交出去）。"
@@ -616,7 +618,7 @@ ConflictOperationPlan BuildConflictAbortPlan(const ConflictStateFacts& facts) {
   plan.blocked = false;
 
   std::wstring text = L"这条命令会改动你的工作区，风险请自己核对之后再确认：\n";
-  text += L"  git -c submodule.recurse=false " + subcommand + L" --abort\n\n";
+  text += L"  " + FormatCommandPreview(L"git", plan.arguments) + L"\n\n";
   text += L"它会做什么（按 Git 自己的文档口径）：\n";
   if (subcommand == L"merge") {
     text += L"  · 终止当前的冲突解决过程，并「试图重建合并开始前的状态」；文档写明这一条在 "

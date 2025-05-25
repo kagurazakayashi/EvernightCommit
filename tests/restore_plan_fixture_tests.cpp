@@ -106,6 +106,29 @@ gc::git::RefIntegrityFacts AskIntegrity(GitFixture& fixture, std::wstring_view b
 // 把一段宽字符诊断文本收窄成可读的 UTF-8（只用于失败消息，不参与任何判定）。
 std::string Narrow(const std::wstring& text) { return gc::platform::Utf16ToUtf8(text); }
 
+// 临时根内的条目清单（相对路径、排序后）。跑程序自己构造的那一串前后各取一次：一模一样，
+// 就是「没有额外的 shell 副作用」的直接证据——`&` 若真被 cmd 当命令分隔，多出来的文件或目录
+// 一定在这份清单里现形。
+std::vector<std::wstring> RootEntries(GitFixture& fixture) {
+  std::vector<std::wstring> names;
+  std::error_code error;
+  const std::filesystem::path root(fixture.Root());
+  for (std::filesystem::recursive_directory_iterator it(root,
+                                                       std::filesystem::directory_options::skip_permission_denied,
+                                                       error),
+       end;
+       !error && it != end; it.increment(error)) {
+    const std::filesystem::path& entry = it->path();
+    if (entry.filename().empty()) {
+      continue;
+    }
+    const std::wstring relative = entry.lexically_relative(root).wstring();
+    names.push_back(relative.empty() ? entry.filename().wstring() : relative);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
 }  // namespace
 
 GC_TEST(restore_branch_probe_accepts_the_query_shape_on_a_fresh_repository) {
@@ -681,4 +704,63 @@ GC_TEST(restore_refuses_branches_checked_out_in_a_linked_worktree_on_real_git) {
   // 到这儿为止一条引用都没被移动过：建工作树与判读都不改现场。
   GC_CHECK(RefOid(fixture, L"refs/heads/main") == commitC);
   GC_CHECK(RefOid(fixture, L"refs/heads/feature") == commitC);
+}
+
+// git-readonly：分支名里带对 cmd 有语法意义的字符时（本机 check-ref-format 实测
+// refs/heads/demo&calc&rem、100%25done! 合法），「能粘出去的一行」和「真正发出去的那一串」
+// 是两份东西：前者按目标 shell 的规则裁定（& 能被双引号包住，% 与 ! 一律不给一行命令），
+// 后者是原值的 argv 数组，由 CreateProcessW 直接交给 Git，全程不经过任何 shell。
+// 全程只用 init / add / update-ref / rev-parse / plumbing 造的既有对象：没有 commit、没有 push。
+GC_TEST(restore_program_arguments_for_shell_significant_names_reach_git_intact) {
+  GitFixture fixture;
+  std::string reason;
+  GC_REQUIRE(fixture.Prepare(reason), "夹具准备失败: " + reason);
+  fixture.InitRepository(L"repo");
+  fixture.WriteFile(L"sentinel.txt", "哨兵：跑完之后它还得在原地\n");
+  fixture.StageAll();
+  const std::wstring commitOld = fixture.SeedCommitObject(L"既有提交 old");
+  fixture.WriteFile(L"next.txt", "2\n");
+  fixture.StageAll();
+  const std::wstring commitNew = fixture.SeedCommitObject(L"既有提交 new", commitOld);
+  GC_REQUIRE(!commitOld.empty() && !commitNew.empty() && commitOld != commitNew,
+             "需要两枚互不相同的既有提交对象");
+  // 一条邻居引用：用来证明「动的只有确认过的那一个名字」。
+  fixture.RunCheckedInRepo({L"update-ref", L"refs/heads/neighbor", commitNew});
+
+  for (const wchar_t* shortName : {L"demo&calc&rem", L"100%DONE", L"a!b"}) {
+    const std::wstring branchRef = std::wstring(L"refs/heads/") + shortName;
+    fixture.RunCheckedInRepo({L"update-ref", branchRef, commitNew});
+    const std::vector<std::wstring> entriesBefore = RootEntries(fixture);
+
+    const gc::git::RestoreClues clues = MakeMoveClues(fixture, branchRef, commitNew, commitOld);
+    const gc::git::RestoreCopyText copy =
+        gc::git::DescribeRestoreCopy(clues, gc::git::ShellDialect::cmdInteractive);
+    GC_REQUIRE_MESSAGE(copy.cluesUsable, "闸门应放行这类 Git 合法名：" + Narrow(copy.refusal));
+
+    // ① 交给 Git 的数组：原值，一个字符都没被替换、没被删。
+    GC_CHECK(std::find(copy.arguments.begin(), copy.arguments.end(), branchRef) !=
+             copy.arguments.end());
+    // ② 给人粘的那一行按 cmd 的规则单独裁定，和数组不是同一份东西。
+    const bool cmdCanQuoteIt = std::wstring(shortName).find_first_of(L"%!") == std::wstring::npos;
+    if (cmdCanQuoteIt) {
+      GC_REQUIRE(!copy.copyableCommand.empty(), "双引号能包住的段应给一行命令");
+      GC_CHECK(copy.copyableCommand.find(L'"' + branchRef + L'"') != std::wstring::npos);
+    } else {
+      GC_CHECK(copy.copyableCommand.empty());
+      GC_CHECK(!copy.copyRefusal.empty());
+      GC_CHECK(!copy.structuredFacts.empty());
+    }
+
+    // ③ 真正发出去的是那份数组：Git 必须原样收下并把这一个名字挪回去。
+    const auto moved = RunProgramArguments(fixture, copy.arguments);
+    GC_REQUIRE(moved.exited && !moved.timedOut, "update-ref 没有正常结束");
+    GC_CHECK_MESSAGE(moved.exitCode == 0,
+                     "程序自己构造的那一串必须被真实 Git 接受：" + Narrow(moved.err));
+    GC_CHECK(RefOid(fixture, branchRef) == commitOld);
+    GC_CHECK(RefOid(fixture, L"refs/heads/neighbor") == commitNew);
+
+    // ④ 没有额外的 shell 副作用：临时根里的条目一字不差，哨兵文件也没被改动。
+    GC_CHECK(RootEntries(fixture) == entriesBefore);
+    GC_CHECK(ReadRootRelativeFile(fixture, L"repo/sentinel.txt") == "哨兵：跑完之后它还得在原地\n");
+  }
 }

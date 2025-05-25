@@ -6,6 +6,7 @@
 #include "git/commit_history.h"  // LooksLikeFullObjectId：位置一律按完整对象 ID 比，不按短 ID 猜
 #include "git/diff_view.h"       // IsWorktreeRelativePath / MakeLiteralPathspec：路径约定只有一份
 #include "git/pull_plan.h"       // 子模块自己 HEAD 的那条查询与 pull/push 预检同一形态
+#include "git/shell_text.h"      // 让用户自己在终端跑的那一句按目标 shell 的规则编排
 
 namespace gc::git {
 namespace {
@@ -91,12 +92,23 @@ std::wstring ChildIdentityProblem(const SubmoduleEntryFacts& facts) {
   // Git 沿目录往上找仓库：子模块自己没有 .git 时会答成「父仓库本身」。这一条必须单独说清，
   // 否则「未初始化」会被显示成一句含糊的「这不是仓库」，而用户下一步该做的完全不同。
   if (!child.root.empty() && PathsEqualFolded(child.root, facts.parentRoot)) {
+    // 这一句是「请用户自己在终端里跑」的，所以按交互式 cmd 的规则编排：路径是数据，
+    // 含空格或 & 就整体加引号，含 cmd 救不回来的写法（% ! 引号、控制字符）就不给一行命令，
+    // 改成逐段列出并说明原因——绝不静默替换字符，也绝不替用户决定换哪个 shell。
+    const std::vector<std::wstring> initArguments{L"submodule", L"update", L"--init", L"--",
+                                                 facts.relativePath};
+    const ShellCommandText initCmd =
+        FormatShellCommand(L"git", initArguments, ShellDialect::cmdInteractive);
+    const std::wstring initHowTo =
+        initCmd.expressible
+            ? initCmd.text
+            : (FormatCommandPreview(L"git", initArguments) + L"（这一串不能安全地粘成一行：" +
+               initCmd.refusal + L"，请在终端里按段自己输入）");
     return L"这个目录自己不是仓库：Git 从它往上找到的工作区根就是当前这个父仓库（" +
            facts.parentRoot + L"）。这正是子模块**还没有初始化**的样子——父索引里只有那条 gitlink，"
            L"目录里没有它自己的 .git。"
-           L"初始化会联网并改动工作区，本程序不在点「进入子模块」时替你做：需要的话请自己在终端里跑 "
-           L"git submodule update --init -- " +
-           facts.relativePath + L"（或你指定的别的形态），再回来点“刷新”。";
+           L"初始化会联网并改动工作区，本程序不在点「进入子模块」时替你做：需要的话请自己在终端里跑 " +
+           initHowTo + L"（或你指定的别的形态），再回来点“刷新”。";
   }
   switch (child.kind) {
     case RepoKind::notRepository:

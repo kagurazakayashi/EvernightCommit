@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "git/commit_history.h"  // LooksLikeFullObjectId / ShortObjectId
+#include "git/shell_text.h"      // FormatCommandPreview：展示的命令只有这一种构造
 
 namespace gc::git {
 namespace {
@@ -204,14 +205,6 @@ std::wstring NeutralizeSentence(const PushPreflightFacts& facts) {
   effects.followTagsConfigured = facts.followTagsConfigured;
   effects.extraPushRefspecsConfigured = facts.extraPushRefspecsConfigured;
   return DescribePushNeutralization(facts.pushRemoteName, effects);
-}
-
-std::wstring QuotedArguments(const std::vector<std::wstring>& arguments) {
-  std::wstring text = L"git";
-  for (const std::wstring& argument : arguments) {
-    text += L' ' + argument;
-  }
-  return text;
 }
 
 }  // namespace
@@ -1135,7 +1128,11 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
   plan.remoteUrlDisplay = FormatPushUrlList(facts.pushUrls);
   plan.pushedObjectId = facts.headObjectId;
   plan.arguments = arguments;
-  plan.commandLabel = QuotedArguments(arguments);
+  // 展示的那一串与发出去的那一串同源：逐段用方括号框住，边界一眼可见。
+  // 不能像旧写法那样把远端名、refspec 裸拼成一空格分隔的「看着像 cmd 一行」的串——Git 认的
+  // 引用名里可以带 &（实测 refs/heads/demo&calc&rem 合法），裸拼出去含义就变了，
+  // 而这一行只是预览，本来也不是给用户粘贴执行的（可粘贴形态由 FormatShellCommand 另判）。
+  plan.commandLabel = FormatCommandPreview(L"git", arguments);
 
   // ---- 风险：要用户明确点头的几条 ----
   std::vector<std::wstring> risks;
@@ -1230,7 +1227,8 @@ PushPlan BuildPushPlan(const PushPreflightFacts& facts, std::wstring_view reposi
   text += L" · 目标分支：" + plan.remoteBranchRef + L"\n";
   text += PushTargetSentence(facts);
   text += L" · " + UpstreamSentence(facts);
-  text += L"\n将在命令窗口里执行：" + plan.commandLabel + L"\n";
+  text += L"\n将在命令窗口里执行（逐段列出，方括号里是交给 Git 的数据、不是 shell 语法）：\n";
+  text += L"  " + plan.commandLabel + L"\n";
   if (!repositoryDirectory.empty()) {
     text += L"（工作目录：" + std::wstring(repositoryDirectory) + L"）\n";
   }

@@ -118,7 +118,7 @@ struct FetchScopeDecision {
   std::wstring refusal;  // allowed 為 false 時把話說完的原因（界面原樣展示，不產生命令）
 
   std::vector<std::wstring> arguments;  // {fetch, 四個中和項…, <遠端名>}；拒絕時為空
-  std::wstring commandLabel;            // 展示用的完整命令
+  std::wstring commandLabel;            // 展示用的逐段预览（与 arguments 同一份構造，不是可粘貼的一行）
 
   // 確認框共用的正文：範圍承諾 + 會變化的東西 + 這次被中和的配置逐條 + 「這不是事務隔離」。
   // 兩個入口把這一段原樣放進自己的確認框，不得各自改寫其中任何一句。

@@ -450,7 +450,7 @@ GC_TEST(first_push_plan_lists_push_and_upstream_separately) {
   GC_CHECK(TextContains(plan.confirmationText, L"git push"));
   GC_CHECK(TextContains(plan.confirmationText, L"branch.topic.remote = origin"));
   GC_CHECK(TextContains(plan.confirmationText, L"branch.topic.merge = refs/heads/topic"));
-  GC_CHECK(TextContains(plan.confirmationText, L"git config branch.topic.remote origin"));
+  GC_CHECK(TextContains(plan.confirmationText, L"git [config] [branch.topic.remote] [origin]"));
   GC_CHECK(TextContains(plan.confirmationText, L"适用的分支只有 topic"));
   GC_CHECK(TextContains(plan.confirmationText, L".git/config"));
   GC_CHECK(TextContains(plan.confirmationText, L"为什么不用 git push -u"));

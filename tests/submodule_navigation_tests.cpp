@@ -492,4 +492,31 @@ GC_TEST(journey_child_root_compare_never_guesses) {
   GC_CHECK(!gc::git::IsJourneyChildRoot(L"D:\\父\\child", L""));
 }
 
+GC_TEST(submodule_init_suggestion_treats_the_path_as_shell_data) {
+  // 「需要的话请自己在终端里跑 git submodule update --init -- <路径>」这一句是给用户粘贴执行的，
+  // 所以按交互式 cmd 的规则编排：路径是数据，含空格或 & 就整体加引号；含 cmd 救不回来的写法
+  // （%）就不给一行命令，改成逐段列出并说明原因——不静默替换字符，也不替用户换 shell。
+  auto uninitialized = [](std::wstring_view path) {
+    SubmoduleEntryFacts facts = HealthyEntryFacts();
+    facts.relativePath = path;
+    facts.index.recordedPath = path;
+    facts.child.kind = RepoKind::plainWorktree;
+    facts.child.submodule = false;
+    facts.child.superprojectTree.clear();
+    facts.child.root = kRoot;  // Git 从那个目录往上找到的就是父仓库本身：还没初始化的样子
+    return gc::git::BuildSubmoduleEntryPlan(facts);
+  };
+
+  const SubmoduleEntryPlan quoted = uninitialized(L"子 模块&pkg");
+  GC_CHECK(quoted.decision == SubmoduleEntryDecision::refuse);
+  GC_CHECK(TextContains(quoted.reason, L"git submodule update --init -- \"子 模块&pkg\""));
+  GC_CHECK(!TextContains(quoted.reason, L"-- 子 模块&pkg"));  // 裸拼的那一形态不留
+
+  const SubmoduleEntryPlan refused = uninitialized(L"100%DONE");
+  GC_CHECK(refused.decision == SubmoduleEntryDecision::refuse);
+  GC_CHECK(TextContains(refused.reason, L"[100%DONE]"));
+  GC_CHECK(TextContains(refused.reason, L"不能安全地粘成一行"));
+  GC_CHECK(!TextContains(refused.reason, L"-- 100%DONE"));
+}
+
 }  // namespace

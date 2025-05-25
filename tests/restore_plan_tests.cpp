@@ -593,4 +593,20 @@ GC_TEST(restore_copy_refuses_unusable_clues_without_producing_text) {
   GC_CHECK(!g::DescribeRestoreCopy(dirty, g::ShellDialect::cmdInteractive).cluesUsable);
   dirty.branchRef = L"refs/heads/a\\" + std::wstring(L"\"");
   GC_CHECK(!g::DescribeRestoreCopy(dirty, g::ShellDialect::cmdInteractive).cluesUsable);
+  // 换行与制表（历史文件的字段是转存形态，解析层能把它们解回真字符）：同样一段命令文本都不许产出，
+  // 而拒绝文字里要按可见形态点名，不能让那条换行把界面文案劈成两段。
+  for (const wchar_t control : {L'\n', L'\r', L'\t'}) {
+    dirty.branchRef = L"refs/heads/a" + std::wstring(1, control) + L"b";
+    const g::RestoreCopyText copy =
+        g::DescribeRestoreCopy(dirty, g::ShellDialect::cmdInteractive);
+    GC_CHECK(!copy.cluesUsable);
+    GC_CHECK(copy.arguments.empty());
+    GC_CHECK(copy.copyableCommand.empty());
+    GC_CHECK(copy.previewCommand.empty());
+    GC_CHECK(copy.structuredFacts.empty());
+    GC_REQUIRE(!copy.refusal.empty(), "不合格的名字必须给出拒绝原因");
+    GC_CHECK(copy.refusal.find(control) == std::wstring::npos);
+  }
+  dirty.branchRef = L"refs/heads/a\nb";
+  GC_CHECK(g::BuildRestorePlan(dirty, MakeQueries(Answered(kOidC), Answered(kOidP))).blocked);
 }

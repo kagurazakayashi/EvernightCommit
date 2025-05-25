@@ -380,7 +380,7 @@ struct PushPlan {
   std::vector<std::wstring> arguments;  // BuildPushCommandArguments 的原樣結果
   std::wstring operationId;             // 執行器操作 ID（純 ASCII：push）
   std::wstring displayName;             // L"推送"
-  std::wstring commandLabel;            // 展示用命令（不含任何憑據）
+  std::wstring commandLabel;            // 展示用的逐段预览（与 arguments 同一份构造，不是可粘贴的一行；不含任何憑據）
   std::wstring confirmationText;
   std::wstring notice;                  // 隨操作一直顯示的範圍說明
 };

@@ -521,7 +521,7 @@ GC_TEST(pull_fetch_plan_ready_names_both_branches_and_promises_scope) {
   GC_CHECK(TextContains(plan.confirmationText, L"refs/heads/main"));
   GC_CHECK(TextContains(plan.confirmationText, L"refs/remotes/origin/main"));
   GC_CHECK(TextContains(plan.confirmationText,
-                        L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags origin"));
+                        L"git [fetch] [--recurse-submodules=no] [--no-prune] [--no-prune-tags] [--no-tags] [origin]"));
   // 范围承诺与界面 fetch 按钮同出一处：允许命名空间、被中和的配置、会变的东西都得说清。
   GC_CHECK(TextContains(plan.confirmationText, L"只更新远端「origin」在 refs/remotes/origin/ 之下"));
   GC_CHECK(TextContains(plan.confirmationText, L".git/FETCH_HEAD"));
