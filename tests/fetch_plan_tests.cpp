@@ -202,8 +202,9 @@ GC_TEST(fetch_ready_only_from_explicit_branch_remote_config) {
   GC_CHECK(!HasArgument(plan.arguments, L"pull"));
   GC_CHECK(plan.operationId == L"fetch" && plan.displayName == L"fetch");
   GC_CHECK(TextContains(plan.confirmationText, L"branch.main.remote"));
+  // 展示的那一串是逐段预览（方括号里是交给 Git 的数据），不再是「看着能粘进 cmd」的空格串。
   GC_CHECK(TextContains(plan.confirmationText,
-                        L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags origin"));
+                        L"git [fetch] [--recurse-submodules=no] [--no-prune] [--no-prune-tags] [--no-tags] [origin]"));
   GC_CHECK(TextContains(plan.confirmationText, L"HEAD 与本地分支都不在这次的范围里"));
   GC_CHECK(TextContains(plan.confirmationText, L"不删除任何引用"));
   GC_CHECK(TextContains(plan.confirmationText, L".git/FETCH_HEAD"));

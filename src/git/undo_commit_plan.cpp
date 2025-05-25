@@ -1210,6 +1210,17 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
                               : (FormatCommandPreview(L"git", recoveryArguments) +
                                  L"（这一串在当前 shell 里不能安全粘成一行：" + recoveryCmd.refusal +
                                  L"；按段自己输入即可）");
+  // reflog 那一句同样是给用户自己在终端里跑的，因此和找回方式走同一套裁定：
+  // 分支名里出现 cmd 救不回来的写法时不给一行命令，只给逐段列出的读法与原因。
+  const std::vector<std::wstring> reflogArguments{L"reflog", L"show", head.branchName};
+  const ShellCommandText reflogCmd =
+      FormatShellCommand(L"git", reflogArguments, ShellDialect::cmdInteractive);
+  const std::wstring reflogHowTo =
+      reflogCmd.expressible
+          ? (L"可用 " + reflogCmd.text + L" 查回原完整 ID")
+          : (L"要查回原完整 ID 可以跑 " + FormatCommandPreview(L"git", reflogArguments) +
+             L"，但这一串不能安全地粘成一行（" + reflogCmd.refusal +
+             L"），请在终端里按段自己输入");
   if (rootUndo) {
     preview += L"找回方式：" + recoveryLine +
                L"（分支引用被删除后，它自己的 reflog 是否还在由 Git 决定，本程序不把它当作找回依据；"
@@ -1218,8 +1229,8 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
   } else {
     preview += L"找回方式：" + recoveryLine +
                L"（这条找回命令不再带预期旧值，由你确认时机；本次移动已带 --create-reflog 写进了该分支的 "
-               L"reflog，可用 git reflog show " +
-               head.branchName + L" 查回原完整 ID）。本程序不会自动恢复，也不会删除 reflog。\n";
+               L"reflog，" +
+               reflogHowTo + L"。本程序不会自动恢复，也不会删除 reflog。\n";
   }
   preview += L"这只移动本机的这一个分支引用：不产生反向提交，不丢弃任何改动，不触碰远端，"
              L"更不会自动 force push。\n";
@@ -1288,7 +1299,7 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
                                : (std::wstring(L"指向父提交 ") + ShortObjectId(newOid))) +
                      L"。如需找回，可执行 " + recoveryLine + L"（本程序不会自动执行）。";
   if (!rootUndo) {
-    plan.restoreHint += L"该分支的 reflog（git reflog show " + head.branchName + L"）也记录了这次移动。";
+    plan.restoreHint += L"该分支的 reflog 也记录了这次移动；" + reflogHowTo + L"。";
   } else {
     plan.restoreHint += L"分支引用已删除，它的 reflog 不作为找回依据。";
   }

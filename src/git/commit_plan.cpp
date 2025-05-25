@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "git/commit_history.h"  // LooksLikeFullObjectId / ShortObjectId：身份字段进比较之前先验形态
+#include "git/shell_text.h"      // FormatCommandPreview：展示的命令只有这一种构造
 
 namespace gc::git {
 namespace {
@@ -631,11 +632,10 @@ CommitPlan BuildCommitPlan(const CommitPlanInput& input) {
 
   // ---- 確認文字：把「要提交什麼」一次講完 ----
   std::wstring preview;
-  // 把真正交给 Git 的参数原样列出来（命令窗口里执行并回显的也是这一条），让用户核对的是同一件事。
-  std::wstring commandLine = L"  git";
-  for (const std::wstring& argument : plan.arguments) {
-    commandLine += L' ' + argument;
-  }
+  // 把真正交给 Git 的参数逐段列出来（命令窗口里执行并回显的也是这一条），让用户核对的是同一件事。
+  // 方括号里是数据、不是 shell 语法：临时清单文件的路径落在当前用户的应用数据目录里，
+  // 用户名带空格或中文时，裸拼的那一行连「哪一段是路径」都看不出来，更不该被当成能粘贴的命令。
+  const std::wstring commandLine = L"  " + FormatCommandPreview(L"git", plan.arguments);
   preview += L"将在命令窗口里执行（工作目录：" + input.identity.repositoryDirectory + L"）：\n";
   preview += commandLine + L"\n\n";
 

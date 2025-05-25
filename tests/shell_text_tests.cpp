@@ -14,6 +14,7 @@ using gc::git::FormatCommandPreview;
 using gc::git::FormatShellCommand;
 using gc::git::FormatStructuredCommandFacts;
 using gc::git::ShellCommandText;
+using gc::git::DescribeDataForDisplay;
 using gc::git::ShellDialect;
 
 const std::wstring kRepo = L"P:\\仓库\\proj";
@@ -128,4 +129,64 @@ GC_TEST(shell_text_formats_never_mutate_the_argument_data) {
   GC_CHECK(Contains(preview, L"[refs/heads/a%b]"));
   GC_CHECK(Contains(facts, L"refs/heads/a%b"));
   GC_CHECK(Contains(facts, L"4)"));
+}
+
+GC_TEST(shell_text_preview_brackets_every_token_so_it_cannot_masquerade_as_a_line) {
+  // 预览这一种表示的用途是「看清会跑什么」，不承诺能被粘回终端：因此每个参数都必须被框住，
+  // 不允许出现「按空格裸拼」的形态（push/fetch/pull/first-push 的历史缺陷就是把远端名、
+  // refspec 直接空格拼成一条看着像 cmd 一行的串）。
+  const std::wstring preview = FormatCommandPreview(
+      L"git", {L"-c", L"push.followTags=false", L"push", L"origin",
+               L"1111111111111111111111111111111111111111:refs/heads/demo&calc&rem"});
+  GC_CHECK(Contains(preview, L"git ["));
+  GC_CHECK(Contains(preview, L"[origin]"));
+  GC_CHECK(Contains(preview, L"[1111111111111111111111111111111111111111:refs/heads/demo&calc&rem]"));
+  GC_CHECK(!Contains(preview, L"origin "));       // 裸拼形态：一个 token 后面直接跟空格
+  GC_CHECK(!Contains(preview, L"demo&calc&rem "));
+  // 数据仍然完整可见，没有被省略、截断或替换。
+  GC_CHECK(Contains(preview, L"demo&calc&rem"));
+}
+
+GC_TEST(shell_text_shows_control_characters_instead_of_letting_them_forge_the_layout) {
+  // 被改坏的历史记录里，一段参数可以带着解码回来的换行与制表（字段是转存形态，解析层容得下）。
+  // 这样的段既进不了可粘贴的一行（按 shell 规则直接拒），也不许原样落进预览与字段清单：
+  // 一条换行会把「一行一段」劈开，看起来像参数少了一段，界面文案也像被数据改过版式。
+  // 本例的字符码一律按数值写（0x0A 换行、0x09 制表、0x5C 反斜杠），免得转义写法看混。
+  const wchar_t kNewline = static_cast<wchar_t>(0x0A);
+  const wchar_t kTab = static_cast<wchar_t>(0x09);
+  const wchar_t kBackslash = static_cast<wchar_t>(0x5C);
+  const std::wstring dirty = L"a" + std::wstring(1, static_cast<wchar_t>(0x0A)) + L"b" + std::wstring(1, static_cast<wchar_t>(0x09)) + L"c";
+  // 生产给出的显示形态：控制字符写成 \xNN。
+  const std::wstring shown =
+      L"a" + std::wstring(1, kBackslash) + L"x0Ab" + std::wstring(1, kBackslash) + L"x09c";
+
+  const ShellCommandText cmd = FormatShellCommand(L"git", {dirty}, ShellDialect::cmdInteractive);
+  GC_CHECK(!cmd.expressible);
+  GC_CHECK(cmd.refusal.find(kNewline) == std::wstring::npos);
+  GC_CHECK(Contains(cmd.refusal, shown));
+
+  const ShellCommandText ps = FormatShellCommand(L"git", {dirty}, ShellDialect::powershell);
+  GC_CHECK(!ps.expressible);
+  GC_CHECK(ps.refusal.find(kNewline) == std::wstring::npos);
+  GC_CHECK(Contains(ps.refusal, shown));
+
+  const std::wstring preview = FormatCommandPreview(L"git", {dirty});
+  GC_CHECK(preview.find(kNewline) == std::wstring::npos);
+  GC_CHECK(Contains(preview, L"[" + shown + L"]"));
+
+  const std::wstring facts = FormatStructuredCommandFacts(L"git", {L"ok", dirty});
+  GC_CHECK(Contains(facts, L"2) [" + shown + L"]"));
+  // 清单自己的分行照旧存在（那是格式，不是数据）。
+  GC_CHECK(facts.find(kNewline) != std::wstring::npos);
+
+  // 关键：显示层怎么写都与数据无关——交给 Git 的数组一字未动。
+  std::vector<std::wstring> arguments{dirty};
+  const std::wstring before = arguments.front();
+  FormatCommandPreview(L"git", arguments);
+  FormatStructuredCommandFacts(L"git", arguments);
+  FormatShellCommand(L"git", arguments, ShellDialect::cmdInteractive);
+  GC_CHECK(arguments.size() == 1 && arguments.front() == before);
+  GC_CHECK(DescribeDataForDisplay(dirty) == shown);
+  // 可见字符（含中文、% ! & 引号）不参与转义：显示形态不改数据本身。
+  GC_CHECK(DescribeDataForDisplay(L"refs/heads/demo&calc&rem") == L"refs/heads/demo&calc&rem");
 }

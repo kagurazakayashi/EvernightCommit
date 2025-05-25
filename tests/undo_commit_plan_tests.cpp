@@ -662,6 +662,46 @@ GC_TEST(plan_normal_commit_uses_update_ref_with_expected_old_value) {
   GC_CHECK(TextContains(plan.notice, L"只移动分支引用"));
 }
 
+GC_TEST(undo_recovery_and_reflog_lines_obey_the_target_shell_rules) {
+  // Git 认的分支名里可以带对 cmd 有语法意义的字符（本机 check-ref-format 实测
+  // refs/heads/demo&calc&rem 合法）。「找回方式」与「查回原完整 ID」那两句是给用户
+  // 自己粘进终端跑的，所以必须按 cmd 的规则编排；而送进 Git 的参数数组是数据，
+  // 一个字都不该因为展示层的限制而改变（本文件的用例不起进程，格式化不产生任何 shell 副作用）。
+  UndoPreflightQueries ampersand = HealthyQueries();
+  ampersand.symbolicRef = Answer(0, L"refs/heads/demo&calc&rem\n");
+  const UndoCommitPlan quoted = gc::git::BuildUndoCommitPlan(InputFromQueries(ampersand));
+  GC_REQUIRE_MESSAGE(!quoted.blocked, Narrow(quoted.blockedReason));
+  GC_CHECK(Contains(quoted.arguments, L"refs/heads/demo&calc&rem"));  // 执行链路仍是原值
+  GC_CHECK(TextContains(quoted.previewText, L"\"refs/heads/demo&calc&rem\""));
+  GC_CHECK(TextContains(quoted.previewText, L"\"demo&calc&rem\""));  // reflog 那句用的是短名
+  GC_CHECK(TextContains(quoted.restoreHint, L"\"demo&calc&rem\""));
+  // 裸拼形态一处都不许留下：`&` 在 cmd 里是「这条跑完再跑下一条」。
+  GC_CHECK(!TextContains(quoted.previewText, L"show demo&calc&rem"));
+  GC_CHECK(!TextContains(quoted.restoreHint, L"show demo&calc&rem"));
+
+  // 含 % 的名字：交互式 cmd 在引号内也展开变量，没有任何不改数据的写法 → 不给一行命令，
+  // 只逐段列出并说清原因（不静默替换字符、不替用户换 shell、更不因此挡住 GUI 链路）。
+  UndoPreflightQueries percent = HealthyQueries();
+  percent.symbolicRef = Answer(0, L"refs/heads/100%DONE\n");
+  const UndoCommitPlan refused = gc::git::BuildUndoCommitPlan(InputFromQueries(percent));
+  GC_REQUIRE_MESSAGE(!refused.blocked, Narrow(refused.blockedReason));
+  GC_CHECK(Contains(refused.arguments, L"refs/heads/100%DONE"));
+  GC_CHECK(TextContains(refused.previewText, L"[refs/heads/100%DONE]"));
+  GC_CHECK(TextContains(refused.previewText, L"不能安全粘成一行"));
+  GC_CHECK(TextContains(refused.previewText, L"[100%DONE]"));  // reflog 那一句同样按段列出
+  GC_CHECK(TextContains(refused.previewText, L"不能安全地粘成一行"));
+  GC_CHECK(TextContains(refused.restoreHint, L"[100%DONE]"));
+  GC_CHECK(!TextContains(refused.previewText, L"git reflog show 100%DONE"));
+
+  // 延迟展开（!）无法由本程序确认那个开关的状态，因此同样不给一行命令。
+  UndoPreflightQueries bang = HealthyQueries();
+  bang.symbolicRef = Answer(0, L"refs/heads/a!b\n");
+  const UndoCommitPlan delayed = gc::git::BuildUndoCommitPlan(InputFromQueries(bang));
+  GC_REQUIRE_MESSAGE(!delayed.blocked, Narrow(delayed.blockedReason));
+  GC_CHECK(TextContains(delayed.previewText, L"[a!b]"));
+  GC_CHECK(TextContains(delayed.previewText, L"延迟扩展"));
+}
+
 GC_TEST(plan_names_the_confirmed_branch_even_when_another_branch_shares_the_commit) {
   // 兩個分支指向同一個提交時，「HEAD」根本不能代表用戶確認的那一個：命令必須點名分支引用。
   UndoPreflightQueries feat = HealthyQueries();

@@ -220,6 +220,10 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     "restore_update_ref_forms_come_from_the_program_and_touch_nothing_else",
     "restore_refuses_symbolic_refs_and_never_moves_the_branch_behind_them",
     "restore_refuses_branches_checked_out_in_a_linked_worktree_on_real_git",
+    // 2026-10-11（可复制命令收口）：逐行核实——用例体只用 init / WriteFile / StageAll（add）/
+    // SeedCommitObject（write-tree + hash-object，不执行 commit）/ update-ref / rev-parse，
+    // 没有任何 commit、push、联网或远端相关调用。
+    "restore_program_arguments_for_shell_significant_names_reach_git_intact",
     // repo_detect_fixture_tests.cpp —— 无提交形态的识别
     "detect_empty_repository_as_without_commits",
     "detect_plain_directory_as_not_repository",

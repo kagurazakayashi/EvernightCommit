@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "git/push_plan.h"  // MaskPushUrlCredentials：展示 URL 前先过一次凭据掩码
+#include "git/shell_text.h"   // FormatCommandPreview：展示的命令只有这一种构造
 #include "git/undo_commit_plan.h"  // ReadUndoQuery：与撤回/fetch 目标预检同一套「答了/明确没有/失败」判读
 
 namespace gc::git {
@@ -529,8 +530,9 @@ FetchScopeDecision DecideFetchScope(const FetchScopeFacts& facts, std::wstring_v
   decision.arguments = {L"fetch", std::wstring(kFetchRecurseSubmodulesOff), std::wstring(kFetchPruneOff),
                         std::wstring(kFetchPruneTagsOff), std::wstring(kFetchTagsOff),
                         std::wstring(remoteName)};
-  decision.commandLabel = L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags " +
-                          std::wstring(remoteName);
+  // 展示的那一串取自实际要发出的参数数组本身（逐段方括号），不再另拼一条「看着像一行命令」的串：
+  // 远端名是数据，Git 认的名字里可以带对 shell 有语法意义的字符。
+  decision.commandLabel = FormatCommandPreview(L"git", decision.arguments);
 
   std::wstring paragraph;
   paragraph += L"这次抓取的范围（钉在命令行上，不让你的仓库配置来扩大它）：\n";

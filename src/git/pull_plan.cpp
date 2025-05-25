@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "git/commit_history.h"
+#include "git/shell_text.h"  // FormatCommandPreview：展示的命令只有这一种构造
 #include "git/workspace_status.h"
 
 namespace gc::git {
@@ -1392,10 +1393,9 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
   plan.strategySource = strategySource;
 
   // ---- 确认文字与随操作显示的范围说明 ----
-  std::wstring commandLine = L"  git";
-  for (const std::wstring& argument : plan.arguments) {
-    commandLine += L' ' + argument;
-  }
+  // 逐步列出实际送进 Git 的那一串：方括号里是数据，不带任何 shell 语义，因此这一行不是
+  // 「可粘贴的命令」（远端引用名、对象 ID 都可能含对 shell 有意义的写法）。
+  const std::wstring commandLine = L"  " + FormatCommandPreview(L"git", plan.arguments);
   const std::wstring relationshipSentence =
       L"本地与远端的关系：" + std::wstring(PullRelationshipLabel(relationship.relationship)) +
       L"（本地独有 " + std::to_wstring(relationship.ahead) + L" 个提交、远端独有 " +
@@ -1462,10 +1462,8 @@ PullIntegratePlan BuildPullIntegratePlan(const PullIntegratePlanInput& input) {
                 L"，目标是刚刚抓回来的 " + ShortObjectId(target.trackingObjectId) +
                 L"。除了这条命令本身要改的引用/索引/工作区，本程序不 push、不 reset、不 stash、"
                 L"不写任何配置文件、不递归子模块。";
-  plan.commandLabel = L"git";
-  for (const std::wstring& argument : plan.arguments) {
-    plan.commandLabel += L' ' + argument;
-  }
+  // 与确认框里那一句同一份构造：逐段列出实际送进 Git 的参数，不再按空格裸拼。
+  plan.commandLabel = FormatCommandPreview(L"git", plan.arguments);
   plan.state = PullPlanState::ready;
   return plan;
 }

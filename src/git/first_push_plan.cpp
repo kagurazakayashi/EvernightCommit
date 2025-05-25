@@ -5,6 +5,7 @@
 
 #include "git/commit_history.h"  // LooksLikeFullObjectId / ShortObjectId
 #include "git/pull_plan.h"       // 復用符號引用／HEAD／上游／關係查詢的形態與判讀
+#include "git/shell_text.h"      // FormatCommandPreview：展示的命令只有這一種構造
 
 namespace gc::git {
 namespace {
@@ -13,15 +14,6 @@ constexpr std::wstring_view kHeadsPrefix = L"refs/heads/";
 
 bool StartsWithHeads(std::wstring_view text) {
   return text.size() >= kHeadsPrefix.size() && text.compare(0, kHeadsPrefix.size(), kHeadsPrefix) == 0;
-}
-
-// 展示用的命令行（與 push_plan 裡同一種寫法：一項一個空格隔開，不加任何 shell 引用）。
-std::wstring CommandDisplay(const std::vector<std::wstring>& arguments) {
-  std::wstring text = L"git";
-  for (const std::wstring& argument : arguments) {
-    text += L' ' + argument;
-  }
-  return text;
 }
 
 std::wstring ShortOr(const std::wstring& objectId, std::wstring_view fallback) {
@@ -249,7 +241,7 @@ std::vector<UpstreamWriteStep> BuildUpstreamWriteSteps(std::wstring_view branchN
   remoteStep.arguments = {L"config", remoteStep.key, remoteStep.value};
   remoteStep.operationId = L"push-upstream-remote";
   remoteStep.displayName = L"设置上游（远端）";
-  remoteStep.commandLabel = CommandDisplay(remoteStep.arguments);
+  remoteStep.commandLabel = FormatCommandPreview(L"git", remoteStep.arguments);
   remoteStep.conclusion = L"已写入 " + remoteKey + L" = " + std::wstring(remoteName) + L"。";
 
   UpstreamWriteStep mergeStep;
@@ -259,7 +251,7 @@ std::vector<UpstreamWriteStep> BuildUpstreamWriteSteps(std::wstring_view branchN
   mergeStep.arguments = {L"config", mergeStep.key, mergeStep.value};
   mergeStep.operationId = L"push-upstream-merge";
   mergeStep.displayName = L"设置上游（远端引用）";
-  mergeStep.commandLabel = CommandDisplay(mergeStep.arguments);
+  mergeStep.commandLabel = FormatCommandPreview(L"git", mergeStep.arguments);
   mergeStep.conclusion = L"已写入 " + mergeKey + L" = " + std::wstring(targetBranchRef) + L"。";
 
   return {remoteStep, mergeStep};
@@ -621,7 +613,7 @@ FirstPushPlan BuildFirstPushPlan(const FirstPushPlanInput& input) {
   plan.pushUrls = facts.publishUrls;
   plan.remoteUrlDisplay = FormatPushUrlList(facts.publishUrls);
   plan.arguments = arguments;
-  plan.commandLabel = CommandDisplay(arguments);
+  plan.commandLabel = FormatCommandPreview(L"git", arguments);
   plan.setUpstreamRequested = input.setUpstreamRequested;
   plan.upstreamTargetFile = facts.configFilePath;
   if (plan.setUpstreamRequested) {

@@ -293,7 +293,7 @@ GC_TEST(fetch_scope_arguments_neutralize_every_side_effect) {
            (std::vector<std::wstring>{L"fetch", L"--recurse-submodules=no", L"--no-prune",
                                        L"--no-prune-tags", L"--no-tags", L"origin"}));
   GC_CHECK(decision.commandLabel ==
-           L"git fetch --recurse-submodules=no --no-prune --no-prune-tags --no-tags origin");
+           L"git [fetch] [--recurse-submodules=no] [--no-prune] [--no-prune-tags] [--no-tags] [origin]");
   // 绝不带上任何扩大范围的形态。
   GC_CHECK(!HasArgument(decision.arguments, L"--all"));
   GC_CHECK(!HasArgument(decision.arguments, L"--multiple"));

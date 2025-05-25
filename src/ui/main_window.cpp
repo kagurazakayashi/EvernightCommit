@@ -3115,10 +3115,12 @@ void MainWindow::AbortConflictFlow(HWND window) {
   RefreshTexts(window);
 }
 
-void MainWindow::EnterSubmodule(HWND window) {
+bool MainWindow::AdmitNavigation(HWND window, std::wstring_view actionLabel) {
   // 导航不写任何东西（不改父索引、不提交、不联网），但它会把界面绑定的仓库整个换掉：
   // 因此任何在途的被编排操作都得先结束，措辞与被编排操作的互斥同源（app/operation_gate）。
-  app::GitFlowActivity activity{
+  // 两个导航入口（进入子模块/返回父仓库）共用这一份装配——「返回」也是换绑定，
+  // 不等在途流程的话，别人等回来的结果就落到了别的仓库上。
+  const app::GitFlowActivity activity{
       /*commit=*/commitFlow_.Active(),
       /*undo=*/undoFlow_.Active(),
       /*fetch=*/fetchFlow_.Active(),
@@ -3134,11 +3136,17 @@ void MainWindow::EnterSubmodule(HWND window) {
   const std::wstring repositoryRoot = state_.Repo().detection.root;
   prereq.workspaceStillBound = !repositoryRoot.empty() &&
                                git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot);
-  const std::wstring refusal =
-      app::DescribeNavigationRefusal(prereq, activity, L"进入子模块");
+  const std::wstring refusal = app::DescribeNavigationRefusal(prereq, activity, actionLabel);
   if (!refusal.empty()) {
     state_.SetStatusNote(refusal);
     RefreshTexts(window);
+    return false;
+  }
+  return true;
+}
+
+void MainWindow::EnterSubmodule(HWND window) {
+  if (!AdmitNavigation(window, L"进入子模块")) {
     return;
   }
   git::ChangeItem item;
@@ -3153,6 +3161,11 @@ void MainWindow::EnterSubmodule(HWND window) {
 }
 
 void MainWindow::ReturnToParent(HWND window) {
+  // 返回与进入是同一件事的另一半：都把界面绑定的仓库整个换掉，因此走同一份准入裁决
+  // （AdmitNavigation）。控制器里那些「代管草稿/栈顶对不对」的核对继续在其位执行。
+  if (!AdmitNavigation(window, L"返回父仓库")) {
+    return;
+  }
   submoduleFlow_.ReturnToParent(*this, CaptureOperationContext());
   RefreshTexts(window);
 }

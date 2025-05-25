@@ -40,10 +40,16 @@ struct ShellCommandText {
 
 // 给人阅读的预览行：把参数数组逐字列出（不含任何 shell 语义，也绝不能再被当成命令粘回去）。
 [[nodiscard]] std::wstring FormatCommandPreview(std::wstring_view executable,
-                                                 const std::vector<std::wstring>& arguments);
+                                                const std::vector<std::wstring>& arguments);
 
 // 结构化字段清单：不能安全粘成一行时复制这一份——每个参数一行、标明是数据不是命令。
 [[nodiscard]] std::wstring FormatStructuredCommandFacts(std::wstring_view executable,
                                                         const std::vector<std::wstring>& arguments);
+
+// 把一段「已经被拒/只供阅读」的数据摆进界面文字：控制字符（含换行、制表）按 `\xNN` 显示，
+// 其余字符原样保留。用途是把被拒数据写进拒绝原因或字段清单时，不让一条换行伪造出
+// 「一行一段」的边界，也不让界面文案看起来像被数据改动过。
+// 这只管给人看的显示：交给 CreateProcessW 的参数数组照旧原值，可粘贴的一行对这些数据一律拒发。
+[[nodiscard]] std::wstring DescribeDataForDisplay(std::wstring_view token);
 
 }  // namespace gc::git
