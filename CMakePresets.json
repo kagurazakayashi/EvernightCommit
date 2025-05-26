@@ -20,7 +20,7 @@
       "displayName": "Visual Studio 2026 x64（多配置，无需开发者命令提示符）",
       "inherits": "base",
       "generator": "Visual Studio 18 2026",
-      "description": "需要 CMake 4.2 及以上：'Visual Studio 18 2026' 生成器自 CMake 4.2 提供（本机 VS 2026 自带 4.2.3-msvc3 实测可用）。旧版 CMake 会在配置阶段直接报“未知生成器”。",
+      "description": "需要 CMake 4.2 及以上：'Visual Studio 18 2026' 生成器自 CMake 4.2 提供（本机 VS 2026 自带 4.3.1-msvc1 实测可用）。旧版 CMake 与不含 Visual Studio 生成器的构建（例如 MSYS2 的 cmake）会在配置阶段直接报“未知生成器”。",
       "architecture": {
         "value": "x64",
         "strategy": "set"

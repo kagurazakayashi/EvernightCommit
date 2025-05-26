@@ -28,7 +28,7 @@ namespace gc::ui {
 // 语义不同，所以这里带的不是文案，而是判定所需的类别。
 struct CommandLaunchOptions {
   app::OperationExitPolicy policy = app::OperationExitPolicy::requireZeroExit;
-  std::wstring startedNote;   // 启动成功后立刻写进“任务状态”的说明
+  std::wstring startedNote;   // 启动成功后立刻写进状态栏的说明
   std::wstring scopeNotice;   // 随状态一起显示的范围说明（子模块指针/二进制/摘要上限）
   std::optional<git::DiffViewKind> viewKind;
   // 本次操作独占的路径清单临时文件（git add 用）。Git 还在读它的时候绝不能删，
@@ -116,9 +116,10 @@ public:
   OperationHost& operator=(const OperationHost&) = delete;
   virtual ~OperationHost() = default;
 
-  // 写「任务状态」并重画（控制器放弃/拒绝/状态推进都走这一句）。
+  // 写状态栏的仓库/操作结论通道并重画（控制器放弃/拒绝/状态推进都走这一句）。
   virtual void SetStatus(std::wstring note) = 0;
-  // 写表单自己的说明通道并重画（与「任务状态」分开：一句是仓库怎么样，一句是用户正在做的事）。
+  // 写表单自己的说明通道并重画（仍是独立通道：一句是仓库怎么样，一句是用户正在做的事）。
+  // 两条通道最终都汇进同一条底部状态栏，由 OperationBanner 按当下最该看的顺序二选一显示。
   virtual void SetFormNote(std::wstring note) = 0;
   // 按钮可用性与整界面重画（操作槽位、流程状态变化之后）。
   virtual void RefreshUi() = 0;

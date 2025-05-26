@@ -12,12 +12,15 @@
 | --- | --- | --- |
 | 编译器 | MSVC 工具集 14.28（Visual Studio 2019 16.11）起提供 `/std:c++20` | 14.51.36231（cl 19.51） |
 | Windows SDK | Windows 10 SDK（`GetDpiForWindow`、`AdjustWindowRectExForDpi` 需 10.0.14393+；本工程按 `_WIN32_WINNT=0x0A00` 编译） | 10.0.26100.0 |
-| CMake | 3.28（`CMakePresets` schema 8；C++20 支持自 3.12 的 `cxx_std_20` 起即有）。`vs2026-x64` 预设另需 **4.2 及以上**：“Visual Studio 18 2026” 生成器自 CMake 4.2 提供 | VS 2026 自带 4.2.3-msvc3；MSYS2 4.3.1（无 Visual Studio 生成器） |
+| CMake | 3.28（`CMakePresets` schema 8；C++20 支持自 3.12 的 `cxx_std_20` 起即有）。`vs2026-x64` 预设另需 **4.2 及以上**：“Visual Studio 18 2026” 生成器自 CMake 4.2 提供 | VS 2026 自带 4.3.1-msvc1；MSYS2 4.4.2（无 Visual Studio 生成器） |
 | 生成器 | Visual Studio 生成器，或 Ninja（需自带 `cl`/`rc` 的开发者环境） | VS 2026 + Ninja 1.13 |
 | 目标平台 | Windows x64（仅支持 x64，非 Windows 会在配置阶段直接报错） | — |
 
 > 注意：MSYS2 自带的 `cmake` 不提供 Visual Studio 生成器，且其 `link.exe` 会遮蔽 MSVC 链接器。
 > 请使用 Visual Studio 安装目录下的 CMake，或独立的 CMake 发行版。
+> 根目录的 `build.ps1` 已按「能否列出预设要求的生成器」在候选（`-CMake` 指定路径、各 VS 实例自带的
+> CMake、PATH 上的 `cmake`）中挑选并跳过不合格者；手工执行上面的 `cmake` 命令时仍需自己确认 PATH
+> 上排在前的是哪一个（`Get-Command cmake -All`）。
 
 x64 与 SDK 的判定不是只看指针宽度：CMake 在 MSVC 下核对编译器自报的目标架构
 （`CMAKE_CXX_COMPILER_ARCHITECTURE_ID`），架构未知时显式失败而不静默放行；

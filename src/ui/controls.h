@@ -17,6 +17,9 @@ struct ListColumn {
 HWND CreateLabel(HWND parent, std::wstring_view text, int id);
 HWND CreateCenteredLabel(HWND parent, std::wstring_view text, int id);
 HWND CreateGroupBox(HWND parent, std::wstring_view text, int id);
+// 把窗口压到兄弟 z 序的最底，位置与尺寸不变。分组框必须用它：新建的子窗口默认排在兄弟 z 序最前面，
+// 也就是压在随后创建的字段之上，而分组框现在要在自己的内部填底色，不压到底就会把字段整块糊掉。
+void SendToBack(HWND target);
 HWND CreateSingleLineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreateMultilineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreatePushButton(HWND parent, std::wstring_view text, int id);

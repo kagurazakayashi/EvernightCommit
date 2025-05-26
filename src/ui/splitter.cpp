@@ -64,8 +64,8 @@ void Splitter::UnregisterWindowClass(HINSTANCE instance) {
 bool Splitter::Create(HWND parent, int id) {
   id_ = id;
   const auto instance = reinterpret_cast<HINSTANCE>(::GetWindowLongPtrW(parent, GWLP_HINSTANCE));
-  window_ = ::CreateWindowExW(0, kSplitterWindowClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, parent,
-                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
+  window_ = ::CreateWindowExW(0, kSplitterWindowClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0,
+                              parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
   return window_ != nullptr;
 }
 

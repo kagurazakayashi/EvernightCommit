@@ -26,7 +26,6 @@
 #include "platform/windows/path_picker.h"
 #include "platform/windows/pathspec_file.h"
 #include "platform/windows/remote_choice_dialog.h"
-#include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
 #include "ui/commands.h"
 #include "ui/resource_ids.h"
@@ -37,7 +36,8 @@ constexpr int kSplitterLeftId = 901;
 constexpr int kSplitterRightId = 902;
 
 constexpr int kInitialWindowWidth = 1100;
-constexpr int kInitialWindowHeight = 780;
+// 底部操作栏是两行（Git 操作按钮一行、持久化区一行），初始高度随之多给一行。
+constexpr int kInitialWindowHeight = 810;
 
 // 命令窗口的一种终态 → 历史记录里分立的结果。绝不把「结果未知 / 启动失败 / Git 未创建」
 // 混进「成功 / 失败」：那几种各有措辞，恢复入口对「未知」一律拒绝照记录执行、只重新核实。
@@ -269,7 +269,7 @@ constexpr std::wstring_view kTipHistoryList =
 constexpr std::wstring_view kTipSummary =
     L"标题：单行、必填，不能全是空白。\r\n"
     L"不要求任何前缀格式（feat:/fix: 之类一概不检查），程序也不会替你改写、翻译或润色文字。\r\n"
-    L"校验结论即时写在上方“任务状态”那一行。";
+    L"校验结论即时写在底部状态栏。";
 constexpr std::wstring_view kTipDescription =
     L"描述：可以空着，也可以多行（Enter 换行）。\r\n"
     L"合成提交信息时的排版是：标题、空一行、描述、空一行、合作者 trailer；"
@@ -335,7 +335,7 @@ constexpr std::wstring_view kConsentBodyHead =
 constexpr std::wstring_view kConsentBodyTail =
     L"\r\n"
     L"不会保存：口令、令牌、带凭据的 URL、进程环境变量。草稿是你自己写的文字，"
-    L"可能存在私人内容——界面右下角有“保存记录”“保存草稿”两个开关和“清除已存记录”按钮，"
+    L"可能存在私人内容——界面底部第二行有“保存记录”“保存草稿”两个开关和“清除已存记录”按钮，"
     L"也可以随时手动删除上面那个文件。\r\n"
     L"\r\n"
     L"是：全部保存（含草稿）\r\n"
@@ -492,8 +492,6 @@ void MainWindow::OnCreate(HWND window) {
   commitForm_.Create(window);
   actionBar_.Create(window);
 
-  programInfo_ = L"EvernightCommit 界面骨架 v" + platform::Utf8ToUtf16(GC_VERSION_STRING) + L"（" +
-                 platform::Utf8ToUtf16(GC_BUILD_TYPE) + L"）";
   const SYSTEMTIME now = platform::CurrentLocalTime();
   commitForm_.SetTimes(now, now);
   // 本机时区那句说明与「时间同步修改」的联动都在这一步落地：控件刚设完初值，
@@ -636,7 +634,7 @@ void MainWindow::UpdateCommandAvailability() {
 }
 
 std::wstring MainWindow::TaskStatusNote() const {
-  // 进行中/已完成的操作说明优先于常规任务状态：用户必须能看到“命令窗口里正在跑什么”。
+  // 进行中/已完成的操作说明优先于常规仓库状态：用户必须能看到“命令窗口里正在跑什么”。
   if (activeOperation_.serial != 0) {
     std::wstring status;
     if (commandRunner_.DescribeOperation(activeOperation_.runnerId, &status, nullptr)) {
@@ -659,7 +657,8 @@ std::wstring MainWindow::TaskStatusNote() const {
 }
 
 std::wstring MainWindow::OperationBanner() const {
-  // 底部状态条：有任务在进行时用实时状态取代“功能未接入”的固定说明。
+  // 窗口唯一的底部状态栏：所有说明都汇到这一条通道，按“当下最该看的”排序。
+  // 有任务在进行时用实时状态取代“功能未接入”的固定说明。
   if (activeOperation_.serial != 0 || tasks_.ReadInFlight()) {
     return TaskStatusNote();
   }
@@ -668,13 +667,13 @@ std::wstring MainWindow::OperationBanner() const {
   if (!submoduleNote.empty()) {
     return submoduleNote;
   }
-  // 提交表单自己的说明（校验结论、合作者增删、作者默认值的来路）。放在这一条通道里，
-  // 是为了让它不和「任务状态」那行的操作结论互相覆盖：两边都是使用者要看的，但看的时机不同。
+  // 没有操作在跑时，先给提交表单自己的说明（校验结论、合作者增删、作者默认值的来路），
+  // 它比仓库常规状态更贴近使用者此刻正在做的事；表单无话可说时再退回仓库状态。
   if (!state_.FormNote().empty()) {
     return state_.FormNote();
   }
   // 依赖 Git 的写操作（暂存/提交/撤回/fetch/pull/推送）全部接通了，这里没有「尚未接入」可说：
-  // 任务状态那句就是使用者要看的结论。
+  // 仓库状态那句就是使用者要看的结论。
   return state_.StatusNote();
 }
 
@@ -699,7 +698,7 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
 
 void MainWindow::RefreshTexts(HWND window) {
   infoBar_.Refresh(L"仓库类型：" + state_.RepoTypeDisplay(), L"当前分支：" + state_.BranchDisplay(),
-                   L"上游：" + state_.UpstreamDisplay(), L"任务状态：" + TaskStatusNote(), programInfo_);
+                   L"上游：" + state_.UpstreamDisplay());
   // 两个列表不在这里重建：本函数每 500 毫秒的状态轮询也会被调用，
   // 逐次清空再填入会让列表反复闪、选中项被冲掉。内容真正变化时由 ApplyWorkspaceLists 落地。
   actionBar_.SetStatus(OperationBanner());
@@ -1220,7 +1219,7 @@ void MainWindow::SetRepoFailed(HWND window, const std::wstring& normalizedPath, 
   // 目标目录连识别都没过（路径不存在、不是目录、safe.directory 拦截等）：导航同样没有落地，
   // 控制器要放弃它的阶段标记并把代管内容原样留着。
   submoduleFlow_.OnRepositoryArrivalFailed(*this, CaptureOperationContext());
-  // 失败原因写进任务状态；若尚未选择仓库则给出占位说明而不是错误。
+  // 失败原因写进底部状态栏；若尚未选择仓库则给出占位说明而不是错误。
   state_.SetStatusNote(normalizedPath.empty() ? std::wstring(kRepoInputPlaceholder) + L"。" + message
                                               : message);
   UpdateCommandAvailability();
@@ -2343,8 +2342,8 @@ void MainWindow::ShowPersistentConsentPrompt(HWND window) {
                                    MB_YESNOCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON1);
   if (answer != IDYES && answer != IDNO) {
     // 取消＝这次运行一个字节都不写；选择本身也不落盘（下次启动重新问）。
-    // 右下角的开关仍然是现成的入口：用户主动点它，就是明确同意保存。
-    state_.SetStatusNote(L"好：这次运行什么都不保存。右下角的「保存记录」「保存草稿」随时可以改主意，"
+    // 底部第二行的开关仍然是现成的入口：用户主动点它，就是明确同意保存。
+    state_.SetStatusNote(L"好：这次运行什么都不保存。底部第二行的「保存记录」「保存草稿」随时可以改主意，"
                          L"点下去的那一刻才开始保存。");
     RefreshTexts(window);
     return;
@@ -2525,8 +2524,6 @@ void MainWindow::OnAuthorConfigCompleted(HWND window, uint64_t completionSerial)
   if (identity != formSession_.AppliedAuthorDefault()) {
     // 只有值真的變了才重寫輸入框：原地重寫會抹掉光標與選區，而這裡每 0.3 秒的刷新都會走到。
     SetAuthorField(window, identity);
-    RunFormValidation(window, L"作者已按这个仓库的有效 Git 配置填好。");
-    return;
   }
   RunFormValidation(window);
 }

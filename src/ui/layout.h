@@ -8,7 +8,7 @@ namespace gc::ui {
 
 struct BandSpec {
   int repoBarHeight = 0;    // “本地仓库 / Git 程序”两行
-  int infoRowHeight = 0;    // 当前分支、上游、任务状态
+  int infoRowHeight = 0;    // 仓库类型、当前分支、上游
   int actionRowHeight = 0;  // 底部操作按钮
   int gap = 0;              // 横向带之间的间隔
   int minChangesHeight = 0;

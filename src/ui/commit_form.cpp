@@ -104,7 +104,7 @@ int CommitForm::MinimumHeight(const UiMetrics& metrics) noexcept {
 void CommitForm::Create(HWND parent) {
   group_ = CreateGroupBox(parent, L"提交信息", kIdCommitGroup);
 
-  // 分组框之后的控件在 z 序上位于其上方，因此用父窗口坐标摆放即可，且不会被分组框背景擦除。
+  // 控件都用父窗口坐标摆放，分组框在 Create 末尾被压到兄弟 z 序最底，字段因此画在它之上。
   summaryLabel_ = CreateLabel(parent, L"标题：", kIdSummaryLabel);
   summary_ = CreateSingleLineEdit(parent, L"", kIdSummaryEdit);
   descriptionLabel_ = CreateLabel(parent, L"描述：", kIdDescriptionLabel);
@@ -136,6 +136,8 @@ void CommitForm::Create(HWND parent) {
   // 「时间同步修改」默认勾上：提交者那两块控件此时是跟着作者时间走的，直接置灰，
   // 免得用户改了半天才发现那一半根本不作数。
   ApplyCommitterTimeEnabled(false);
+  // 分组框压到兄弟 z 序最底：它现在要在自己的内部填底色，压在字段之上就会把字段整块糊掉。
+  SendToBack(group_);
 }
 
 void CommitForm::ApplyCommitterTimeEnabled(bool enabled) {
@@ -306,13 +308,14 @@ void CommitForm::Layout(const RECT& area, const UiMetrics& metrics) {
   Place(authorTimeLabel_, Box(left, y + labelTopOffset, labelWidth, metrics.LabelHeight()));
   Place(authorDate_, Box(contentLeft, y, dateWidth, rowHeight));
   Place(authorClock_, Box(contentLeft + dateWidth + metrics.ColGap(), y, clockWidth, rowHeight));
-  // 「恢复当前时间」靠右摆在本机时区那句说明之后：控件永远看得见，窗口极窄时被压缩的是
-  // 一句说明文字（它只是提示，裁掉不影响操作），而不是按钮本身。
-  const int resetWidth = metrics.ButtonWidth(L"恢复当前时间");
-  const int resetLeft = std::max(pickerEnd, right - resetWidth);
-  Place(timeReset_, Box(resetLeft, y, std::max(metrics.Scale(0), right - resetLeft), rowHeight));
-  const int timeZoneWidth = std::max(metrics.Scale(60), resetLeft - metrics.ColGap() - pickerEnd);
-  Place(timeZone_, Box(pickerEnd, y + labelTopOffset, timeZoneWidth, metrics.LabelHeight()));
+  // 「恢复当前时间」紧贴在时间输入框右侧：它是这两块控件的操作，摆在看板末尾会让用户
+  // 以为它管的是整行甚至整个表单。窗口极窄时先压缩它、再压缩本机时区那句说明。
+  const int resetFullWidth = metrics.ButtonWidth(L"恢复当前时间");
+  const int resetWidth = std::min(resetFullWidth, std::max(metrics.Scale(0), right - pickerEnd));
+  Place(timeReset_, Box(pickerEnd, y, resetWidth, rowHeight));
+  const int zoneLeft = pickerEnd + resetWidth + metrics.ColGap();
+  const int timeZoneWidth = std::max(metrics.Scale(60), right - zoneLeft);
+  Place(timeZone_, Box(zoneLeft, y + labelTopOffset, timeZoneWidth, metrics.LabelHeight()));
   y += rowHeight + gap;
 
   Place(committerTimeLabel_, Box(left, y + labelTopOffset, labelWidth, metrics.LabelHeight()));

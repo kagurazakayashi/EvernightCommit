@@ -21,8 +21,16 @@ std::array<HWND, 7> ActionBar::Buttons() const noexcept {
   return {refresh_, createCommit_, undoCommit_, push_, conflictView_, conflictContinue_, conflictAbort_};
 }
 
-std::array<HWND, 5> ActionBar::PreferenceControls() const noexcept {
-  return {persistRecords_, persistDrafts_, historyCheck_, clearPrefs_, historyBrowse_};
+std::array<HWND, 3> ActionBar::RecordControls() const noexcept {
+  return {persistRecords_, persistDrafts_, clearPrefs_};
+}
+
+std::array<HWND, 2> ActionBar::HistoryControls() const noexcept {
+  return {historyCheck_, historyBrowse_};
+}
+
+int ActionBar::GroupGap(const UiMetrics& metrics) noexcept {
+  return 3 * metrics.ColGap();
 }
 
 int ActionBar::PreferenceControlWidth(HWND control, const UiMetrics& metrics) const {
@@ -37,19 +45,26 @@ int ActionBar::PreferenceControlWidth(HWND control, const UiMetrics& metrics) co
 }
 
 int ActionBar::MinimumHeight(const UiMetrics& metrics) noexcept {
-  return metrics.ControlHeight();
+  return 2 * metrics.ControlHeight() + metrics.RowGap();
 }
 
 int ActionBar::MinimumWidth(const UiMetrics& metrics) const {
   const int gap = metrics.ColGap();
-  int width = metrics.LabelWidth(GetControlText(status_));
+  // 上一行：Git 操作按钮 + 状态说明（状态说明自己也要留到可读的宽度）。
+  int operationWidth = metrics.LabelWidth(GetControlText(status_));
   for (HWND button : Buttons()) {
-    width += metrics.ButtonWidth(GetControlText(button)) + gap;
+    operationWidth += metrics.ButtonWidth(GetControlText(button)) + gap;
   }
-  for (HWND control : PreferenceControls()) {
-    width += PreferenceControlWidth(control, metrics) + gap;
+  // 下一行：两组持久化控件，组内用控件间隔，组间用更宽的分组间隔。
+  int preferenceWidth = gap;
+  for (HWND control : RecordControls()) {
+    preferenceWidth += PreferenceControlWidth(control, metrics) + gap;
   }
-  return width + gap;
+  preferenceWidth += GroupGap(metrics);
+  for (HWND control : HistoryControls()) {
+    preferenceWidth += PreferenceControlWidth(control, metrics) + gap;
+  }
+  return std::max(operationWidth, preferenceWidth);
 }
 
 void ActionBar::Create(HWND parent) {
@@ -83,23 +98,33 @@ void ActionBar::SetStatus(std::wstring_view text) {
 void ActionBar::Layout(const RECT& area, const UiMetrics& metrics) {
   const int rowHeight = metrics.ControlHeight();
   const int gap = metrics.ColGap();
-  const int top = area.top + ((area.bottom - area.top) - rowHeight) / 2;
-  const int labelTop = area.top + ((area.bottom - area.top) - metrics.LabelHeight()) / 2;
+
+  // 两行各自贴住操作区的上下边：带状区域的高度就是 MinimumHeight，中间剩一个行间隔。
+  const int firstTop = area.top;
+  const int secondTop = std::max(firstTop + rowHeight, static_cast<int>(area.bottom) - rowHeight);
+  const int statusTop = firstTop + (rowHeight - metrics.LabelHeight()) / 2;
 
   int x = area.left;
   for (HWND button : Buttons()) {
     const int width = metrics.ButtonWidth(GetControlText(button));
-    Place(button, Box(x, top, width, rowHeight));
+    Place(button, Box(x, firstTop, width, rowHeight));
     x += width + gap;
   }
-  for (HWND control : PreferenceControls()) {
-    const int width = PreferenceControlWidth(control, metrics);
-    Place(control, Box(x, top, width, rowHeight));
-    x += width + gap;
-  }
-
   const int statusWidth = std::max<int>(metrics.Scale(120), area.right - x - gap);
-  Place(status_, Box(x + gap, labelTop, statusWidth, metrics.LabelHeight()));
+  Place(status_, Box(x + gap, statusTop, statusWidth, metrics.LabelHeight()));
+
+  x = area.left;
+  for (HWND control : RecordControls()) {
+    const int width = PreferenceControlWidth(control, metrics);
+    Place(control, Box(x, secondTop, width, rowHeight));
+    x += width + gap;
+  }
+  x += GroupGap(metrics) - gap;
+  for (HWND control : HistoryControls()) {
+    const int width = PreferenceControlWidth(control, metrics);
+    Place(control, Box(x, secondTop, width, rowHeight));
+    x += width + gap;
+  }
 }
 
 }  // namespace gc::ui
