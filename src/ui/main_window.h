@@ -184,7 +184,7 @@ private:
   // 提交表单（标题/描述/作者/合作者）的数据与校验：只做表单，不创建提交。
   // 格式规则一律在 git/commit_identity 与 git/commit_message 里，这里只负责搬运与显示结论。
   void OnCommitFormEdit(HWND window, int controlId);
-  // 依当前表单内容重跑一次校验，并把结论写进「任务状态」。
+  // 依当前表单内容重跑一次校验，并把结论写进底部状态栏。
   // prefixNote 是给同一行的前因（例如「仓库配置里的身份没有覆盖你输入的内容」）：
   // 校验结论与前因必须显示在同一行里，否则用户只来得及看到其中一句。
   void RunFormValidation(HWND window, std::wstring_view prefixNote = {});
@@ -452,7 +452,6 @@ private:
   app::AppState state_;
   app::CommitFormSession formSession_;
   UiMetrics metrics_;
-  std::wstring programInfo_;
   bool suppressRepoEditNotify_ = false;  // 程序改写输入框时不再触发一次识别
   bool suppressCommitFormNotify_ = false;  // 程序改写表单文字时不算作用户编辑
   bool refreshCycleActive_ = false;      // 本次识别/读取属于刷新，不重置列表

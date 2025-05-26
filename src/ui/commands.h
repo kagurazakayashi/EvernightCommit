@@ -20,8 +20,6 @@ enum ControlId : int {
   kIdRepoTypeLabel = 107,
   kIdBranchLabel = 110,
   kIdUpstreamLabel = 111,
-  kIdTaskLabel = 112,
-  kIdAppInfoLabel = 113,
 
   kIdFetchButton = 120,
   kIdPullButton = 121,

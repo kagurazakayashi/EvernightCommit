@@ -71,7 +71,7 @@ std::wstring AppState::WorkspaceBanner() const {
   if (workspace_.status != git::WorkspaceLoadStatus::loaded) {
     return {};
   }
-  // 只有真的读到子模块变化才占用底部那句说明；没有子模块变化时返回空，让界面回到常规的任务状态。
+  // 只有真的读到子模块变化才占用底部那句说明；没有子模块变化时返回空，让界面回到常规的仓库状态。
   return git::SubmoduleExplanationText(workspace_.model);
 }
 

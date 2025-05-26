@@ -8,7 +8,7 @@
 namespace gc::ui {
 namespace {
 
-constexpr DWORD kChildVisible = WS_CHILD | WS_VISIBLE;
+constexpr DWORD kChildVisible = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
 
 [[nodiscard]] HINSTANCE InstanceOf(HWND parent) noexcept {
   return reinterpret_cast<HINSTANCE>(::GetWindowLongPtrW(parent, GWLP_HINSTANCE));
@@ -25,6 +25,30 @@ BOOL CALLBACK FontEnumProc(HWND child, LPARAM font) {
   return TRUE;
 }
 
+// 分组框在视觉样式下只画边框和标题，内部一格都不填；而主窗口的 WS_CLIPCHILDREN 又把「被子控件
+// 占住的格子」从父窗口的擦除范围里排除掉。两边一凑，压在分组框范围内的兄弟控件（表单字段、列表）
+// 一旦移动，它们留下的旧像素既没有父窗口来擦、分组框自己也不重画——用户看到的就是残影。
+// 这里补上内部填充：分组框带 WS_CLIPSIBLINGS，擦到的只是它真正露出来的那部分，不会糊掉上面的字段。
+LRESULT CALLBACK GroupBoxSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                      DWORD_PTR) {
+  if (message == WM_ERASEBKGND) {
+    const HDC dc = reinterpret_cast<HDC>(wParam);
+    RECT area{};
+    ::GetClientRect(window, &area);
+    const HWND parent = ::GetParent(window);
+    HBRUSH background =
+        parent != nullptr
+            ? reinterpret_cast<HBRUSH>(::GetClassLongPtrW(parent, GCLP_HBRBACKGROUND))
+            : nullptr;
+    if (background == nullptr) {
+      background = ::GetSysColorBrush(COLOR_BTNFACE);
+    }
+    ::FillRect(dc, &area, background);
+    return TRUE;
+  }
+  return ::DefSubclassProc(window, message, wParam, lParam);
+}
+
 }  // namespace
 
 HWND CreateLabel(HWND parent, std::wstring_view text, int id) {
@@ -37,7 +61,18 @@ HWND CreateCenteredLabel(HWND parent, std::wstring_view text, int id) {
 }
 
 HWND CreateGroupBox(HWND parent, std::wstring_view text, int id) {
-  return Make(parent, L"BUTTON", text, kChildVisible | BS_GROUPBOX, 0, id);
+  HWND group = Make(parent, L"BUTTON", text, kChildVisible | BS_GROUPBOX, 0, id);
+  if (group != nullptr) {
+    ::SetWindowSubclass(group, &GroupBoxSubclassProc, static_cast<UINT_PTR>(id), 0);
+  }
+  return group;
+}
+
+void SendToBack(HWND target) {
+  if (target == nullptr) {
+    return;
+  }
+  ::SetWindowPos(target, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 HWND CreateSingleLineEdit(HWND parent, std::wstring_view text, int id) {
@@ -124,21 +159,34 @@ void PlaceIfChanged(HWND target, const RECT& rect) {
   if (target == nullptr) {
     return;
   }
+  const HWND parent = ::GetParent(target);
   RECT screen{};
-  if (::GetWindowRect(target, &screen) != 0) {
-    // MoveWindow 收的是父窗口客户区坐标，先把当前屏幕位置换算到同一坐标系再比较。
-    POINT origin{screen.left, screen.top};
-    const HWND parent = ::GetParent(target);
-    if (parent != nullptr) {
-      ::ScreenToClient(parent, &origin);
-    }
-    if (origin.x == rect.left && origin.y == rect.top &&
-        (screen.right - screen.left) == (rect.right - rect.left) &&
-        (screen.bottom - screen.top) == (rect.bottom - rect.top)) {
-      return;
-    }
+  if (::GetWindowRect(target, &screen) == 0) {
+    ::MoveWindow(target, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+    return;
   }
+  // MoveWindow 收的是父窗口客户区坐标，先把当前屏幕位置换算到同一坐标系再比较。
+  POINT oldTopLeft{screen.left, screen.top};
+  POINT oldBottomRight{screen.right, screen.bottom};
+  if (parent != nullptr) {
+    ::ScreenToClient(parent, &oldTopLeft);
+    ::ScreenToClient(parent, &oldBottomRight);
+  }
+  if (oldTopLeft.x == rect.left && oldTopLeft.y == rect.top &&
+      (screen.right - screen.left) == (rect.right - rect.left) &&
+      (screen.bottom - screen.top) == (rect.bottom - rect.top)) {
+    return;
+  }
+  // 旧位置与新位置的并集就是「画错过的地方」。光靠系统给父窗口发的失效不够：父窗口带
+  // WS_CLIPCHILDREN，被这块区域里另一个子窗口（分组框）盖住的部分不归它擦，而那个子窗口
+  // 本来收不到重绘通知。所以显式带上 RDW_ALLCHILDREN，让盖在下面的分组框一起重画。
+  const RECT stale{std::min(oldTopLeft.x, rect.left), std::min(oldTopLeft.y, rect.top),
+                   std::max(oldBottomRight.x, rect.right), std::max(oldBottomRight.y, rect.bottom)};
   ::MoveWindow(target, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+  if (parent != nullptr) {
+    ::RedrawWindow(parent, &stale, nullptr,
+                   RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+  }
 }
 
 std::wstring GetControlText(HWND target) {

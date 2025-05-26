@@ -58,6 +58,12 @@ void ChangesPane::Create(HWND parent) {
   historyGroup_ = CreateGroupBox(parent, L"最近提交", kIdHistoryGroup);
   historyList_ = CreateReportListView(parent, kIdHistoryList, commitColumns_);
   historyHint_ = CreateCenteredLabel(historyList_, L"", kIdHistoryHint);
+
+  // 三块分组框压到兄弟 z 序最底：分组框要在自己的内部填底色（否则列表移动后旧像素没人擦），
+  // 而新建的子窗口默认排在最前面，不压下去它就会把随后创建的列表整块糊掉。
+  SendToBack(unstagedGroup_);
+  SendToBack(stagedGroup_);
+  SendToBack(historyGroup_);
 }
 
 RECT ChangesPane::InnerRect(const RECT& group, const UiMetrics& metrics) noexcept {

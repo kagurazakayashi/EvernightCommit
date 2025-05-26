@@ -197,7 +197,7 @@ struct RestoreRecheckScene {
 };
 
 // 「确认后、执行前的复核」裁决：把上面这份现场与方案绑定的前提逐条比对。
-// 返回空串 = 仍然一致，可以发那条 update-ref；否则返回要原样写进「任务状态」的完整说明
+// 返回空串 = 仍然一致，可以发那条 update-ref；否则返回要原样写进底部状态栏的完整说明
 // （「复核没读回来」与「分支在这期间又被挪走/删掉」分别说清，绝不合并成一句“请重试”）。
 // 调用方拿到非空答案就不得发命令：放弃的是「这一份现状」，不是用户的恢复意图。
 [[nodiscard]] std::wstring DescribeRestoreRecheckMismatch(const RestoreRecheckScene& scene,
