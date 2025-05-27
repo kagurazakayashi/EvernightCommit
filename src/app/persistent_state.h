@@ -49,12 +49,16 @@ struct PersistentWindowGeometry {
   bool maximized = false;
 };
 
-// 「未暂存 / 已暂存」两条分隔条的列宽比例，存千分比整数（0..1000）。
-// 是否真的能落地由 ui/layout 的 RatioFromMouseX 规则复核，这里只保证取值不越界。
+// 两个选项卡各自的列宽比例，存千分比整数（0..999）。
+//   stagingPermille —— 「变化信息」里未暂存列表占可用宽度的比例；
+//   historyPermille —— 「提交历史」里最近提交列表占可用宽度的比例。
+// 两条分隔条分属两个选项卡，互不相关，因此不再要求两者之和小于 1000；
+// 是否真的能落地由 ui/layout 的 StagingRatioFromMouseX / HistoryRatioFromMouseX 规则复核，
+// 这里只保证各自的取值不越界。
 struct PersistentColumns {
   bool valid = false;
-  int leftPermille = 340;
-  int middlePermille = 340;
+  int stagingPermille = 340;
+  int historyPermille = 340;
 };
 
 // 一份按仓库身份保存的提交表单草稿（与子模块导航的 HeldForm 同一类内容，
@@ -130,7 +134,7 @@ void ClearPersistedUserData(PersistentState* state);
 //   git|<转义后的绝对路径>
 //   recent|<转义后的绝对路径>                   可多条，顺序即 MRU 顺序
 //   window|<x>,<y>,<w>,<h>,<max0/1>
-//   columns|<左千分比>,<中千分比>
+//   columns|<变化信息千分比>,<提交历史千分比>
 //   draft|<root>|<key>|<epoch>|<sync>,<edited>|<作者墙钟 y,m,d,H,M,S>|<提交者墙钟>|<标题>|<描述>|<作者>|<合作者条数>|<合作者>…
 //
 // 墙钟六个整数由 git::CivilTimeLooksValid 裁定；草稿键必须等于 CanonicalPathKey(root)

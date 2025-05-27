@@ -18,6 +18,7 @@
 #include "git/staging_plan.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
+#include "platform/windows/commit_changes.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/path_picker.h"
@@ -84,6 +85,8 @@ private:
   void BrowseRepoPath(HWND window);
   void BrowseGitPath(HWND window);
   void OnSplitterDragged(HWND window, int splitterId, int parentX);
+  // 切换选项卡（TCN_SELCHANGE）：两个选项卡的栏位与分隔条都不是同一套，重排一次布局即可。
+  void OnChangesTabChanged(HWND window);
 
   // Git 可执行文件发现/选择/验证（步骤 2）。
   void InitializeGitDetection(HWND window);
@@ -168,6 +171,18 @@ private:
   // 双击“未暂存的更改/已暂存的更改”的某一行：按所在侧与条目类别构造差异/内容查看命令，
   // 仍走上面的命令窗口执行器（不打开外部编辑器，也不在本进程里静默跑 Git）。
   void OnChangesListDoubleClicked(HWND window, HWND list, int row);
+
+  // 「提交历史」选项卡里选中另一条提交：后台只读地读回它的文件变化，落地到右边的「文件变化」列表。
+  // 这一个入口同时服务于「用鼠标/键盘改选中项」与「刷新之后把清单与新列表对齐」两件事：
+  // 两边都只问「当前选中的那一条是什么」，因此不会出现「列表已经换了而清单还是上一条的」窗口期。
+  void ReconcileCommitFilesSelection(HWND window);
+  // 真正发起一次读取（已做过「选中的这一条还是当前列表里的这一条」核对）。
+  void RequestCommitChanges(HWND window, int row);
+  // 读取完成：按请求序号与仓库身份作废旧结果，再把清单或失败原因落地。
+  void OnCommitChangesCompleted(HWND window, uint64_t completionSerial);
+  // 双击「文件变化」的某一行：用列表里保存的完整对象 ID 构造 `git show <oid> -- <path>`，
+  // 在命令窗口里显示这一个文件在这条提交里的详细差异。
+  void OnCommitFileDoubleClicked(HWND window, int row);
 
   // 双击“最近提交”的某一行：用条目里保存的完整对象 ID 构造 git show，同样走命令窗口执行器。
   // 列表是只读的：这里不构造任何 checkout/reset/revert，查看详情失败也不会动当前分支。
@@ -402,6 +417,9 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
+  // 「选中一条提交 → 读它的文件变化」的只读后台查询：与工作区读取同一套 worker，
+  // 连续切换提交时旧结果按序号作废，不会把上一条提交的清单混进新提交。
+  platform::CommitChangesWorker commitChangesWorker_;
   // ---- 持久化成员（可选新增功能）----
   // 数据与合并规则都在 app/persistent_state；这里只持有「本窗口的这一份」与写入意图。
   platform::PersistentStorePaths prefsPaths_;
@@ -456,6 +474,10 @@ private:
   bool suppressCommitFormNotify_ = false;  // 程序改写表单文字时不算作用户编辑
   bool refreshCycleActive_ = false;      // 本次识别/读取属于刷新，不重置列表
   unsigned long long authorReadSerial_ = 0;  // 作者身份查询的序号：迟到的旧结果按它作废
+  // 「文件变化」正在读的那条提交：请求发出时记下，回来时按它核对「还是不是同一条」。
+  // 与 worker 的提交序号一起构成两道核对，选中的提交或被换掉都不会把清单落到别人名下。
+  git::CommitItem pendingFilesCommit_{};
+  unsigned long long commitFilesSerial_ = 0;  // 请求序号：连同仓库身份版本一起交给工作线程回显
 
   BandSpec bandSpec_{};
   ChangesSpec changesSpec_{};
@@ -466,8 +488,8 @@ private:
   ChangesPane changesPane_;
   CommitForm commitForm_;
   ActionBar actionBar_;
-  Splitter leftSplitter_;
-  Splitter rightSplitter_;
+  Splitter stagingSplitter_;
+  Splitter historySplitter_;
   ToolTips tooltips_;
 };
 

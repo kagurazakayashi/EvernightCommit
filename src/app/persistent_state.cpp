@@ -350,8 +350,8 @@ std::wstring SerializePersistentState(const PersistentState& state) {
   }
   if (state.columns.valid) {
     out += RecordLine(kColumnsName,
-                      {std::to_wstring(state.columns.leftPermille) + L"," +
-                       std::to_wstring(state.columns.middlePermille)});
+                      {std::to_wstring(state.columns.stagingPermille) + L"," +
+                       std::to_wstring(state.columns.historyPermille)});
     out.push_back(L'\n');
   }
   for (const PersistentDraft& draft : state.drafts) {
@@ -591,19 +591,20 @@ PersistentLoadResult ParsePersistentState(std::wstring_view text) {
       if (comma == std::wstring_view::npos) {
         return corrupt(L"列宽记录缺字段");
       }
-      int left = 0;
-      int middle = 0;
-      if (!ParseSigned(rest.substr(0, comma), &left) || !ParseSigned(rest.substr(comma + 1), &middle)) {
+      int staging = 0;
+      int history = 0;
+      if (!ParseSigned(rest.substr(0, comma), &staging) ||
+          !ParseSigned(rest.substr(comma + 1), &history)) {
         return corrupt(L"列宽记录不是整数");
       }
-      if (left < 0 || middle < 0 || left > kPersistentColumnPermilleBase ||
-          middle > kPersistentColumnPermilleBase ||
-          left + middle >= kPersistentColumnPermilleBase) {
+      // 两个选项卡各自一条分隔条：只要求各自在 0..999，两条之和不再受约束。
+      if (staging < 0 || history < 0 || staging >= kPersistentColumnPermilleBase ||
+          history >= kPersistentColumnPermilleBase) {
         return corrupt(L"列宽比例超出可用范围");
       }
       state.columns.valid = true;
-      state.columns.leftPermille = left;
-      state.columns.middlePermille = middle;
+      state.columns.stagingPermille = staging;
+      state.columns.historyPermille = history;
       continue;
     }
     // draft：固定 10 个前置字段 + 变长的合作者尾巴。

@@ -29,6 +29,16 @@ HWND CreateEditableCombo(HWND parent, int id);
 // 重建下拉候选列表并保持编辑框文本不变；候选项按插入顺序显示。
 void SetComboCandidates(HWND combo, const std::vector<std::wstring>& items);
 HWND CreateReportListView(HWND parent, int id, const std::vector<ListColumn>& columns);
+// 选项卡容器。它只画标签条与切页，不承载页面内容：两个选项卡的子控件仍是父窗口上的普通控件，
+// 由调用方按当前选中的页摆放与显隐。这样列表句柄、选中行与模板工具提示都不用跨页搬来搬去。
+HWND CreateTabControl(HWND parent, int id);
+// 追加一个标签项（index 用插入顺序，TCM_INSERTITEMW 的语义）。
+void AddTabItem(HWND tab, int index, std::wstring_view text);
+// 在 bounds 处摆放选项卡控件，返回它的「页面内容区」——已按标签条实际高度扣掉标签条与边框，
+// 坐标与 bounds 同一坐标系。两个选项卡的内容区在同一尺寸下相同，但只有控件自己知道标签条多高。
+[[nodiscard]] RECT PlaceTabControl(HWND tab, const RECT& bounds);
+// 当前选中的选项卡序号；没有选项卡或没有选中项时返回 -1。
+[[nodiscard]] int GetActiveTab(HWND tab);
 // timeOnly=false 时显示可键盘输入的完整日期，true 时显示时/分/秒。
 HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly);
 

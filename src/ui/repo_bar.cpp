@@ -90,19 +90,24 @@ void RepoBar::Layout(const RECT& area, const UiMetrics& metrics) {
 }
 
 int RepoInfoBar::MinimumHeight(const UiMetrics& metrics) noexcept {
-  return metrics.LabelHeight() + metrics.Scale(4);
+  // 导航按钮比单行文字高：这一带的高度按按钮算，否则按钮会溢出到变更区上去。
+  return std::max(metrics.LabelHeight() + metrics.Scale(4), metrics.ControlHeight() + metrics.Scale(2));
 }
 
 int RepoInfoBar::MinimumWidth(const UiMetrics& metrics) const {
   const int gap = metrics.ColGap() * 2;
-  return metrics.LabelWidth(GetControlText(type_)) + gap + metrics.LabelWidth(GetControlText(branch_)) + gap +
-         metrics.LabelWidth(GetControlText(upstream_));
+  const int buttons = metrics.ButtonWidth(L"进入子模块") + metrics.ButtonWidth(L"返回父仓库") +
+                      metrics.ColGap();
+  return metrics.LabelWidth(GetControlText(type_)) + gap + metrics.LabelWidth(GetControlText(branch_)) +
+         gap + metrics.LabelWidth(GetControlText(upstream_)) + gap + buttons;
 }
 
 void RepoInfoBar::Create(HWND parent) {
   type_ = CreateLabel(parent, L"仓库类型：", kIdRepoTypeLabel);
   branch_ = CreateLabel(parent, L"当前分支：", kIdBranchLabel);
   upstream_ = CreateLabel(parent, L"上游：", kIdUpstreamLabel);
+  enterSubmodule_ = CreatePushButton(parent, L"进入子模块", kIdEnterSubmoduleButton);
+  returnToParent_ = CreatePushButton(parent, L"返回父仓库", kIdReturnToParentButton);
 }
 
 void RepoInfoBar::Refresh(std::wstring type, std::wstring branch, std::wstring upstream) {
@@ -126,6 +131,18 @@ void RepoInfoBar::Layout(const RECT& area, const UiMetrics& metrics) {
   Place(branch_, Row(x, top, branchWidth, height));
   x += branchWidth + gap;
   Place(upstream_, Row(x, top, upstreamWidth, height));
+
+  // 导航按钮在这一行右对齐（从左到右：进入子模块、返回父仓库）。
+  // 条带不够宽时它们会往左挤到上游文字上——那种尺寸已经被 MinimumWidth 挡在最小窗口之外。
+  const int rowHeight = metrics.ControlHeight();
+  const int buttonTop = area.top + ((area.bottom - area.top) - rowHeight) / 2;
+  const int returnWidth = metrics.ButtonWidth(L"返回父仓库");
+  const int enterWidth = metrics.ButtonWidth(L"进入子模块");
+  int right = area.right - returnWidth;
+  Place(returnToParent_, Row(right, buttonTop, returnWidth, rowHeight));
+  right -= metrics.ColGap();
+  right -= enterWidth;
+  Place(enterSubmodule_, Row(right, buttonTop, enterWidth, rowHeight));
 }
 
 }  // namespace gc::ui

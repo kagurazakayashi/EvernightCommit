@@ -50,8 +50,8 @@ PersistentState SampleState() {
   state.window.height = 800;
   state.window.maximized = true;
   state.columns.valid = true;
-  state.columns.leftPermille = 300;
-  state.columns.middlePermille = 400;
+  state.columns.stagingPermille = 300;
+  state.columns.historyPermille = 400;
   PersistentDraft draft = MakeDraft(L"D:\\work\\alpha", L"修复 a|b 的换行\\问题", 1727000000);
   draft.form.description = L"第一行\n第二行\r\n带 | 竖线 与 \\ 反斜杠";
   draft.form.author = L"张三 <z@example.com>";
@@ -78,7 +78,7 @@ GC_TEST(persistent_round_trip_preserves_every_record_kind) {
   GC_CHECK(parsed.state.gitExecutablePath == original.gitExecutablePath);
   GC_CHECK(parsed.state.recentRepositories == original.recentRepositories);
   GC_CHECK(parsed.state.window.valid && parsed.state.window.x == -8 && parsed.state.window.maximized);
-  GC_CHECK(parsed.state.columns.leftPermille == 300 && parsed.state.columns.middlePermille == 400);
+  GC_CHECK(parsed.state.columns.stagingPermille == 300 && parsed.state.columns.historyPermille == 400);
   GC_CHECK(parsed.state.drafts.size() == 1);
   if (parsed.state.drafts.size() == 1) {
     const PersistentDraft& draft = parsed.state.drafts[0];
@@ -145,10 +145,15 @@ GC_TEST(persistent_corrupt_forms_reject_the_whole_file) {
 }
 
 GC_TEST(persistent_columns_and_window_forms_are_bounded) {
+  // 两个选项卡各一条分隔条，不再计算两者之和：两个都合法就应当读得下来。
   GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\ncolumns|600,500\n").status ==
-           PersistentLoadStatus::corrupt);  // 左+中 >= 1000，剩下的列宽没了
+           PersistentLoadStatus::loaded);
   GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\ncolumns|300,400\n").status ==
            PersistentLoadStatus::loaded);
+  GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\ncolumns|1000,0\n").status ==
+           PersistentLoadStatus::corrupt);  // 千分比的上限是 999
+  GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\ncolumns|300\n").status ==
+           PersistentLoadStatus::corrupt);  // 两个数字缺一不可
   GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\nwindow|1,2,0,400,0\n").status ==
            PersistentLoadStatus::corrupt);  // 宽度为 0 的窗口不是几何
   GC_CHECK(ParsePersistentState(L"evernightcommit.prefs|1\nwindow|1,2,3\n").status ==
@@ -285,14 +290,14 @@ GC_TEST(persistent_merge_write_intents_gate_scalar_records) {
   disk.window.valid = true;
   disk.window.width = 1000;
   disk.columns.valid = true;
-  disk.columns.leftPermille = 200;
+  disk.columns.stagingPermille = 200;
   PersistentState ours;
   ours.gitExecutablePath = L"E:\\mine\\git.exe";
   ours.window.valid = true;
   ours.window.width = 1500;
   ours.columns.valid = true;
-  ours.columns.leftPermille = 500;
-  ours.columns.middlePermille = 200;
+  ours.columns.stagingPermille = 500;
+  ours.columns.historyPermille = 200;
 
   // 没点名的记录沿用盘上的：本窗口一次「只改了草稿」的保存不能顺手把别的窗口的布局抹掉。
   PersistentWriteIntents draftsOnly;
@@ -300,7 +305,7 @@ GC_TEST(persistent_merge_write_intents_gate_scalar_records) {
   const PersistentState kept = MergeForWrite(disk, ours, draftsOnly, nullptr);
   GC_CHECK(kept.gitExecutablePath == std::wstring(L"E:\\other\\git.exe"));
   GC_CHECK(kept.window.width == 1000);
-  GC_CHECK(kept.columns.leftPermille == 200);
+  GC_CHECK(kept.columns.stagingPermille == 200);
 
   PersistentWriteIntents all;
   all.gitPath = true;
@@ -309,7 +314,7 @@ GC_TEST(persistent_merge_write_intents_gate_scalar_records) {
   const PersistentState taken = MergeForWrite(disk, ours, all, nullptr);
   GC_CHECK(taken.gitExecutablePath == std::wstring(L"E:\\mine\\git.exe"));
   GC_CHECK(taken.window.width == 1500);
-  GC_CHECK(taken.columns.leftPermille == 500);
+  GC_CHECK(taken.columns.stagingPermille == 500);
 }
 
 GC_TEST(persistent_merge_interleaves_recent_lists_ours_first) {
@@ -477,11 +482,12 @@ GC_TEST(persistent_numeric_fields_reject_overflow_without_wrapping) {
                             {"尺寸非正", L"0,0,0,800,0"}},
                            "窗口记录"));
 
-  // 列宽千分比：业务区间仍由记录本身裁定，溢出输入整份拒绝。
+  // 列宽千分比：两个选项卡各一条分隔条，各自只需在 0..999；溢出输入仍整份拒绝。
   GC_CHECK(AllPrefsCorrupt(valid, L"columns", 1,
                            {{"溢出", L"9999999999999999999,400"},
                             {"越 int", L"2147483648,400"},
-                            {"超出千分比", L"300,700"}},
+                            {"千分比到 1000", L"1000,0"},
+                            {"负千分比", L"300,-1"}},
                            "列宽记录"));
 
   // 草稿保存时刻与合作者条数。

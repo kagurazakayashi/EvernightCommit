@@ -3,6 +3,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <string>
 
 #include "git/commit_history.h"
@@ -18,6 +19,17 @@ constexpr RECT Box(int left, int top, int width, int height) noexcept {
   return RECT{left, top, left + width, top + height};
 }
 
+constexpr std::wstring_view kExplicitBreak = L"\r\n";
+
+[[nodiscard]] std::wstring TwoLine(std::wstring_view first, std::wstring_view second) {
+  return std::wstring(first) + std::wstring(kExplicitBreak) + std::wstring(second);
+}
+
+// 选项卡标签条自身占掉的高度：内容区上边沿要在标签条之下，最小尺寸那一份高度也得把它算进去。
+[[nodiscard]] int TabStripHeight(const gc::ui::UiMetrics& metrics) noexcept {
+  return metrics.LabelHeight() + metrics.Scale(8);
+}
+
 }  // namespace
 
 // 分组标题 + 列表表头 + 两行空状态说明 + 边框与留白。与 LayoutList 共用同一组函数，
@@ -29,27 +41,32 @@ int ChangesPane::HintVerticalPadding(const UiMetrics& metrics) noexcept { return
 int ChangesPane::InnerInset(const UiMetrics& metrics) noexcept { return metrics.Scale(7); }
 
 int ChangesPane::ButtonStackHeight(const UiMetrics& metrics) noexcept {
-  // 四行按钮 + 三个行距 + 一个组间隔（暂存那两个与导航那两个之间留一组，看得出是两件事）。
-  return 4 * metrics.ControlHeight() + 3 * metrics.RowGap() + metrics.RowGap() * 2;
+  // 两个方向各一行按钮 + 一个行距（暂存方向与导航方向已经不在一栏里了：
+  // 进入/返回子模块在「上游：」那一行右对齐）。
+  return 2 * metrics.ControlHeight() + metrics.RowGap();
 }
 
 int ChangesPane::MinimumHeight(const UiMetrics& metrics) noexcept {
   const int listNeed = GroupCaption(metrics) + ListHeaderHeight(metrics) + HintTextHeight(metrics) +
                        HintVerticalPadding(metrics) + InnerInset(metrics);
-  // 中间那一栏的四个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
-  // 否则最后那一个按钮会被摆到表单那一带上去。
-  return std::max(listNeed, ButtonStackHeight(metrics));
+  // 中间那一栏的两个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
+  // 否则第二个按钮会被摆到表单那一带上去。
+  return TabStripHeight(metrics) + std::max(listNeed, ButtonStackHeight(metrics));
 }
 
 void ChangesPane::Create(HWND parent) {
+  // 选项卡容器先建、最后压到兄弟 z 序最底：它只负责画标签条，
+  // 页面内容（分组框、列表）必须画在它上面，否则它整块客户区的底色会把内容糊掉。
+  tabs_ = CreateTabControl(parent, kIdChangesTab);
+  AddTabItem(tabs_, 0, L"变化信息");
+  AddTabItem(tabs_, 1, L"提交历史");
+
   unstagedGroup_ = CreateGroupBox(parent, L"未暂存的更改", kIdUnstagedGroup);
   unstagedList_ = CreateReportListView(parent, kIdUnstagedList, changeColumns_);
   unstagedHint_ = CreateCenteredLabel(unstagedList_, L"", kIdUnstagedHint);
 
   stageAdd_ = CreatePushButton(parent, L"加入暂存区 →", kIdStageAddButton);
   stageRemove_ = CreatePushButton(parent, L"← 移出暂存区", kIdStageRemoveButton);
-  enterSubmodule_ = CreatePushButton(parent, L"进入子模块", kIdEnterSubmoduleButton);
-  returnToParent_ = CreatePushButton(parent, L"返回父仓库", kIdReturnToParentButton);
 
   stagedGroup_ = CreateGroupBox(parent, L"已暂存的更改", kIdStagedGroup);
   stagedList_ = CreateReportListView(parent, kIdStagedList, changeColumns_);
@@ -59,14 +76,36 @@ void ChangesPane::Create(HWND parent) {
   historyList_ = CreateReportListView(parent, kIdHistoryList, commitColumns_);
   historyHint_ = CreateCenteredLabel(historyList_, L"", kIdHistoryHint);
 
-  // 三块分组框压到兄弟 z 序最底：分组框要在自己的内部填底色（否则列表移动后旧像素没人擦），
+  filesGroup_ = CreateGroupBox(parent, L"文件变化", kIdFilesGroup);
+  filesList_ = CreateReportListView(parent, kIdFilesList, changeColumns_);
+  filesHint_ = CreateCenteredLabel(filesList_, L"", kIdFilesHint);
+  ShowCommitFiles(CommitFilesView{});  // 首屏引导语：还没有选中提交
+
+  // 分组框与选项卡都压到兄弟 z 序最底：分组框要在自己的内部填底色（否则列表移动后旧像素没人擦），
   // 而新建的子窗口默认排在最前面，不压下去它就会把随后创建的列表整块糊掉。
   SendToBack(unstagedGroup_);
   SendToBack(stagedGroup_);
   SendToBack(historyGroup_);
+  SendToBack(filesGroup_);
+  SendToBack(tabs_);
 }
 
-RECT ChangesPane::InnerRect(const RECT& group, const UiMetrics& metrics) noexcept {
+RECT ChangesPane::PlaceTabs(const RECT& bounds) {
+  return PlaceTabControl(tabs_, bounds);
+}
+
+int ChangesPane::ActiveTab() const noexcept {
+  const int index = GetActiveTab(tabs_);
+  return index == 1 ? 1 : 0;  // 还没建好（返回 -1）时按第一页处理，与「变化信息」一致。
+}
+
+void ChangesPane::ShowControls(bool visible, std::initializer_list<HWND> controls) {
+  for (HWND control : controls) {
+    if (control != nullptr) {
+      ::ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+    }
+  }
+}RECT ChangesPane::InnerRect(const RECT& group, const UiMetrics& metrics) noexcept {
   const int inset = InnerInset(metrics);
   return RECT{group.left + inset, group.top + GroupCaption(metrics), group.right - inset, group.bottom - inset};
 }
@@ -110,34 +149,38 @@ void ChangesPane::LayoutList(HWND group, HWND list, HWND hint, const RECT& bound
   }
 }
 
-void ChangesPane::Layout(const ChangesColumns& columns, const UiMetrics& metrics) {
+void ChangesPane::LayoutStaging(const StagingColumns& columns, const UiMetrics& metrics) {
+  // 空状态说明不在这里显隐：它是各自那个列表的子窗口，列表一藏它自然跟着藏，列表露出来时
+  // 它该不该露着只由「这一列有没有条目」决定（RebuildList 落地的那个结论）。
+  // 整页一律 SW_SHOW 等于把已经藏起来的说明又摆回到行上面——用户看到的就是叠在清单上的空提示。
+  ShowControls(true, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
+  ShowControls(false, {historyGroup_, historyList_, filesGroup_, filesList_});
+
   LayoutList(unstagedGroup_, unstagedList_, unstagedHint_, columns.unstaged, metrics, changeColumns_);
   LayoutList(stagedGroup_, stagedList_, stagedHint_, columns.staged, metrics, changeColumns_);
-  LayoutList(historyGroup_, historyList_, historyHint_, columns.history, metrics, commitColumns_);
 
   const int gap = metrics.RowGap();
   const int rowHeight = metrics.ControlHeight();
   const int arrowWidth = columns.arrows.right - columns.arrows.left;
-  // 四行：加入暂存区 / 移出暂存区 /（一组间隔）/ 进入子模块 / 返回父仓库。
-  // 间隔让「动索引的那两个」与「只换绑定仓库的那两个」在同一栏里也看得出是两类事。
+  // 两行：加入暂存区 / 移出暂存区，在箭头列里竖排居中。
   const int stackHeight = ChangesPane::ButtonStackHeight(metrics);
   int top = columns.arrows.top + ((columns.arrows.bottom - columns.arrows.top) - stackHeight) / 2;
   top = std::max<int>(columns.arrows.top, top);
 
   const int addWidth = std::min(arrowWidth, metrics.ButtonWidth(L"加入暂存区 →"));
   const int removeWidth = std::min(arrowWidth, metrics.ButtonWidth(L"← 移出暂存区"));
-  const int enterWidth = std::min(arrowWidth, metrics.ButtonWidth(L"进入子模块"));
-  const int returnWidth = std::min(arrowWidth, metrics.ButtonWidth(L"返回父仓库"));
   Place(stageAdd_, Box(columns.arrows.left + (arrowWidth - addWidth) / 2, top, addWidth, rowHeight));
   top += rowHeight + gap;
   Place(stageRemove_,
         Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
-  top += rowHeight + gap * 3;  // 组间隔（与 ButtonStackHeight 里多留的那两行距一致）
-  Place(enterSubmodule_,
-        Box(columns.arrows.left + (arrowWidth - enterWidth) / 2, top, enterWidth, rowHeight));
-  top += rowHeight + gap;
-  Place(returnToParent_,
-        Box(columns.arrows.left + (arrowWidth - returnWidth) / 2, top, returnWidth, rowHeight));
+}
+
+void ChangesPane::LayoutHistory(const HistoryColumns& columns, const UiMetrics& metrics) {
+  ShowControls(false, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
+  ShowControls(true, {historyGroup_, historyList_, filesGroup_, filesList_});
+
+  LayoutList(historyGroup_, historyList_, historyHint_, columns.commits, metrics, commitColumns_);
+  LayoutList(filesGroup_, filesList_, filesHint_, columns.files, metrics, changeColumns_);
 }
 
 template <typename Item>
@@ -209,7 +252,7 @@ void ChangesPane::RebuildList(HWND list, HWND hint, const std::vector<Item>& sho
 
   // 空状态说明只在确实没有条目时占用列表区域；有条目时隐藏，避免叠在行上。
   SetControlText(hint, hintText);
-  ::ShowWindow(hint, items.empty() ? SW_SHOW : SW_HIDE);
+  ::ShowWindow(hint, items.empty() && !hintText.empty() ? SW_SHOW : SW_HIDE);
 }
 
 void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::EmptyStateTexts& texts) {
@@ -221,12 +264,51 @@ void ChangesPane::ShowWorkspace(const git::WorkspaceModel& model, const git::Emp
   const app::ListViewMemory stagedMemory = CaptureMemory(stagedList_, shown_.staged);
   const app::ListViewMemory historyMemory = CaptureMemory(historyList_, shown_.recentCommits);
 
+  // 重建期间发出的选中项恢复通知是中间态，主窗口不能按它发后台查询（见 UpdatingLists 的说明）。
+  updatingLists_ = true;
   RebuildList(unstagedList_, unstagedHint_, shown_.unstaged, unstagedMemory, model.unstaged, texts.unstaged);
   RebuildList(stagedList_, stagedHint_, shown_.staged, stagedMemory, model.staged, texts.staged);
   // 提交历史同一套就地更新：刷新后仍存在的提交保持选中，新提交插入到应有的位置。
   RebuildList(historyList_, historyHint_, shown_.recentCommits, historyMemory, model.recentCommits,
               texts.history);
+  updatingLists_ = false;
   shown_ = model;
+}
+
+void ChangesPane::ShowCommitFiles(const CommitFilesView& view) {
+  // 「文件变化」的清单按差异就地更新：刷新历史列表不该把用户正看的那份清单清空重建。
+  const app::ListViewMemory memory = CaptureMemory(filesList_, shownFiles_);
+  const bool wasUpdating = updatingLists_;
+  updatingLists_ = true;
+  filesLoading_ = view.loading;
+  // 上一份清单必须先挪出来当「控件里现在有哪几行」：RebuildList 是按新旧两侧的差异就地增删行的，
+  // 把新清单同时当作两侧传进去，它永远看不出内容有变化——新行一条不会插进来，旧行一条不会掉，
+  // 于是清单停在上一次的内容上，而状态栏已经在说这一条提交有多少个文件。
+  std::vector<git::ChangeItem> previous;
+  previous.swap(shownFiles_);
+  if (view.commit == nullptr) {
+    filesCommit_ = git::CommitItem{};
+    filesCommitId_.clear();
+  } else {
+    filesCommit_ = *view.commit;
+    filesCommitId_ = view.commit->objectId;
+    shownFiles_ = view.changes;
+  }
+  // 说明文字按「这一段读取怎么样」给：还没选提交、正在读、读失败、读到了但没有变化，
+  // 四种空都不能显示成同一句「没有文件」。
+  if (view.commit == nullptr) {
+    filesHintText_ = TwoLine(L"选择一条提交查看它的文件变化", L"选中「最近提交」里的某一条，这里会列出它改动的文件；双击文件可查看详细差异。");
+  } else if (view.loading) {
+    filesHintText_ = TwoLine(L"正在读取这条提交的文件变化", L"后台执行 git show --name-status…");
+  } else if (!view.error.empty()) {
+    filesHintText_ = TwoLine(L"文件变化读取失败", view.error);
+  } else if (view.changes.empty()) {
+    filesHintText_ = TwoLine(L"这条提交没有文件变化", view.note);
+  } else {
+    filesHintText_.clear();
+  }
+  RebuildList(filesList_, filesHint_, previous, memory, shownFiles_, filesHintText_);
+  updatingLists_ = wasUpdating;
 }
 
 const git::ChangeItem* ChangesPane::ItemAt(HWND list, int row, git::ChangeSide* side) const {
@@ -257,8 +339,22 @@ const git::CommitItem* ChangesPane::CommitItemAt(int row) const {
   return &shown_.recentCommits[static_cast<size_t>(row)];
 }
 
+bool ChangesPane::CommitFileAt(int row, const git::CommitItem** commit,
+                               const git::ChangeItem** change) const {
+  if (filesCommitId_.empty() || row < 0 || static_cast<size_t>(row) >= shownFiles_.size()) {
+    return false;  // 还没有正在展示的提交，或行号已不在当前清单里。
+  }
+  if (commit != nullptr) {
+    *commit = &filesCommit_;
+  }
+  if (change != nullptr) {
+    *change = &shownFiles_[static_cast<size_t>(row)];
+  }
+  return true;
+}
+
 int ChangesPane::ListRowCount(HWND list) const {
-  if (list != unstagedList_ && list != stagedList_ && list != historyList_) {
+  if (list != unstagedList_ && list != stagedList_ && list != historyList_ && list != filesList_) {
     return -1;
   }
   return GetListItemCount(list);
@@ -267,5 +363,10 @@ int ChangesPane::ListRowCount(HWND list) const {
 std::vector<int> ChangesPane::SelectedUnstagedRows() const { return GetListSelectedRows(unstagedList_); }
 
 std::vector<int> ChangesPane::SelectedStagedRows() const { return GetListSelectedRows(stagedList_); }
+
+int ChangesPane::SelectedHistoryRow() const {
+  const std::vector<int> rows = GetListSelectedRows(historyList_);
+  return rows.empty() ? -1 : rows.front();
+}
 
 }  // namespace gc::ui

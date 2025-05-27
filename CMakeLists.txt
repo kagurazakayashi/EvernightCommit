@@ -92,6 +92,7 @@ add_library(gc_core STATIC
   src/app/task_coordinator.cpp
   src/git/author_config.cpp
   src/git/command_window.cpp
+  src/git/commit_changes.cpp
   src/git/commit_date.cpp
   src/git/commit_history.cpp
   src/git/commit_identity.cpp
@@ -122,6 +123,7 @@ target_link_libraries(gc_core PUBLIC gc_build_settings)
 add_library(gc_platform STATIC
   src/platform/windows/author_config.cpp
   src/platform/windows/clipboard.cpp
+  src/platform/windows/commit_changes.cpp
   src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp

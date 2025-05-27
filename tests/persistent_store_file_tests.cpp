@@ -80,8 +80,8 @@ PersistentState ConsentedState() {
   state.window.width = 1200;
   state.window.height = 700;
   state.columns.valid = true;
-  state.columns.leftPermille = 350;
-  state.columns.middlePermille = 350;
+  state.columns.stagingPermille = 350;
+  state.columns.historyPermille = 350;
   PersistentDraft draft;
   draft.repositoryRoot = L"P:\\仓库\\甲";
   draft.repositoryKey = gc::git::CanonicalPathKey(draft.repositoryRoot);

@@ -116,6 +116,41 @@ HWND CreateReportListView(HWND parent, int id, const std::vector<ListColumn>& co
   return list;
 }
 
+HWND CreateTabControl(HWND parent, int id) {
+  return Make(parent, WC_TABCONTROLW, L"", kChildVisible, 0, id);
+}
+
+void AddTabItem(HWND tab, int index, std::wstring_view text) {
+  std::wstring title(text);
+  TCITEMW item{};
+  item.mask = TCIF_TEXT;
+  item.pszText = title.data();
+  ::SendMessageW(tab, TCM_INSERTITEMW, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&item));
+}
+
+RECT PlaceTabControl(HWND tab, const RECT& bounds) {
+  PlaceIfChanged(tab, bounds);
+  // TCM_ADJUSTRECT 按控件的客户区坐标算，因此先换成相对坐标、扣完再挪回来。
+  RECT content = bounds;
+  ::OffsetRect(&content, -bounds.left, -bounds.top);
+  ::SendMessageW(tab, TCM_ADJUSTRECT, FALSE, reinterpret_cast<LPARAM>(&content));
+  ::OffsetRect(&content, bounds.left, bounds.top);
+  if (content.right < content.left) {
+    content.right = content.left;  // 空间不够时宁可给一个空内容区，也不给出反向矩形。
+  }
+  if (content.bottom < content.top) {
+    content.bottom = content.top;
+  }
+  return content;
+}
+
+int GetActiveTab(HWND tab) {
+  if (tab == nullptr) {
+    return -1;
+  }
+  return static_cast<int>(::SendMessageW(tab, TCM_GETCURSEL, 0, 0));
+}
+
 HWND CreateDateTimePicker(HWND parent, int id, bool timeOnly) {
   const DWORD format = timeOnly ? DTS_TIMEFORMAT : DTS_SHORTDATECENTURYFORMAT;
   return Make(parent, DATETIMEPICK_CLASSW, L"", kChildVisible | WS_TABSTOP | format, 0, id);

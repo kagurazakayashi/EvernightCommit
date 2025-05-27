@@ -8,7 +8,7 @@ namespace gc::ui {
 
 struct BandSpec {
   int repoBarHeight = 0;    // “本地仓库 / Git 程序”两行
-  int infoRowHeight = 0;    // 仓库类型、当前分支、上游
+  int infoRowHeight = 0;    // 仓库类型、当前分支、上游（子模块导航按钮也在这条带上，右对齐）
   int actionRowHeight = 0;  // 底部操作按钮
   int gap = 0;              // 横向带之间的间隔
   int minChangesHeight = 0;
@@ -27,37 +27,48 @@ struct Bands {
 
 bool ComputeBands(const RECT& client, const BandSpec& spec, Bands* out);
 
+// 变更区的布局参数。两个选项卡各自只有一条分隔条，因此只保留两个比例：
+//   stagingRatio —— 「变化信息」选项卡里未暂存列表占可用宽度的比例；
+//   historyRatio —— 「提交历史」选项卡里最近提交列表占可用宽度的比例。
 struct ChangesSpec {
   int splitterWidth = 7;
   int arrowColumnWidth = 118;
   int minListWidth = 168;
   int minArrowColumnWidth = 96;
   int gap = 6;
-  double leftRatio = 0.34;    // 未暂存列表占可用宽度的比例
-  double middleRatio = 0.34;  // 已暂存列表占可用宽度的比例
+  double stagingRatio = 0.34;
+  double historyRatio = 0.34;
 };
 
-struct ChangesColumns {
+// 「变化信息」选项卡内容区：未暂存 | 箭头列 | 分隔条 | 已暂存。
+struct StagingColumns {
   RECT unstaged{};
   RECT arrows{};
-  RECT splitterLeft{};
+  RECT splitter{};
   RECT staged{};
-  RECT splitterRight{};
-  RECT history{};
 };
 
-void ComputeChangesColumns(const RECT& area, const ChangesSpec& spec, ChangesColumns* out);
+// 「提交历史」选项卡内容区：最近提交 | 分隔条 | 文件变化。
+struct HistoryColumns {
+  RECT commits{};
+  RECT splitter{};
+  RECT files{};
+};
 
-// 把拖动分隔条时的鼠标 X 坐标换算成新的比例（索引 0 = 左分隔条，1 = 右分隔条）。
-void RatioFromMouseX(const RECT& area, const ChangesSpec& spec, int splitterIndex, int mouseX, double* ratioLeft,
-                     double* ratioMiddle);
+// area 是选项卡内容区（已去掉标签条与内边距），各栏都填满它的高度。
+void ComputeStagingColumns(const RECT& area, const ChangesSpec& spec, StagingColumns* out);
+void ComputeHistoryColumns(const RECT& area, const ChangesSpec& spec, HistoryColumns* out);
+
+// 把拖动分隔条时的鼠标 X 坐标（相对分隔条所在窗口的客户区）换算成新的比例。
+void StagingRatioFromMouseX(const RECT& area, const ChangesSpec& spec, int mouseX, double* ratio);
+void HistoryRatioFromMouseX(const RECT& area, const ChangesSpec& spec, int mouseX, double* ratio);
 
 struct MinimumClientSize {
   int width = 0;
   int height = 0;
 };
 
-// 取三栏所需宽度与不可压缩单行文本所需宽度中的较大者。
+// 取两个选项卡各自所需宽度（含标签条）与不可压缩单行文本所需宽度中的较大者。
 MinimumClientSize MinimumClientFor(const BandSpec& bands, const ChangesSpec& changes);
 
 }  // namespace gc::ui
