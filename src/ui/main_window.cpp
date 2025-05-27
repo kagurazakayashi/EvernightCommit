@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "git/commit_changes.h"
 #include "git/commit_history.h"
 #include "git/commit_identity.h"
 #include "git/commit_message.h"
@@ -32,8 +33,8 @@
 namespace gc::ui {
 namespace {
 
-constexpr int kSplitterLeftId = 901;
-constexpr int kSplitterRightId = 902;
+constexpr int kSplitterStagingId = 901;
+constexpr int kSplitterHistoryId = 902;
 
 constexpr int kInitialWindowWidth = 1100;
 // 底部操作栏是两行（Git 操作按钮一行、持久化区一行），初始高度随之多给一行。
@@ -265,7 +266,20 @@ constexpr std::wstring_view kTipHistoryList =
     L"\r\n"
     L"双击某一行：在命令窗口里执行 git show，显示这条提交的完整元数据（--format=fuller）、"
     L"正文与差异；合并提交的组合差异可能为空，那是正常的。\r\n"
+    L"选中某一行：右边那份「文件变化」列出这条提交相对它第一个父提交改动的文件（只读的"
+    L"git show --name-status --first-parent）；合并提交按“相对第一个父提交”给，因此不会出现"
+    L"“选中一条合并提交却一个文件都看不到”。\r\n"
     L"这一列是只读的：不提供、也不会顺手执行 checkout/reset/revert 之类的历史改写。";
+constexpr std::wstring_view kTipFilesList =
+    L"这条提交相对它第一个父提交改了哪些文件：状态字母沿用与两个更改列表同一套文案，"
+    L"重命名/复制会同时列出旧、新两条路径。\r\n"
+    L"合并提交按 --first-parent 给：相对它第一个父提交的变化，而不是组合差异（组合差异在"
+    L"git show 默认形态下对一个 name-status 都不输出，那样会被误读成“这条提交没改东西”）。\r\n"
+    L"\r\n"
+    L"双击某一行：在命令窗口里执行 git show <完整对象 ID> -- <这一条路径>，"
+    L"只显示这一个文件在这条提交里的详细差异；重命名条目会同时用上旧、新两条路径。\r\n"
+    L"对象 ID 与路径都取自列表内部保存的原始字段（绝不用“提交”列显示的短 ID、也不从显示文字反解路径）；"
+    L"只读查看，不改动工作区、索引或任何引用。";
 constexpr std::wstring_view kTipSummary =
     L"标题：单行、必填，不能全是空白。\r\n"
     L"不要求任何前缀格式（feat:/fix: 之类一概不检查），程序也不会替你改写、翻译或润色文字。\r\n"
@@ -478,17 +492,17 @@ void MainWindow::OnCreate(HWND window) {
     ::SetWindowPos(window, nullptr, 0, 0, metrics_.Scale(kInitialWindowWidth),
                    metrics_.Scale(kInitialWindowHeight), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
-  // 上次拖过的两列宽度直接接进布局参数（UpdateLayoutSpecs 只改 DPI 尺寸、不动比例）。
+  // 上次拖过的两个选项卡列宽直接接进布局参数（UpdateLayoutSpecs 只改 DPI 尺寸、不动比例）。
   if (PersistenceApplicable() && prefs_.columns.valid) {
-    changesSpec_.leftRatio = static_cast<double>(prefs_.columns.leftPermille) / 1000.0;
-    changesSpec_.middleRatio = static_cast<double>(prefs_.columns.middlePermille) / 1000.0;
+    changesSpec_.stagingRatio = static_cast<double>(prefs_.columns.stagingPermille) / 1000.0;
+    changesSpec_.historyRatio = static_cast<double>(prefs_.columns.historyPermille) / 1000.0;
   }
 
   repoBar_.Create(window);
   infoBar_.Create(window);
   changesPane_.Create(window);
-  leftSplitter_.Create(window, kSplitterLeftId);
-  rightSplitter_.Create(window, kSplitterRightId);
+  stagingSplitter_.Create(window, kSplitterStagingId);
+  historySplitter_.Create(window, kSplitterHistoryId);
   commitForm_.Create(window);
   actionBar_.Create(window);
 
@@ -538,6 +552,7 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(changesPane_.unstagedList(), kTipUnstagedList);
   tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
   tooltips_.Add(changesPane_.historyList(), kTipHistoryList);
+  tooltips_.Add(changesPane_.filesList(), kTipFilesList);
   tooltips_.Add(commitForm_.SummaryEdit(), kTipSummary);
   tooltips_.Add(commitForm_.DescriptionEdit(), kTipDescription);
   tooltips_.Add(commitForm_.AuthorEdit(), kTipAuthor);
@@ -557,8 +572,8 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(actionBar_.conflictViewButton(), kTipConflictView);
   tooltips_.Add(actionBar_.conflictContinueButton(), kTipConflictContinue);
   tooltips_.Add(actionBar_.conflictAbortButton(), kTipConflictAbort);
-  tooltips_.Add(changesPane_.enterSubmoduleButton(), kTipEnterSubmodule);
-  tooltips_.Add(changesPane_.returnToParentButton(), kTipReturnToParent);
+  tooltips_.Add(infoBar_.enterSubmoduleButton(), kTipEnterSubmodule);
+  tooltips_.Add(infoBar_.returnToParentButton(), kTipReturnToParent);
   tooltips_.Add(actionBar_.persistRecordsCheck(), kTipPersistRecords);
   tooltips_.Add(actionBar_.persistDraftsCheck(), kTipPersistDrafts);
   tooltips_.Add(actionBar_.clearPrefsButton(), kTipClearPrefs);
@@ -618,8 +633,8 @@ void MainWindow::UpdateCommandAvailability() {
   // （两次切换叠在一起，先回来的那份就会被后一次的识别抢掉仓库绑定）。
   const BOOL navigationReady =
       (state_.GitUsable() && !submoduleFlow_.Active() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
-  ::EnableWindow(changesPane_.enterSubmoduleButton(), navigationReady);
-  ::EnableWindow(changesPane_.returnToParentButton(), navigationReady);
+  ::EnableWindow(infoBar_.enterSubmoduleButton(), navigationReady);
+  ::EnableWindow(infoBar_.returnToParentButton(), navigationReady);
   // 刷新是内部只读重读，不占用命令窗口、也不写仓库，因此在有操作在跑时依然可用：
   // 外部终端改了仓库、或某个操作的输出看不清时，用户总要能恢复真实状态。
   // 上一次识别失败也保持可用：仓库在外部被修好（或改回原样）后，点刷新就能恢复，
@@ -707,6 +722,9 @@ void MainWindow::RefreshTexts(HWND window) {
 
 void MainWindow::ApplyWorkspaceLists() {
   changesPane_.ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
+  // 刷新之后列表里的行已经换成新的了：正在看的「文件变化」清单也必须跟着对齐。
+  // 选中的提交还在新列表里就继续显示它的清单（不重读），不见了就清空并给出引导语。
+  ReconcileCommitFilesSelection(window_.get());
 }
 
 void MainWindow::ApplyFonts(HWND window) {
@@ -735,12 +753,23 @@ void MainWindow::DoLayout(HWND window) {
   repoBar_.Layout(bands.repoBar, metrics_);
   infoBar_.Layout(bands.infoRow, metrics_);
 
-  changesArea_ = bands.changes;
-  ChangesColumns columns{};
-  ComputeChangesColumns(bands.changes, changesSpec_, &columns);
-  leftSplitter_.SetBounds(columns.splitterLeft);
-  rightSplitter_.SetBounds(columns.splitterRight);
-  changesPane_.Layout(columns, metrics_);
+  // 「变化信息」与「提交历史」各有一条分隔条，两条都按当前选项卡摆放：
+  // 只摆当前选项卡那一条、另一条收成空矩形（它本来就是两条不同的栏位）。
+  // 比例换算与拖动都用同一个内容区（已扣掉标签条），否则鼠标位置与列宽会差一个标签条。
+  changesArea_ = changesPane_.PlaceTabs(bands.changes);
+  if (changesPane_.ActiveTab() == 1) {
+    HistoryColumns history{};
+    ComputeHistoryColumns(changesArea_, changesSpec_, &history);
+    historySplitter_.SetBounds(history.splitter);
+    stagingSplitter_.SetBounds(RECT{0, 0, 0, 0});
+    changesPane_.LayoutHistory(history, metrics_);
+  } else {
+    StagingColumns staging{};
+    ComputeStagingColumns(changesArea_, changesSpec_, &staging);
+    stagingSplitter_.SetBounds(staging.splitter);
+    historySplitter_.SetBounds(RECT{0, 0, 0, 0});
+    changesPane_.LayoutStaging(staging, metrics_);
+  }
 
   commitForm_.Layout(bands.commitForm, metrics_);
   actionBar_.Layout(bands.actions, metrics_);
@@ -2316,15 +2345,18 @@ void MainWindow::NoteLayoutForPreferences(bool geometry, bool columns) {
     }
   }
   if (columns) {
-    const int leftPermille =
-        static_cast<int>(changesSpec_.leftRatio * app::kPersistentColumnPermilleBase + 0.5);
-    const int middlePermille =
-        static_cast<int>(changesSpec_.middleRatio * app::kPersistentColumnPermilleBase + 0.5);
-    if (leftPermille > 0 && middlePermille > 0 &&
-        leftPermille + middlePermille < app::kPersistentColumnPermilleBase) {
+    const int stagingPermille =
+        static_cast<int>(changesSpec_.stagingRatio * app::kPersistentColumnPermilleBase + 0.5);
+    const int historyPermille =
+        static_cast<int>(changesSpec_.historyRatio * app::kPersistentColumnPermilleBase + 0.5);
+    // 两个选项卡各一条分隔条，各自只要落在一个能摆得下的范围里就值得记住；
+    // 不再要求两条之和小于 1000（它们本来就不会同时显示）。
+    if (stagingPermille > 0 && historyPermille > 0 &&
+        stagingPermille < app::kPersistentColumnPermilleBase &&
+        historyPermille < app::kPersistentColumnPermilleBase) {
       prefs_.columns.valid = true;
-      prefs_.columns.leftPermille = leftPermille;
-      prefs_.columns.middlePermille = middlePermille;
+      prefs_.columns.stagingPermille = stagingPermille;
+      prefs_.columns.historyPermille = historyPermille;
       prefsIntents_.columns = true;
       changed = true;
     }
@@ -2678,6 +2710,154 @@ void MainWindow::OnHistoryCommitDoubleClicked(HWND window, int row) {
   }
 }
 
+void MainWindow::ReconcileCommitFilesSelection(HWND window) {
+  // 「当前选中的那一条」是唯一判据。列表刚被刷新、选项卡刚切回来、用户点了另一行，
+  // 三种来源都只问这一个问题，因此不会出现「列表已经换而清单还是上一条的」窗口期。
+  const int row = changesPane_.SelectedHistoryRow();
+  const git::CommitItem* item = row >= 0 ? changesPane_.CommitItemAt(row) : nullptr;
+  if (item == nullptr) {
+    // 没有选中（或行号已经不在当前列表里）：清单退回引导语。
+    // 这不改动仓库，也不会把上一次那一条的清单留在旁边冒充现状。
+    changesPane_.ShowCommitFiles(ChangesPane::CommitFilesView{});
+    return;
+  }
+  if (!changesPane_.CommitFilesLoading() && changesPane_.CommitFilesCommitId() == item->objectId) {
+    return;  // 已经在显示（或正在读）这条提交的清单：重复问一遍只会白跑一次 Git。
+  }
+  RequestCommitChanges(window, row);
+}
+
+void MainWindow::RequestCommitChanges(HWND window, int row) {
+  // 这是只读查询，但它有一个硬前提：仓库身份还成立。
+  // 不成立时不动清单（宁可停在引导语上），下次刷新后自动重对。
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (!state_.GitUsable() || !state_.RepoUsable() || repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot) ||
+      state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    return;
+  }
+  if (changesPane_.ListRowCount(changesPane_.historyList()) !=
+      static_cast<int>(state_.WorkspaceModel().recentCommits.size())) {
+    return;  // 显示的行数与已读取的历史对不上：宁可不读，也不把清单挂到认不准的那一条上。
+  }
+  const git::CommitItem* item = changesPane_.CommitItemAt(row);
+  if (item == nullptr) {
+    return;
+  }
+
+  platform::CommitChangesRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = repositoryRoot;
+  request.objectId = item->objectId;
+  request.timeoutMilliseconds = kCommitChangesTimeoutMs;
+  request.readSerial = ++commitFilesSerial_;
+  request.bindingGeneration = tasks_.Identity().generation;
+  // 请求发出时就把这条提交完整地记下来：回来时不管界面已经变成什么样，
+  // 落地的都是「当初问的那一条」的清单（对不上就丢掉，绝不用现在的选中项张冠李戴）。
+  pendingFilesCommit_ = *item;
+
+  ChangesPane::CommitFilesView loading;
+  loading.commit = &pendingFilesCommit_;
+  loading.loading = true;
+  changesPane_.ShowCommitFiles(loading);
+
+  commitChangesWorker_.Request(window, kCommitChangesCompleted, std::move(request),
+                               [](const platform::CommitChangesRequest& pending) {
+                                 return platform::RunCommitChangesLoad(pending);
+                               });
+}
+
+void MainWindow::OnCommitChangesCompleted(HWND window, uint64_t completionSerial) {
+  platform::CommitChangesOutcome outcome;
+  if (!commitChangesWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 期间又提交了更晩的读取（用户换了另一条提交）：这份结果不再有意义。
+  }
+  // 序号只保证「这是最后一次提交的请求」；仓库身份与那条提交还要各核一次，
+  // 否则换仓库/刷新之后回来的一份旧清单会被当成本仓的现状。
+  if (outcome.bindingGeneration != tasks_.Identity().generation ||
+      outcome.objectId != pendingFilesCommit_.objectId ||
+      changesPane_.CommitFilesCommitId() != outcome.objectId) {
+    return;
+  }
+  ChangesPane::CommitFilesView view;
+  view.commit = &pendingFilesCommit_;
+  view.note = outcome.message;
+  if (outcome.error != git::RepoError::none) {
+    view.error = outcome.message;  // 失败时列表不留半份清单，把原因讲到空状态说明里。
+  } else {
+    view.changes = std::move(outcome.changes);
+  }
+  changesPane_.ShowCommitFiles(view);
+  // 这一步只读仓库：状态栏只说「读到了几条 / 为什么没读到」，不改操作结论。
+  state_.SetStatusNote(outcome.message);
+  RefreshTexts(window);
+}
+
+void MainWindow::OnCommitFileDoubleClicked(HWND window, int row) {
+  const auto refuse = [&](std::wstring_view message) {
+    state_.SetStatusNote(std::wstring(message));
+    RefreshTexts(window);
+  };
+
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    refuse(L"Git 或仓库当前不可用，无法查看差异。请先确认路径并点“刷新”。");
+    return;
+  }
+  if (tasks_.OperationInFlight()) {
+    // 命令窗口操作是单槽的：并发发起两次会让“哪个窗口对应哪一行”变得含糊。
+    refuse(L"已有一个命令窗口操作在进行，请等它结束后再双击查看。");
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
+    refuse(L"仓库工作区已改变，请先点“刷新”再查看差异。");
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    refuse(L"这一轮仓库状态没有读成功，提交历史不可用。请点“刷新”后重试。");
+    return;
+  }
+
+  const git::CommitItem* commit = nullptr;
+  const git::ChangeItem* change = nullptr;
+  if (!changesPane_.CommitFileAt(row, &commit, &change)) {
+    refuse(L"这一行已不在当前「文件变化」清单里（清单刚被刷新），请重新选择提交后再双击。");
+    return;
+  }
+  // 两头核对：显示的行数与已落地的清单条数、以及清单所属的那条提交，都必须是同一份。
+  // 两者不一致说明界面正在换内容，这一次宁可不看。
+  if (changesPane_.ListRowCount(changesPane_.filesList()) != changesPane_.CommitFilesCount() ||
+      commit->objectId != changesPane_.CommitFilesCommitId()) {
+    refuse(L"「文件变化」的显示行数与已读取的内容对不上，为避免看错文件，本次没有执行任何命令。点“刷新”后重试。");
+    return;
+  }
+
+  const git::CommitFileDiffPlan plan = git::BuildCommitFileDiffPlan(*commit, *change);
+  if (!plan.allowed) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.refusalReason + L"\n\n条目：" +
+        change->PathLabel();
+    ::MessageBoxW(window, message.c_str(), L"无法查看该文件", MB_OK | MB_ICONINFORMATION);
+    refuse(L"未查看 " + change->PathLabel() + L"：" + plan.refusalReason);
+    return;
+  }
+
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
+
+  CommandLaunchOptions options;
+  // 与双击提交同一条退出口径：git show 读到对象就是 0，报错误非 0。
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 git show（" + repositoryRoot + L"）：查看提交 " +
+                        git::ShortObjectId(commit->objectId) + L" 里的 " + change->PathLabel() +
+                        L"，等待 Git 退出码…";
+  if (!LaunchCommandWindowOperation(window, operation, options)) {
+    refuse(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+  }
+}
+
 void MainWindow::OnCommandWindowCompleted(HWND window, uint64_t operationId) {
   if (activeOperation_.serial == 0 || activeOperation_.runnerId != operationId) {
     return;  // 不是本窗口当前拥有的操作（保留的旧窗口、或已按通知丢失结案的迟到通知）。
@@ -2946,9 +3126,21 @@ bool MainWindow::ConfirmCloseWithActiveOperations(HWND window) {
   return answer == IDYES;
 }
 
+void MainWindow::OnChangesTabChanged(HWND window) {
+  // 两个选项卡的栏位与分隔条都不是同一套：重排一次布局即可（控件显隐与分隔条摆放都在里面）。
+  // 另外把「文件变化」的清单与新选中的那一条对齐：切回提交历史时看到的必须是当前选中提交的清单，
+  // 而不是上次离开时那条的。
+  DoLayout(window);
+  ReconcileCommitFilesSelection(window);
+}
+
 void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
-  const int index = (splitterId == kSplitterLeftId) ? 0 : 1;
-  RatioFromMouseX(changesArea_, changesSpec_, index, parentX, &changesSpec_.leftRatio, &changesSpec_.middleRatio);
+  // 两条分隔条分属两个选项卡，各自只改自己的那一个比例——互不影响。
+  if (splitterId == kSplitterHistoryId) {
+    HistoryRatioFromMouseX(changesArea_, changesSpec_, parentX, &changesSpec_.historyRatio);
+  } else {
+    StagingRatioFromMouseX(changesArea_, changesSpec_, parentX, &changesSpec_.stagingRatio);
+  }
   DoLayout(window);
   NoteLayoutForPreferences(/*geometry=*/false, /*columns=*/true);
 }
@@ -3415,6 +3607,7 @@ void MainWindow::BeginStopAllBackgroundWorkers() {
   repoWorker_.BeginStop();
   workspaceWorker_.BeginStop();
   authorWorker_.BeginStop();
+  commitChangesWorker_.BeginStop();
   commitFlow_.BeginStop();
   undoFlow_.BeginStop();
   fetchFlow_.BeginStop();
@@ -3430,6 +3623,7 @@ void MainWindow::JoinAllBackgroundWorkers() {
   repoWorker_.Join();
   workspaceWorker_.Join();
   authorWorker_.Join();
+  commitChangesWorker_.Join();
   commitFlow_.JoinWorkers();
   undoFlow_.JoinWorkers();
   fetchFlow_.JoinWorkers();
@@ -3497,6 +3691,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         ShowPersistentConsentPrompt(window);
       }
       return 0;
+    case kCommitChangesCompleted:
+      OnCommitChangesCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case WM_NOTIFY: {
       // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认两块更改列表、提交历史列表
       // 与合作者列表，其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
@@ -3514,6 +3711,29 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         // 双击某条提交：命令窗口里 git show 完整详情。同样只认命中行，点在空白处不动作。
         const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
         OnHistoryCommitDoubleClicked(window, activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      if (header != nullptr && header->code == NM_DBLCLK && header->idFrom == kIdFilesList) {
+        // 双击「文件变化」的某一行：命令窗口里 git show 这条提交在--这一个文件上的差异。
+        const auto* activated = reinterpret_cast<const NMLISTVIEW*>(lParam);
+        OnCommitFileDoubleClicked(window, activated != nullptr ? activated->iItem : -1);
+        return 0;
+      }
+      if (header != nullptr && header->code == LVN_ITEMCHANGED && header->idFrom == kIdHistoryList) {
+        // 选中另一条提交 → 后台读它的文件变化。
+        // 列表重建（刷新）时的选中项恢复也会走到这里：那一次不重新读，
+        // 因为刷新之后 ApplyWorkspaceLists 会自己按新列表重对一次（避免用重建中的半截内容去请求）。
+        const auto* changed = reinterpret_cast<const NMLISTVIEW*>(lParam);
+        const bool becameSelected =
+            changed != nullptr && (changed->uNewState & LVIS_SELECTED) != 0 &&
+            (changed->uOldState & LVIS_SELECTED) == 0;
+        if (becameSelected && !changesPane_.UpdatingLists()) {
+          ReconcileCommitFilesSelection(window);
+        }
+        return 0;
+      }
+      if (header != nullptr && header->code == TCN_SELCHANGE && header->idFrom == kIdChangesTab) {
+        OnChangesTabChanged(window);
         return 0;
       }
       if (header != nullptr && header->code == NM_DBLCLK && header->idFrom == kIdCoauthorList) {

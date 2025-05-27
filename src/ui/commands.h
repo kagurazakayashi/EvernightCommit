@@ -34,6 +34,12 @@ enum ControlId : int {
   kIdHistoryGroup = 150,
   kIdHistoryList = 151,
   kIdHistoryHint = 152,
+  // 选项卡容器与「提交历史」页右边那份「文件变化」清单：
+  // 变化信息页与提交历史页共用同一个选项卡控件，页内容仍是这里的普通列表控件。
+  kIdChangesTab = 153,
+  kIdFilesGroup = 154,
+  kIdFilesList = 155,
+  kIdFilesHint = 156,
 
   kIdStageAddButton = 160,
   kIdStageRemoveButton = 161,
@@ -66,6 +72,7 @@ enum ControlId : int {
   kIdBottomStatusLabel = 194,
   kIdTimeResetButton = 195,
   // 子模块导航的两个按钮：只对状态列写着「子模块」的那一条起作用，返回的可用性由导航栈决定。
+  // 两个按钮摆在「上游：」那一行的右端（仓库信息栏），与它们要换绑定的对象在同一行。
   kIdEnterSubmoduleButton = 196,
   kIdReturnToParentButton = 197,
   // 冲突与暂停流程的三个入口：查看（只读展示现场）、继续（--continue，由 Git 建立提交）、
@@ -154,6 +161,11 @@ inline constexpr UINT kConflictRecheckCompleted = WM_APP + 21;
 // 读回来才补完那句结论并请求重读——与 pull 整合失败那一步同一套做法。
 inline constexpr UINT kConflictAftermathCompleted = WM_APP + 22;
 
+// 「选中某条提交 → 读取文件变化」后台完成通知；wParam 为请求序号（worker 自己维护的提交序号）。
+// 切换到「提交历史」选项卡（TCN_SELCHANGE）不需要新消息：它在 WM_NOTIFY 里就地接住重排一次布局，
+// 两个选项卡的栏位不同，分隔条也要跟着换成当前选项卡那一条。
+inline constexpr UINT kCommitChangesCompleted = WM_APP + 26;
+
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
 inline constexpr UINT_PTR kRefreshTimer = 0x4714;
@@ -186,6 +198,9 @@ inline constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
 inline constexpr unsigned long kAuthorConfigTimeoutMs = 8000;
 // 撤回预检同样是本地只读查询，但里面包含最慢的 git status，沿用工作区读取的 20 秒放宽值。
 inline constexpr unsigned long kUndoProbeTimeoutMs = 20000;
+// 读一条提交的文件变化（git show --name-status）同样是本地只读查询；
+// 它比 git log 重（要按对象读树并做重命名探测），沿用工作区读取的 20 秒放宽值。
+inline constexpr unsigned long kCommitChangesTimeoutMs = 20000;
 // 确认框点头之后、启动命令窗口之前的 HEAD/分支复核只有两条毫秒级查询：现在走后台任务，
 // 超时即按「复核不过」取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目动引用），
 // 因此用短超时；GUI 线程不等它，冻结问题已不存在。
@@ -241,5 +256,6 @@ static_assert(kConflictAftermathCompleted != platform::CommandWindowRunner::kCom
 static_assert(kPersistentConsentNotice != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kRestoreProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kRestoreRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kCommitChangesCompleted != platform::CommandWindowRunner::kCompletionMessage);
 
 }  // namespace gc::ui

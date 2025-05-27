@@ -84,6 +84,7 @@ constexpr const char* kPureFiles[] = {
     "app_state_tests.cpp",
     "author_config_tests.cpp",
     "command_window_plan_tests.cpp",
+    "commit_changes_tests.cpp",
     "commit_date_tests.cpp",
     "commit_form_session_tests.cpp",
     "commit_history_tests.cpp",
@@ -127,6 +128,7 @@ constexpr const char* kPureFiles[] = {
 
 // 真实 Win32 子进程/文件系统，但逐文件核实过不启动 git.exe。
 constexpr const char* kWindowsFiles[] = {
+    "changes_pane_tests.cpp",  // 真实窗口上的变更区面板：空状态说明的显隐与清单行是否真的落地。不起子进程、不碰文件系统。
     "command_window_directory_tests.cpp",
     "operation_history_store_file_tests.cpp",  // 真实历史文件读写/锁与剪贴板往返，全部在测试自己的临时根；不启动 Git、不碰用户 %APPDATA%。
     "persistent_store_file_tests.cpp",  // 真实文件读写/锁，全部在测试自己的临时根里；不启动 Git、不碰用户 %APPDATA%。
@@ -139,6 +141,7 @@ constexpr const char* kWindowsFiles[] = {
 // 引用 GitFixture/RemoteRig 的文件；未列入下方只读名单的用例默认含提交/推送。
 constexpr const char* kFixtureFiles[] = {
     "author_config_fixture_tests.cpp",
+    "commit_changes_fixture_tests.cpp",
     "command_window_fixture_tests.cpp",
     "conflict_fixture_tests.cpp",
     "commit_history_fixture_tests.cpp",
@@ -253,6 +256,11 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // （写文件/建目录）：不建提交、不推送、不动索引（2026-10-08 子模块导航任务逐行核实）。
     "submodule_navigation_queries_fixture_are_accepted_by_real_git",
     "submodule_entry_probe_fixture_refuses_paths_that_are_not_gitlinks",
+    // commit_changes_fixture_tests.cpp —— 逐行核实：init / WriteFile / StageAll(add) /
+    // SeedCommitObject（write-tree + hash-object，夹具注释写明不执行 git commit）/ git show
+    // <对象> --name-status 与 git show <对象> -- <pathspec>（两条都是只读查询）。
+    // 没有任何 commit、push、联网或引用移动，故 AI 侧可自行运行核验。
+    "commit_changes_seeded_object_reports_real_changes_without_commit",
     // conflict_fixture_tests.cpp —— 只有 init、只读查询与在临时目录里造物（建目录/写痕迹档案/
     // 写工作区文件但不 add）：不建提交、不推送、不动索引、不改任何配置（逐行核实于 2026-10-08
     // 「冲突处理入口」任务；文件里其余用例都要提交图，归 git-mutating 由维护者运行）。

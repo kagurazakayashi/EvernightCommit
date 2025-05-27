@@ -13,9 +13,14 @@ constexpr RECT MakeRect(int x, int y, int w, int h) noexcept {
   return RECT{x, y, x + (w > 0 ? w : 0), y + (h > 0 ? h : 0)};
 }
 
-int AvailableListWidth(const RECT& area, const ChangesSpec& spec) noexcept {
-  // 未暂存 | 箭头列 | 分隔条 | 已暂存 | 分隔条 | 最近提交 —— 六段之间有五个间隔。
-  return Width(area) - 2 * spec.splitterWidth - spec.arrowColumnWidth - 5 * spec.gap;
+// 「变化信息」选项卡：未暂存 | 箭头列 | 分隔条 | 已暂存 —— 四段之间有 3 个间隔。
+int StagingAvailableWidth(const RECT& area, const ChangesSpec& spec) noexcept {
+  return Width(area) - spec.splitterWidth - spec.arrowColumnWidth - 3 * spec.gap;
+}
+
+// 「提交历史」选项卡：最近提交 | 分隔条 | 文件变化 —— 三段之间有 2 个间隔。
+int HistoryAvailableWidth(const RECT& area, const ChangesSpec& spec) noexcept {
+  return Width(area) - spec.splitterWidth - 2 * spec.gap;
 }
 
 double Clamp(double value, double low, double high) noexcept {
@@ -23,6 +28,14 @@ double Clamp(double value, double low, double high) noexcept {
     return low;
   }
   return std::clamp(value, low, high);
+}
+
+// 比例拖动换算的公共部分：空间不足时 high < low，Clamp 一律回到最小比例。
+void ApplyRatio(int mouseX, int areaLeft, int offset, int free, int minList, double* ratio) noexcept {
+  const double minRatio = static_cast<double>(minList) / free;
+  const int maxSize = free - minList;
+  *ratio = Clamp(static_cast<double>(mouseX - areaLeft - offset) / free, minRatio,
+                 static_cast<double>(maxSize) / free);
 }
 
 }  // namespace
@@ -53,28 +66,24 @@ bool ComputeBands(const RECT& client, const BandSpec& spec, Bands* out) {
   return stack >= spec.minChangesHeight + spec.minFormHeight;
 }
 
-void ComputeChangesColumns(const RECT& area, const ChangesSpec& spec, ChangesColumns* out) {
+void ComputeStagingColumns(const RECT& area, const ChangesSpec& spec, StagingColumns* out) {
   const int gap = std::max(0, spec.gap);
   const int splitter = std::max(1, spec.splitterWidth);
   const int minList = std::max(1, spec.minListWidth);
   const int arrowWidth = std::max(spec.minArrowColumnWidth, spec.arrowColumnWidth);
-  const int free = AvailableListWidth(area, spec);
+  const int free = StagingAvailableWidth(area, spec);
   const int height = std::max(0, Height(area));
 
   int left = 0;
-  int middle = 0;
   int right = 0;
-  if (free < 3 * minList) {
+  if (free < 2 * minList) {
+    // 空间不够分：先把未暂存与已暂存顶到最小宽度，剩余给已暂存侧（与从前三栏时的退化行为一致）。
     left = minList;
-    middle = minList;
-    right = std::max(minList, free - 2 * minList);
+    right = std::max(minList, free - minList);
   } else {
-    const int span = free;
-    left = static_cast<int>(std::lround(Clamp(spec.leftRatio, 0.0, 1.0) * span));
-    left = std::clamp(left, minList, span - 2 * minList);
-    middle = static_cast<int>(std::lround(Clamp(spec.middleRatio, 0.0, 1.0) * span));
-    middle = std::clamp(middle, minList, span - left - minList);
-    right = span - left - middle;
+    left = static_cast<int>(std::lround(Clamp(spec.stagingRatio, 0.0, 1.0) * free));
+    left = std::clamp(left, minList, free - minList);
+    right = free - left;
   }
 
   int x = area.left;
@@ -82,43 +91,64 @@ void ComputeChangesColumns(const RECT& area, const ChangesSpec& spec, ChangesCol
   x += left + gap;
   out->arrows = MakeRect(x, area.top, arrowWidth, height);
   x += arrowWidth + gap;
-  out->splitterLeft = MakeRect(x, area.top, splitter, height);
+  out->splitter = MakeRect(x, area.top, splitter, height);
   x += splitter + gap;
-  out->staged = MakeRect(x, area.top, middle, height);
-  x += middle + gap;
-  out->splitterRight = MakeRect(x, area.top, splitter, height);
-  x += splitter + gap;
-  out->history = MakeRect(x, area.top, right, height);
+  out->staged = MakeRect(x, area.top, right, height);
 }
 
-void RatioFromMouseX(const RECT& area, const ChangesSpec& spec, int splitterIndex, int mouseX, double* ratioLeft,
-                     double* ratioMiddle) {
+void ComputeHistoryColumns(const RECT& area, const ChangesSpec& spec, HistoryColumns* out) {
   const int gap = std::max(0, spec.gap);
   const int splitter = std::max(1, spec.splitterWidth);
-  const int arrowWidth = std::max(spec.minArrowColumnWidth, spec.arrowColumnWidth);
-  const int free = std::max(1, AvailableListWidth(area, spec));
-  const double minRatio = static_cast<double>(std::max(1, spec.minListWidth)) / free;
+  const int minList = std::max(1, spec.minListWidth);
+  const int free = HistoryAvailableWidth(area, spec);
+  const int height = std::max(0, Height(area));
 
-  if (splitterIndex == 0) {
-    const int left = mouseX - area.left - arrowWidth - 2 * gap;
-    const int maxLeft = free - 2 * std::max(1, spec.minListWidth);
-    *ratioLeft = Clamp(static_cast<double>(left) / free, minRatio, static_cast<double>(maxLeft) / free);
-    return;
+  int commits = 0;
+  int files = 0;
+  if (free < 2 * minList) {
+    commits = minList;
+    files = std::max(minList, free - minList);
+  } else {
+    commits = static_cast<int>(std::lround(Clamp(spec.historyRatio, 0.0, 1.0) * free));
+    commits = std::clamp(commits, minList, free - minList);
+    files = free - commits;
   }
 
-  const int left =
-      std::clamp(static_cast<int>(std::lround((*ratioLeft) * free)), 0, free - 2 * std::max(1, spec.minListWidth));
-  const int middle = mouseX - area.left - left - arrowWidth - splitter - 4 * gap;
-  const int maxMiddle = free - left - std::max(1, spec.minListWidth);
-  *ratioMiddle = Clamp(static_cast<double>(middle) / free, minRatio, static_cast<double>(maxMiddle) / free);
+  int x = area.left;
+  out->commits = MakeRect(x, area.top, commits, height);
+  x += commits + gap;
+  out->splitter = MakeRect(x, area.top, splitter, height);
+  x += splitter + gap;
+  out->files = MakeRect(x, area.top, files, height);
+}
+
+void StagingRatioFromMouseX(const RECT& area, const ChangesSpec& spec, int mouseX, double* ratio) {
+  const int gap = std::max(0, spec.gap);
+  const int arrowWidth = std::max(spec.minArrowColumnWidth, spec.arrowColumnWidth);
+  const int free = std::max(1, StagingAvailableWidth(area, spec));
+  const int minList = std::max(1, spec.minListWidth);
+  // 分隔条左边缘 = area.left + 未暂存宽 + 间隔 + 箭头列 + 间隔。
+  ApplyRatio(mouseX, area.left, arrowWidth + 2 * gap, free, minList, ratio);
+}
+
+void HistoryRatioFromMouseX(const RECT& area, const ChangesSpec& spec, int mouseX, double* ratio) {
+  const int gap = std::max(0, spec.gap);
+  const int free = std::max(1, HistoryAvailableWidth(area, spec));
+  const int minList = std::max(1, spec.minListWidth);
+  // 分隔条左边缘 = area.left + 最近提交宽 + 间隔。
+  ApplyRatio(mouseX, area.left, gap, free, minList, ratio);
 }
 
 MinimumClientSize MinimumClientFor(const BandSpec& bands, const ChangesSpec& changes) {
   MinimumClientSize size{};
-  const int columnsWidth = 3 * changes.minListWidth +
-                           std::max(changes.minArrowColumnWidth, changes.arrowColumnWidth) +
-                           2 * changes.splitterWidth + 5 * changes.gap;
-  size.width = std::max(columnsWidth, bands.minWidth);
+  const int splitter = std::max(1, changes.splitterWidth);
+  const int arrow = std::max(changes.minArrowColumnWidth, changes.arrowColumnWidth);
+  const int minList = std::max(1, changes.minListWidth);
+  const int gap = std::max(0, changes.gap);
+  // 两个选项卡各要两个列表；变化信息选项卡多一条箭头列。取较宽的那个作为下限。
+  const int stagingWidth = 2 * minList + arrow + splitter + 3 * gap;
+  const int historyWidth = 2 * minList + splitter + 2 * gap;
+  size.width = std::max(std::max(stagingWidth, historyWidth), bands.minWidth);
   size.height = bands.repoBarHeight + bands.infoRowHeight + bands.actionRowHeight + bands.minChangesHeight +
                 bands.minFormHeight + 4 * bands.gap;
   return size;
