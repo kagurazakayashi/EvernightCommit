@@ -94,6 +94,7 @@ add_library(gc_core STATIC
   src/git/command_window.cpp
   src/git/commit_changes.cpp
   src/git/commit_date.cpp
+  src/git/commit_detail.cpp
   src/git/commit_history.cpp
   src/git/commit_identity.cpp
   src/git/commit_message.cpp
@@ -124,6 +125,7 @@ add_library(gc_platform STATIC
   src/platform/windows/author_config.cpp
   src/platform/windows/clipboard.cpp
   src/platform/windows/commit_changes.cpp
+  src/platform/windows/commit_detail.cpp
   src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp

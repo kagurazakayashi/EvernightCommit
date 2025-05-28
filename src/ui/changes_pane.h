@@ -34,6 +34,8 @@ public:
 
   // 「变化信息」页中间那一栏两个按钮竖排所需的高度。
   [[nodiscard]] static int ButtonStackHeight(const UiMetrics& metrics) noexcept;
+  // 「提交历史」页底部那条「提交详情」带所需的高度（含分组框标题那一行）。
+  [[nodiscard]] static int DetailHeight(const UiMetrics& metrics) noexcept;
   // 内容区（含标签条）不可压缩时所需的高度。
   [[nodiscard]] static int MinimumHeight(const UiMetrics& metrics) noexcept;
 
@@ -55,7 +57,23 @@ public:
   // 行号与条目的对应关系只在最后一次落地的内容上成立，因此双击必须同时经这里取回提交与文件。
   void ShowCommitFiles(const CommitFilesView& view);
 
-  // 「文件变化」页现在展示的是哪条提交的清单（完整对象 ID）；没有时为空。
+  // 「提交历史」页底部那条「提交详情」带：当前选中提交的完整信息（哈希、标题、作者与邮箱、
+  // 两个时间、描述正文），排版好的那份文本由 git::FormatCommitDetailText 产出，面板只负责落地。
+  struct CommitDetailView {
+    // 这份详情属于哪条提交。nullptr = 没有选中提交（编辑框给引导语）。
+    const git::CommitItem* commit = nullptr;
+    bool loading = false;    // 后台读取进行中（text 与 error 都忽略）
+    std::wstring text;       // 成功时那份可复制文本
+    std::wstring error;      // 非空 = 这一条没能读出来，编辑框显示原因
+  };
+  void ShowCommitDetail(const CommitDetailView& view);
+  // 「复制」按钮要交出去的那份文本：只有真读到一条提交的详情时才非空。
+  // 引导语、进行中与失败说明都不算可复制内容，不能被粘进别处当成提交信息。
+  [[nodiscard]] const std::wstring& CommitDetailText() const noexcept { return detailText_; }
+  // 面板现在显示的是哪条提交的详情（完整对象 ID）；没有时为空。与文件变化那份核对成对使用。
+  [[nodiscard]] const std::wstring& CommitDetailCommitId() const noexcept { return detailCommitId_; }
+
+  // 「提交历史」页现在展示的是哪条提交的清单（完整对象 ID）；没有时为空。
   [[nodiscard]] const std::wstring& CommitFilesCommitId() const noexcept { return filesCommitId_; }
   [[nodiscard]] bool CommitFilesLoading() const noexcept { return filesLoading_; }
   // 已落地的清单条数：与 ListRowCount(filesList()) 成对核对，两者不一致就不发任何命令。
@@ -76,6 +94,9 @@ public:
   [[nodiscard]] HWND historyList() const noexcept { return historyList_; }
   // 「文件变化」列表句柄：选中一条提交后由主窗口在后台读取它的文件变化。
   [[nodiscard]] HWND filesList() const noexcept { return filesList_; }
+  // 详情带那两个控件的句柄：主窗口只取句柄挂说明性工具提示，不直接改内容。
+  [[nodiscard]] HWND commitDetailEdit() const noexcept { return detailEdit_; }
+  [[nodiscard]] HWND commitDetailCopyButton() const noexcept { return detailCopyButton_; }
 
   // 按列表句柄与行号取回"当前显示的那一条"条目，并给出它属于哪一侧。
   // 行号与条目的对应关系只在本面板最后一次 ShowWorkspace 落地的内容上成立，
@@ -142,6 +163,9 @@ private:
   HWND filesGroup_ = nullptr;
   HWND filesList_ = nullptr;
   HWND filesHint_ = nullptr;
+  HWND detailGroup_ = nullptr;
+  HWND detailEdit_ = nullptr;
+  HWND detailCopyButton_ = nullptr;
 
   std::vector<ListColumn> changeColumns_{{L"状态", 20}, {L"相对路径", 80}};
   std::vector<ListColumn> commitColumns_{{L"提交", 16}, {L"标题", 44}, {L"作者", 22}, {L"时间", 18}};
@@ -155,6 +179,10 @@ private:
   std::vector<git::ChangeItem> shownFiles_;
   std::wstring filesCommitId_;  // 空 = 还没有选中的提交（或清空过）
   std::wstring filesHintText_;  // 文件变化列表的空状态说明
+  // 详情带当前那份可复制文本与它属于的提交（完整对象 ID）。文本为空表示「现在没有可复制的详情」
+  // （引导语、正在读取、读取失败都算这一类，复制按钮随之置灰）。
+  std::wstring detailText_;
+  std::wstring detailCommitId_;
   bool filesLoading_ = false;
   bool updatingLists_ = false;  // ShowWorkspace / ShowCommitFiles 运作期间为真
 };

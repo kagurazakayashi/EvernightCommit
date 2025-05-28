@@ -85,6 +85,14 @@ HWND CreateMultilineEdit(HWND parent, std::wstring_view text, int id) {
               WS_EX_CLIENTEDGE, id);
 }
 
+HWND CreateReadOnlyMultilineEdit(HWND parent, std::wstring_view text, int id) {
+  const HWND edit = CreateMultilineEdit(parent, text, id);
+  // EM_SETREADONLY 而不是加 ES_READONLY 样式：只读的同时保住选择、全选与 Ctrl+C，
+  // 也让控件照常收到 WM_SETFONT（样式里写 ES_READONLY 时部分主题下绘制路径不同）。
+  ::SendMessageW(edit, EM_SETREADONLY, TRUE, 0);
+  return edit;
+}
+
 HWND CreatePushButton(HWND parent, std::wstring_view text, int id) {
   return Make(parent, L"BUTTON", text, kChildVisible | WS_TABSTOP | BS_PUSHBUTTON, 0, id);
 }

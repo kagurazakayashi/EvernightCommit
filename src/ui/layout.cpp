@@ -101,7 +101,13 @@ void ComputeHistoryColumns(const RECT& area, const ChangesSpec& spec, HistoryCol
   const int splitter = std::max(1, spec.splitterWidth);
   const int minList = std::max(1, spec.minListWidth);
   const int free = HistoryAvailableWidth(area, spec);
-  const int height = std::max(0, Height(area));
+  const int areaHeight = std::max(0, Height(area));
+  // 详情带先从整页高度里扣掉（连同它与列表之间的那一个间隔），两份列表分的是剩下那一截。
+  // 上限取整页的一半：这是防御性的一条，正常窗口碰不到——整页下限已经按
+  // 「列表最低高度 + 详情带 + 间隔」算过了。真被压到那一档时宁可让详情带变矮，
+  // 也不把两份列表压成 0 高（列表成了 0 高就是两块看不见的空框）。
+  const int detail = std::min(std::clamp(spec.detailHeight, 0, areaHeight), areaHeight / 2);
+  const int listHeight = std::max(0, areaHeight - detail - (detail > 0 ? gap : 0));
 
   int commits = 0;
   int files = 0;
@@ -115,11 +121,13 @@ void ComputeHistoryColumns(const RECT& area, const ChangesSpec& spec, HistoryCol
   }
 
   int x = area.left;
-  out->commits = MakeRect(x, area.top, commits, height);
+  out->commits = MakeRect(x, area.top, commits, listHeight);
   x += commits + gap;
-  out->splitter = MakeRect(x, area.top, splitter, height);
+  out->splitter = MakeRect(x, area.top, splitter, listHeight);
   x += splitter + gap;
-  out->files = MakeRect(x, area.top, files, height);
+  out->files = MakeRect(x, area.top, files, listHeight);
+  // 详情带横跨整页：两份列表让出的只有高度，宽度分配与拖动换算都不受影响。
+  out->detail = MakeRect(area.left, area.top + listHeight + (detail > 0 ? gap : 0), Width(area), detail);
 }
 
 void StagingRatioFromMouseX(const RECT& area, const ChangesSpec& spec, int mouseX, double* ratio) {

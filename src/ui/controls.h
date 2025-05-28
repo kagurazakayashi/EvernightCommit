@@ -22,6 +22,9 @@ HWND CreateGroupBox(HWND parent, std::wstring_view text, int id);
 void SendToBack(HWND target);
 HWND CreateSingleLineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreateMultilineEdit(HWND parent, std::wstring_view text, int id);
+// 只读的多行编辑框：内容不能被改动，但可以选中、可以 Ctrl+C 复制。
+// 用 EM_SETREADONLY 而不是 ES_READONLY 样式：前者保留 WS_TABSTOP 与选择行为，控件仍是那个能全选文本的编辑框。
+HWND CreateReadOnlyMultilineEdit(HWND parent, std::wstring_view text, int id);
 HWND CreatePushButton(HWND parent, std::wstring_view text, int id);
 HWND CreateCheckBox(HWND parent, std::wstring_view text, int id, bool checked);
 // 可编辑组合框：既能在下拉列表中挑选候选项，也能直接键入文本。

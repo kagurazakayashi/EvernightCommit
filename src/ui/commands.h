@@ -90,6 +90,11 @@ enum ControlId : int {
   // 与「保存记录」各自独立：历史是只追加、按条保留、含引用级恢复线索的事件流。
   kIdHistoryCheck = 204,
   kIdHistoryBrowseButton = 205,
+  // 「提交历史」页底部那条「提交详情」带：只读编辑框（可选中、可 Ctrl+C）+ 一个复制按钮。
+  // 内容来自选中那一条提交的单独一次只读读取，见 git/commit_detail。
+  kIdCommitDetailGroup = 206,
+  kIdCommitDetailEdit = 207,
+  kIdCommitDetailCopyButton = 208,
 };
 
 inline constexpr UINT kSplitterDragged = WM_APP + 1;
@@ -165,6 +170,10 @@ inline constexpr UINT kConflictAftermathCompleted = WM_APP + 22;
 // 切换到「提交历史」选项卡（TCN_SELCHANGE）不需要新消息：它在 WM_NOTIFY 里就地接住重排一次布局，
 // 两个选项卡的栏位不同，分隔条也要跟着换成当前选项卡那一条。
 inline constexpr UINT kCommitChangesCompleted = WM_APP + 26;
+// 「选中某条提交 → 读取它的完整信息（详情带）」后台完成通知；wParam 为请求序号。
+// 与文件变化那份读取各自一个 worker：详情是毫秒级的一条 log，不该排在可能较慢的
+// name-status 之后，也不该被它的失败带着一起空着。
+inline constexpr UINT kCommitDetailCompleted = WM_APP + 27;
 
 // 刷新请求合并：连点“刷新”、切换仓库与操作结束这几路触发共用一个定时器，
 // 短时间内的多次请求只跑一轮读取，既不让后台队列无限增长，也不会让列表反复闪。
@@ -201,6 +210,9 @@ inline constexpr unsigned long kUndoProbeTimeoutMs = 20000;
 // 读一条提交的文件变化（git show --name-status）同样是本地只读查询；
 // 它比 git log 重（要按对象读树并做重命名探测），沿用工作区读取的 20 秒放宽值。
 inline constexpr unsigned long kCommitChangesTimeoutMs = 20000;
+// 读一条提交的完整信息（git log -n 1 --format=<七字段>）也是本地只读查询，但它只看那一个
+// 对象：不展开树、不做重命名探测，量级与读作者身份相同，沿用那一档 8 秒放宽值。
+inline constexpr unsigned long kCommitDetailTimeoutMs = 8000;
 // 确认框点头之后、启动命令窗口之前的 HEAD/分支复核只有两条毫秒级查询：现在走后台任务，
 // 超时即按「复核不过」取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目动引用），
 // 因此用短超时；GUI 线程不等它，冻结问题已不存在。
@@ -257,5 +269,6 @@ static_assert(kPersistentConsentNotice != platform::CommandWindowRunner::kComple
 static_assert(kRestoreProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kRestoreRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kCommitChangesCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kCommitDetailCompleted != platform::CommandWindowRunner::kCompletionMessage);
 
 }  // namespace gc::ui

@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <string>
 
+#include "git/commit_detail.h"
 #include "git/commit_history.h"
 #include "ui/commands.h"
 #include "ui/controls.h"
@@ -20,6 +21,11 @@ constexpr RECT Box(int left, int top, int width, int height) noexcept {
 }
 
 constexpr std::wstring_view kExplicitBreak = L"\r\n";
+
+// 详情带在「还没有选中提交」时显示的那句引导语。单独放这里：Create() 的首屏与
+// ShowCommitDetail 的空状态都用它，两处说法不会走偏。
+constexpr std::wstring_view kCommitDetailGreeting =
+    L"选中「最近提交」里的某一条，这里显示它的完整信息（哈希、标题、作者与邮箱、作者时间、提交者时间、描述）。";
 
 [[nodiscard]] std::wstring TwoLine(std::wstring_view first, std::wstring_view second) {
   return std::wstring(first) + std::wstring(kExplicitBreak) + std::wstring(second);
@@ -46,12 +52,25 @@ int ChangesPane::ButtonStackHeight(const UiMetrics& metrics) noexcept {
   return 2 * metrics.ControlHeight() + metrics.RowGap();
 }
 
+int ChangesPane::DetailHeight(const UiMetrics& metrics) noexcept {
+  // 分组框标题那一行（复制按钮就摆在这一行的右端，不额外占高）+ 正文行 + 上下内边距。
+  // 正文取七行：这份文本自己占六行（提交哈希、标题、作者、作者时间、提交者时间各一行，
+  // 第六行是「描述：」这一句），多出来的一行是编辑框的边框与内部留白——实测按六行给的话
+  // 露出来的只有五行半，「描述」那一行永远看不见，用户就不知道下面还有正文。
+  // 再往上加就是把两份列表再压矮一截，而完整描述本来还有双击进命令窗口那一条路。
+  return metrics.ControlHeight() + metrics.Scale(2) + 7 * metrics.LabelHeight() +
+         2 * InnerInset(metrics) + metrics.Scale(4);
+}
+
 int ChangesPane::MinimumHeight(const UiMetrics& metrics) noexcept {
   const int listNeed = GroupCaption(metrics) + ListHeaderHeight(metrics) + HintTextHeight(metrics) +
                        HintVerticalPadding(metrics) + InnerInset(metrics);
   // 中间那一栏的两个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
   // 否则第二个按钮会被摆到表单那一带上去。
-  return TabStripHeight(metrics) + std::max(listNeed, ButtonStackHeight(metrics));
+  const int page = std::max(listNeed, ButtonStackHeight(metrics));
+  // 「提交历史」那一页在两份列表下面还压着一条详情带，整页下限按它算：
+  // 「变化信息」那一页只会比这个下限更宽裕，不会因此摆不下。
+  return TabStripHeight(metrics) + page + DetailHeight(metrics) + metrics.ColGap();
 }
 
 void ChangesPane::Create(HWND parent) {
@@ -81,12 +100,21 @@ void ChangesPane::Create(HWND parent) {
   filesHint_ = CreateCenteredLabel(filesList_, L"", kIdFilesHint);
   ShowCommitFiles(CommitFilesView{});  // 首屏引导语：还没有选中提交
 
+  // 「提交历史」页底部那条带：只读多行编辑框（可选中、可 Ctrl+C）+ 标题行右端的复制按钮。
+  // 内容不在这里填：首屏是「还没选中」那一句引导语，由 ShowCommitDetail 落地。
+  detailGroup_ = CreateGroupBox(parent, L"提交详情", kIdCommitDetailGroup);
+  detailEdit_ = CreateReadOnlyMultilineEdit(parent, kCommitDetailGreeting, kIdCommitDetailEdit);
+  detailCopyButton_ = CreatePushButton(parent, L"复制详情", kIdCommitDetailCopyButton);
+  ::EnableWindow(detailCopyButton_, FALSE);
+  ShowCommitDetail(CommitDetailView{});
+
   // 分组框与选项卡都压到兄弟 z 序最底：分组框要在自己的内部填底色（否则列表移动后旧像素没人擦），
   // 而新建的子窗口默认排在最前面，不压下去它就会把随后创建的列表整块糊掉。
   SendToBack(unstagedGroup_);
   SendToBack(stagedGroup_);
   SendToBack(historyGroup_);
   SendToBack(filesGroup_);
+  SendToBack(detailGroup_);
   SendToBack(tabs_);
 }
 
@@ -154,7 +182,8 @@ void ChangesPane::LayoutStaging(const StagingColumns& columns, const UiMetrics& 
   // 它该不该露着只由「这一列有没有条目」决定（RebuildList 落地的那个结论）。
   // 整页一律 SW_SHOW 等于把已经藏起来的说明又摆回到行上面——用户看到的就是叠在清单上的空提示。
   ShowControls(true, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
-  ShowControls(false, {historyGroup_, historyList_, filesGroup_, filesList_});
+  ShowControls(false, {historyGroup_, historyList_, filesGroup_, filesList_, detailGroup_, detailEdit_,
+                       detailCopyButton_});
 
   LayoutList(unstagedGroup_, unstagedList_, unstagedHint_, columns.unstaged, metrics, changeColumns_);
   LayoutList(stagedGroup_, stagedList_, stagedHint_, columns.staged, metrics, changeColumns_);
@@ -177,10 +206,58 @@ void ChangesPane::LayoutStaging(const StagingColumns& columns, const UiMetrics& 
 
 void ChangesPane::LayoutHistory(const HistoryColumns& columns, const UiMetrics& metrics) {
   ShowControls(false, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
-  ShowControls(true, {historyGroup_, historyList_, filesGroup_, filesList_});
+  ShowControls(true, {historyGroup_, historyList_, filesGroup_, filesList_, detailGroup_, detailEdit_,
+                      detailCopyButton_});
 
   LayoutList(historyGroup_, historyList_, historyHint_, columns.commits, metrics, commitColumns_);
   LayoutList(filesGroup_, filesList_, filesHint_, columns.files, metrics, changeColumns_);
+
+  // 详情带横跨整页（两份列表让出来的只有高度）。栏位面积为 0 时（详情带被压掉的那一档窗口）
+  // 三个控件一起收成空矩形：PlaceIfChanged 对零尺寸矩形本来就是空操作，摆出负宽高才是问题。
+  const RECT& band = columns.detail;
+  const int bandWidth = band.right - band.left;
+  const int bandHeight = band.bottom - band.top;
+  if (bandWidth <= 0 || bandHeight <= 0) {
+    const RECT empty{0, 0, 0, 0};
+    Place(detailGroup_, empty);
+    Place(detailEdit_, empty);
+    Place(detailCopyButton_, empty);
+    return;
+  }
+  Place(detailGroup_, band);
+
+  // 复制按钮摆在分组框标题那一行的右端：它不下移正文，详情文本因此多留一行可读高度。
+  const int copyWidth = std::min(bandWidth - 2 * InnerInset(metrics), metrics.ButtonWidth(L"复制详情"));
+  Place(detailCopyButton_,
+        Box(band.right - copyWidth - InnerInset(metrics), band.top + metrics.Scale(1), copyWidth,
+            metrics.ControlHeight()));
+
+  const RECT inner{band.left + InnerInset(metrics), band.top + metrics.ControlHeight() + metrics.Scale(2),
+                   band.right - InnerInset(metrics), band.bottom - InnerInset(metrics)};
+  Place(detailEdit_, inner);
+}
+
+void ChangesPane::ShowCommitDetail(const CommitDetailView& view) {
+  // 四种状态各说各的：没有选中、正在读、读失败、读到了。后两种都不能显示成一份空详情，
+  // 否则用户会把「没读出来」的那块空白当成「这条提交没有描述」。
+  std::wstring text;
+  if (view.commit == nullptr) {
+    text = std::wstring(kCommitDetailGreeting);
+  } else if (view.loading) {
+    text = TwoLine(L"正在读取这条提交的完整信息", L"后台执行 git log -n 1 --format=…，只读，不改动仓库。");
+  } else if (!view.error.empty()) {
+    text = TwoLine(L"这条提交的完整信息没能读出来", view.error);
+  } else {
+    text = view.text;
+  }
+
+  detailCommitId_ = view.commit != nullptr ? view.commit->objectId : std::wstring();
+  // 只有真详情才进可复制文本：引导语与失败说明粘出去会被当成提交信息，那是更糟的误导。
+  detailText_ = (view.commit != nullptr && !view.loading && view.error.empty()) ? view.text : std::wstring();
+
+  // 编辑框只认 CRLF：Git 记下的正文用 LF，失败原因里也可能带换行，一律在落地前统一。
+  SetControlText(detailEdit_, git::NormalizeTextForEdit(text));
+  ::EnableWindow(detailCopyButton_, detailText_.empty() ? FALSE : TRUE);
 }
 
 template <typename Item>
