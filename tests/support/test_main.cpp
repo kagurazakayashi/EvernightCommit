@@ -86,6 +86,7 @@ constexpr const char* kPureFiles[] = {
     "command_window_plan_tests.cpp",
     "commit_changes_tests.cpp",
     "commit_date_tests.cpp",
+    "commit_detail_tests.cpp",
     "commit_form_session_tests.cpp",
     "commit_history_tests.cpp",
     "commit_identity_tests.cpp",
@@ -142,6 +143,7 @@ constexpr const char* kWindowsFiles[] = {
 constexpr const char* kFixtureFiles[] = {
     "author_config_fixture_tests.cpp",
     "commit_changes_fixture_tests.cpp",
+    "commit_detail_fixture_tests.cpp",
     "command_window_fixture_tests.cpp",
     "conflict_fixture_tests.cpp",
     "commit_history_fixture_tests.cpp",
@@ -261,6 +263,14 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // <对象> --name-status 与 git show <对象> -- <pathspec>（两条都是只读查询）。
     // 没有任何 commit、push、联网或引用移动，故 AI 侧可自行运行核验。
     "commit_changes_seeded_object_reports_real_changes_without_commit",
+    // commit_detail_fixture_tests.cpp —— 逐行核实：init / WriteFile / StageAll(add) /
+    // write-tree / commit-tree（plumbing：造一枚提交对象，不移动 HEAD、不动索引与工作区，
+    // 与夹具的 SeedCommitObject 同一形态）/ 生产参数数组交给 git log -n 1 只读查询，
+    // 以及 platform::LoadCommitDetail 用夹具隔离执行器跑同一条查询。
+    // 全程没有 commit、push、引用移动或联网，故 AI 侧可自行运行核验。
+    "commit_detail_arguments_run_on_real_git_and_split_into_seven_fields",
+    "commit_detail_platform_load_reads_the_selected_commit",
+    "commit_detail_distinguishes_no_description_from_unreadable_object",
     // conflict_fixture_tests.cpp —— 只有 init、只读查询与在临时目录里造物（建目录/写痕迹档案/
     // 写工作区文件但不 add）：不建提交、不推送、不动索引、不改任何配置（逐行核实于 2026-10-08
     // 「冲突处理入口」任务；文件里其余用例都要提交图，归 git-mutating 由维护者运行）。

@@ -138,6 +138,50 @@ GC_TEST(history_columns_are_ordered_and_fill_area) {
   GC_CHECK(Height(columns.files) == Height(area));
 }
 
+GC_TEST(history_columns_reserve_full_width_detail_band_below_both_lists) {
+  auto spec = MakeChangesSpec();
+  spec.detailHeight = 90;
+  const RECT area{0, 0, 1082, 400};
+  gc::ui::HistoryColumns columns{};
+  gc::ui::ComputeHistoryColumns(area, spec, &columns);
+
+  // 详情带横跨整页：两份列表让出的只有高度，宽度分配与上例完全一致。
+  GC_CHECK(columns.detail.left == area.left);
+  GC_CHECK(columns.detail.right == area.right);
+  GC_CHECK(Height(columns.detail) == spec.detailHeight);
+  GC_CHECK(columns.detail.bottom == area.bottom);
+  GC_CHECK(columns.commits.bottom + spec.gap == columns.detail.top);
+  GC_CHECK(columns.files.bottom + spec.gap == columns.detail.top);
+  GC_CHECK(Height(columns.commits) == Height(area) - spec.detailHeight - spec.gap);
+
+  // 比例拖动只看宽度，加了详情带之后同一鼠标位置换出的比例不变。
+  double ratio = 0.0;
+  gc::ui::HistoryRatioFromMouseX(area, spec, 400, &ratio);
+  gc::ui::HistoryColumns withoutBand{};
+  auto plain = MakeChangesSpec();
+  gc::ui::ComputeHistoryColumns(area, plain, &withoutBand);
+  double sameRatio = 0.0;
+  gc::ui::HistoryRatioFromMouseX(area, plain, 400, &sameRatio);
+  GC_CHECK_MESSAGE(std::abs(ratio - sameRatio) < 1e-9, "详情带不得影响横向比例换算");
+}
+
+GC_TEST(history_columns_yield_detail_band_when_area_is_too_short) {
+  auto spec = MakeChangesSpec();
+  spec.detailHeight = 500;
+  const RECT area{0, 0, 1082, 120};
+  gc::ui::HistoryColumns columns{};
+  gc::ui::ComputeHistoryColumns(area, spec, &columns);
+
+  // 整页矮到放不下那条带时，带最多只占一半，两份列表仍然留下可读的高度：
+  // 列表被压成 0 高就是两块看不见的空框，比详情带变矮更糟。
+  GC_CHECK(Height(columns.detail) == 60);
+  GC_CHECK(Height(columns.commits) == 120 - 60 - spec.gap);
+  GC_CHECK(Height(columns.commits) > 0);
+  GC_CHECK(columns.commits.bottom + spec.gap == columns.detail.top);
+  GC_CHECK(columns.detail.bottom == area.bottom);
+  GC_CHECK(columns.commits.top >= area.top && columns.detail.bottom <= area.bottom);
+}
+
 GC_TEST(history_columns_respect_dragged_ratio) {
   auto spec = MakeChangesSpec();
   spec.historyRatio = 0.65;

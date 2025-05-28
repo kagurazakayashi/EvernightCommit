@@ -19,6 +19,7 @@
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/commit_changes.h"
+#include "platform/windows/commit_detail.h"
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/path_picker.h"
@@ -180,6 +181,16 @@ private:
   void RequestCommitChanges(HWND window, int row);
   // 读取完成：按请求序号与仓库身份作废旧结果，再把清单或失败原因落地。
   void OnCommitChangesCompleted(HWND window, uint64_t completionSerial);
+
+  // 选中项变化的另一路读取：底部「提交详情」带要的那一条的完整信息。
+  // 与文件变化共用「当前选中的那一条是唯一判据」，但各自一个 worker、各自一份序号：
+  // 详情只是一条毫秒级的 log，不该排在可能较慢的 name-status 后面，也不跟着它一起空着。
+  void ReconcileSelectedCommit(HWND window);
+  void ReconcileCommitDetailSelection(HWND window);
+  void RequestCommitDetail(HWND window, int row);
+  void OnCommitDetailCompleted(HWND window, uint64_t completionSerial);
+  // 「复制详情」：把面板上那份文本交给剪贴板。复制成功与否都不据此改动任何东西。
+  void CopyCommitDetailToClipboard(HWND window);
   // 双击「文件变化」的某一行：用列表里保存的完整对象 ID 构造 `git show <oid> -- <path>`，
   // 在命令窗口里显示这一个文件在这条提交里的详细差异。
   void OnCommitFileDoubleClicked(HWND window, int row);
@@ -420,6 +431,9 @@ private:
   // 「选中一条提交 → 读它的文件变化」的只读后台查询：与工作区读取同一套 worker，
   // 连续切换提交时旧结果按序号作废，不会把上一条提交的清单混进新提交。
   platform::CommitChangesWorker commitChangesWorker_;
+  // 「选中一条提交 → 读它的完整信息」的只读后台查询：与文件变化各自一个 worker，
+  // 详情回来得早就先显示详情，慢的那一份（name-status）不挡它。
+  platform::CommitDetailWorker commitDetailWorker_;
   // ---- 持久化成员（可选新增功能）----
   // 数据与合并规则都在 app/persistent_state；这里只持有「本窗口的这一份」与写入意图。
   platform::PersistentStorePaths prefsPaths_;
@@ -478,6 +492,9 @@ private:
   // 与 worker 的提交序号一起构成两道核对，选中的提交或被换掉都不会把清单落到别人名下。
   git::CommitItem pendingFilesCommit_{};
   unsigned long long commitFilesSerial_ = 0;  // 请求序号：连同仓库身份版本一起交给工作线程回显
+  // 「提交详情」正在读的那条提交与序号：核对方式与上面那份完全一样。
+  git::CommitItem pendingDetailCommit_{};
+  unsigned long long commitDetailSerial_ = 0;
 
   BandSpec bandSpec_{};
   ChangesSpec changesSpec_{};

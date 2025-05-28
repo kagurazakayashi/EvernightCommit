@@ -35,6 +35,7 @@
 | `workspace_status` | `status --porcelain=v2 -z` 参数构造与 NUL 记录解析（XY 两侧拆分、重命名双路径、未合并归侧、子模块 S 栏位） |
 | `diff_view` | 差异视图的数据准备 |
 | `commit_history` | `git log` 五字段 NUL 参数构造与分组解析、对象 ID 校验（不硬编码 SHA-1 长度）、合并提交识别、上限截断说明、双击详情的 `git show` 方案 |
+| `commit_detail` | 选中那一条提交的完整信息：`git log -n 1` 七字段（完整 ID、作者姓名与邮箱、两个时间、标题、描述）NUL 参数构造与整份作废式解析、答非所问（对象 ID 与发起时不是同一枚）时拒绝、描述超上限时截断且不切断代理对、面板与剪贴板共用那份 `标签：值` 排版文本与 CRLF 统一 |
 | `command_window` | 外部命令窗口计划：命令行引号区域校验、操作说明书序列化与解析、结果解析、完成状态判定 |
 | `staging_plan` | 暂存/取消暂存方案：选中条目→字面 pathspec 清单与参数两种形态、Git 能力判定、未合并与子模块的确认文案 |
 | `commit_identity` | 「姓名 <邮箱>」解析/校验/同一位判定/列表去重 |
@@ -100,7 +101,11 @@ Git、写标记与结果文件，再把窗口交给 `cmd /k`；绝不接受调�
 `commit_message_file`（正文写成 UTF-8 临时档案交给 `git commit -F`，空正文拒绝写出）。
 
 预检编排（执行依赖全部回调注入，均提供按序号作废旧结果的后台控制器别名）：
-`git_toolchain`、`repo_detect`、`workspace_status`、`author_config`、`commit_probe`
+`git_toolchain`、`repo_detect`、`workspace_status`、`author_config`、`commit_changes`
+（选中一条提交 → 它相对第一个父提交改了哪些文件，`git show --format= --name-status -z --first-parent`）、
+`commit_detail`（选中一条提交 → 底部「提交详情」带要的那一条完整信息，一次 `git log -n 1` 七字段只读查询；
+时间与「最近提交」那一列共用 `local_time` 的本机换算，落地时带回 `git::FormatCommitDetailText` 排好的可复制文本）、
+`commit_probe`
 （确认前预检与确认后复核走同一份查询路径）、`undo_probe`（含引用形态那两条：分支名自身的
 `symbolic-ref --quiet` 与 `worktree list --porcelain`）、`fetch_probe`、
 `pull_probe`（含整合失败后的只读取证）、
@@ -118,7 +123,10 @@ unreadable），Git 目录读不动或任一痕迹读不回来时整轮 `readabl
 
 ## src/ui/
 
-`main_window`（窗口与消息循环）、`repo_bar`、`changes_pane`、`action_bar`、
+`main_window`（窗口与消息循环）、`repo_bar`、`changes_pane`（一个选项卡控件两页：`变化信息`
+是未暂存/箭头列/已暂存三栏，`提交历史` 是最近提交 | 分隔条 | 文件变化两栏，同一页底部再压一条横跨
+整页的 `提交详情` 带——只读多行编辑框 + 标题行右端的 `复制详情` 按钮；页内容仍是主窗口上的普通子控件，
+所以列表句柄、选中行与工具提示都不跨页搬家）、`action_bar`、
 `commit_form`、`controls`、`layout`、`ui_metrics`、`splitter`、`resource_ids`、
 `commands`，以及八个操作控制器：`commit_flow`、`undo_flow`、`fetch_flow`、
 `pull_flow`、`push_flow`、`conflict_flow`（冲突与暂停流程的三个入口：一次只读现场读取按

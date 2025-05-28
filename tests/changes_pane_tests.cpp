@@ -99,6 +99,16 @@ HistoryColumns HistoryOf() {
   return columns;
 }
 
+// 带详情带的「提交历史」栏位：ChangesSpec 默认的 detailHeight 是 0，那条带会被整页压成空矩形，
+// 那时编辑框虽然「可见」（WS_VISIBLE 与尺寸无关）却没有任何面积，断言摆放就没有意义了。
+HistoryColumns HistoryWithDetailBand(const UiMetrics& metrics) {
+  ChangesSpec spec{};
+  spec.detailHeight = ChangesPane::DetailHeight(metrics);
+  HistoryColumns columns{};
+  gc::ui::ComputeHistoryColumns(kArea, spec, &columns);
+  return columns;
+}
+
 }  // namespace
 
 GC_TEST(changes_pane_layout_keeps_hidden_hints_hidden) {
@@ -162,6 +172,89 @@ GC_TEST(changes_pane_commit_files_rows_land_for_the_selected_commit) {
   GC_CHECK_MESSAGE(pane.ListRowCount(pane.filesList()) == 0,
                    "上一条的清单必须被换掉，否则双击会按旧行发起命令");
   GC_CHECK_MESSAGE(::IsWindowVisible(hint) != FALSE, "空清单要给出这一段的说法而不是留白");
+
+  ::DestroyWindow(host);
+}
+
+// 底部「提交详情」带：落地的是哪一份文本、什么时候才算「有东西可复制」。
+// 断言对象是编辑框的真实窗口文本与复制按钮的真实可用状态——纯逻辑用例碰不到这两件事。
+GC_TEST(changes_pane_detail_band_only_offers_copy_for_a_real_detail) {
+  const HWND host = MakeHost();
+  GC_REQUIRE(host != nullptr, "测试宿主窗口创建失败，无法验证详情带");
+  ChangesPane pane;
+  pane.Create(host);
+  const UiMetrics metrics;
+  pane.LayoutHistory(HistoryWithDetailBand(metrics), metrics);
+
+  const HWND edit = pane.commitDetailEdit();
+  const HWND copyButton = pane.commitDetailCopyButton();
+  GC_REQUIRE(edit != nullptr && copyButton != nullptr, "详情带里没有编辑框与复制按钮，用例前提已变化");
+  GC_CHECK_MESSAGE(::IsWindowVisible(edit) != FALSE, "提交历史那一页必须把详情带摆出来");
+  RECT editRect{};
+  RECT bandRect{};
+  ::GetWindowRect(edit, &editRect);
+  ::GetWindowRect(pane.commitDetailCopyButton(), &bandRect);
+  GC_CHECK_MESSAGE(editRect.right - editRect.left > 0 && editRect.bottom - editRect.top > 0,
+                   "详情带的编辑框要有真实面积，否则用户看到的是没有内容的一条空带");
+  GC_CHECK(bandRect.right - bandRect.left > 0);
+
+  // 首屏（没有选中提交）：显示引导语，但没有可复制内容，按钮是灰的。
+  GC_CHECK(pane.CommitDetailText().empty());
+  GC_CHECK(::IsWindowVisible(copyButton) != FALSE);
+  GC_CHECK_MESSAGE(::IsWindowEnabled(copyButton) == FALSE,
+                   "引导语不是提交信息，不能被复制走");
+  std::wstring greeting(GetWindowTextLengthW(edit), L'\0');
+  ::GetWindowTextW(edit, greeting.data(), static_cast<int>(greeting.size()) + 1);
+  GC_CHECK_MESSAGE(greeting.find(L"选中「最近提交」里的某一条") != std::wstring::npos,
+                   "首屏要给出引导语，不能留一块空白让人以为这条提交没内容");
+
+  // 真读到一条提交：文本原样落地，可复制内容就是这一份。
+  const CommitItem commit = MakeCommit(L"4444444444444444444444444444444444444444", L"第四条");
+  ChangesPane::CommitDetailView read;
+  read.commit = &commit;
+  read.text = L"提交哈希：4444\r\n标题：第四条";
+  pane.ShowCommitDetail(read);
+  std::wstring shown(GetWindowTextLengthW(edit), L'\0');
+  ::GetWindowTextW(edit, shown.data(), static_cast<int>(shown.size()) + 1);
+  GC_CHECK(shown == read.text);
+  GC_CHECK(pane.CommitDetailText() == read.text);
+  GC_CHECK(pane.CommitDetailCommitId() == commit.objectId);
+  GC_CHECK_MESSAGE(::IsWindowEnabled(copyButton) != FALSE, "读到了详情，复制按钮要能用");
+
+  // 读失败：说清原因，且把可复制内容收回去——上一条的详情不能留着冒充现状。
+  ChangesPane::CommitDetailView failed;
+  failed.commit = &commit;
+  failed.error = L"Git 查询超时";
+  pane.ShowCommitDetail(failed);
+  std::wstring failureText(GetWindowTextLengthW(edit), L'\0');
+  ::GetWindowTextW(edit, failureText.data(), static_cast<int>(failureText.size()) + 1);
+  GC_CHECK_MESSAGE(failureText.find(L"Git 查询超时") != std::wstring::npos, "失败原因要写到面板上");
+  GC_CHECK(pane.CommitDetailText().empty());
+  GC_CHECK(::IsWindowEnabled(copyButton) == FALSE);
+
+  ::DestroyWindow(host);
+}
+
+// 切到「变化信息」那一页时，属于提交历史的控件（含详情带那三件）必须一起藏起来。
+// 只藏两份列表的话，详情编辑框会留在选项卡区域里压住表单上方那一片。
+GC_TEST(changes_pane_staging_page_hides_the_detail_band) {
+  const HWND host = MakeHost();
+  GC_REQUIRE(host != nullptr, "测试宿主窗口创建失败，无法验证切页显隐");
+  ChangesPane pane;
+  pane.Create(host);
+  const UiMetrics metrics;
+
+  pane.LayoutHistory(HistoryWithDetailBand(metrics), metrics);
+  GC_CHECK(::IsWindowVisible(pane.commitDetailEdit()) != FALSE);
+
+  pane.LayoutStaging(StagingOf(), metrics);
+  GC_CHECK_MESSAGE(::IsWindowVisible(pane.commitDetailEdit()) == FALSE,
+                   "「变化信息」那一页不许露出提交详情的编辑框");
+  GC_CHECK(::IsWindowVisible(pane.commitDetailCopyButton()) == FALSE);
+
+  // 来回切页之后仍要能重新摆回详情带的栏位（不是藏了就搬不回来）。
+  pane.LayoutHistory(HistoryWithDetailBand(metrics), metrics);
+  GC_CHECK(::IsWindowVisible(pane.commitDetailEdit()) != FALSE);
 
   ::DestroyWindow(host);
 }

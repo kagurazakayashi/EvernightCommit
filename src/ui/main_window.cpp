@@ -267,9 +267,23 @@ constexpr std::wstring_view kTipHistoryList =
     L"双击某一行：在命令窗口里执行 git show，显示这条提交的完整元数据（--format=fuller）、"
     L"正文与差异；合并提交的组合差异可能为空，那是正常的。\r\n"
     L"选中某一行：右边那份「文件变化」列出这条提交相对它第一个父提交改动的文件（只读的"
-    L"git show --name-status --first-parent）；合并提交按“相对第一个父提交”给，因此不会出现"
+    L"git show --name-status --first-parent），底部那条「提交详情」列出它的完整信息；"
+    L"合并提交按“相对第一个父提交”给，因此不会出现"
     L"“选中一条合并提交却一个文件都看不到”。\r\n"
     L"这一列是只读的：不提供、也不会顺手执行 checkout/reset/revert 之类的历史改写。";
+constexpr std::wstring_view kTipCommitDetail =
+    L"当前选中那一条提交的完整信息：完整对象哈希（40 或 64 位，不是列表里那 8 位短 ID）、"
+    L"标题、作者姓名与邮箱、作者时间、提交者时间，最后是描述正文（多行原样铺开）。\r\n"
+    L"内容是选中一条提交之后单独发起的只读 git log 查询，只读那一个对象，不改动仓库；"
+    L"读不出来时这里写明原因，不会拿上一条提交的文字冒充现状。\r\n"
+    L"两个时间与「最近提交」列表那一列用同一个本机时区换算依据，因此同一秒数在两处显示成同一刻。"
+    L"要看提交里记录的原始时区，双击那条提交，命令窗口里的 git show --format=fuller 给的就是那一份。\r\n"
+    L"这里的文字可以逐字选中后按 Ctrl+C，也可以用右侧「复制详情」按钮一次复制整段。"
+    L"描述过长时只显示开头一段并注明截断，完整描述请在命令窗口里看。";
+constexpr std::wstring_view kTipCommitDetailCopy =
+    L"把「提交详情」里这一段文本原样放进系统剪贴板：只是复制，不执行任何命令、不改动仓库。"
+    L"没有选中提交、还在读取或这一条没读出来时按钮是灰的，因为那时屏幕上的是引导语或失败说明，"
+    L"不是提交信息，复制出去会误导别处。";
 constexpr std::wstring_view kTipFilesList =
     L"这条提交相对它第一个父提交改了哪些文件：状态字母沿用与两个更改列表同一套文案，"
     L"重命名/复制会同时列出旧、新两条路径。\r\n"
@@ -553,6 +567,8 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
   tooltips_.Add(changesPane_.historyList(), kTipHistoryList);
   tooltips_.Add(changesPane_.filesList(), kTipFilesList);
+  tooltips_.Add(changesPane_.commitDetailEdit(), kTipCommitDetail);
+  tooltips_.Add(changesPane_.commitDetailCopyButton(), kTipCommitDetailCopy);
   tooltips_.Add(commitForm_.SummaryEdit(), kTipSummary);
   tooltips_.Add(commitForm_.DescriptionEdit(), kTipDescription);
   tooltips_.Add(commitForm_.AuthorEdit(), kTipAuthor);
@@ -709,6 +725,8 @@ void MainWindow::UpdateLayoutSpecs(HWND /*window*/) {
   changesSpec_.minListWidth = metrics_.MinListWidth();
   changesSpec_.minArrowColumnWidth = metrics_.MinArrowColumnWidth();
   changesSpec_.gap = metrics_.ColGap();
+  // 详情带的高度只与字体/ DPI 有关，不与窗口尺寸有关：每轮布局按当前度量重算一次。
+  changesSpec_.detailHeight = ChangesPane::DetailHeight(metrics_);
 }
 
 void MainWindow::RefreshTexts(HWND window) {
@@ -722,9 +740,9 @@ void MainWindow::RefreshTexts(HWND window) {
 
 void MainWindow::ApplyWorkspaceLists() {
   changesPane_.ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
-  // 刷新之后列表里的行已经换成新的了：正在看的「文件变化」清单也必须跟着对齐。
-  // 选中的提交还在新列表里就继续显示它的清单（不重读），不见了就清空并给出引导语。
-  ReconcileCommitFilesSelection(window_.get());
+  // 刷新之后列表里的行已经换成新的了：正在看的「文件变化」清单与「提交详情」也必须跟着对齐。
+  // 选中的提交还在新列表里就继续显示它的内容（不重读），不见了就清空并给出引导语。
+  ReconcileSelectedCommit(window_.get());
 }
 
 void MainWindow::ApplyFonts(HWND window) {
@@ -833,6 +851,11 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdRefreshButton:
       if (notifyCode == BN_CLICKED) {
         ScheduleRefresh(window);
+      }
+      break;
+    case kIdCommitDetailCopyButton:
+      if (notifyCode == BN_CLICKED) {
+        CopyCommitDetailToClipboard(window);
       }
       break;
     case kIdStageAddButton:
@@ -2710,6 +2733,13 @@ void MainWindow::OnHistoryCommitDoubleClicked(HWND window, int row) {
   }
 }
 
+void MainWindow::ReconcileSelectedCommit(HWND window) {
+  // 选中那一条提交要同时对齐两块面板：右边的「文件变化」清单与底部的「提交详情」带。
+  // 两者各自的作废核对留在各自函数里，这里只保证「一次选中变化只有一条判据」。
+  ReconcileCommitFilesSelection(window);
+  ReconcileCommitDetailSelection(window);
+}
+
 void MainWindow::ReconcileCommitFilesSelection(HWND window) {
   // 「当前选中的那一条」是唯一判据。列表刚被刷新、选项卡刚切回来、用户点了另一行，
   // 三种来源都只问这一个问题，因此不会出现「列表已经换而清单还是上一条的」窗口期。
@@ -2765,6 +2795,100 @@ void MainWindow::RequestCommitChanges(HWND window, int row) {
                                [](const platform::CommitChangesRequest& pending) {
                                  return platform::RunCommitChangesLoad(pending);
                                });
+}
+
+void MainWindow::ReconcileCommitDetailSelection(HWND window) {
+  // 与文件变化那一路同一判据、同一作废方式，只是落地在底部那条带上。
+  const int row = changesPane_.SelectedHistoryRow();
+  const git::CommitItem* item = row >= 0 ? changesPane_.CommitItemAt(row) : nullptr;
+  if (item == nullptr) {
+    changesPane_.ShowCommitDetail(ChangesPane::CommitDetailView{});
+    return;
+  }
+  if (changesPane_.CommitDetailCommitId() == item->objectId) {
+    return;  // 已经显示（或正在读）这条提交的详情：重复问一遍只会白跑一次 Git。
+  }
+  RequestCommitDetail(window, row);
+}
+
+void MainWindow::RequestCommitDetail(HWND window, int row) {
+  // 前提与文件变化那一路完全相同：仓库身份还成立，且显示的行数与已读取的历史对得上。
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (!state_.GitUsable() || !state_.RepoUsable() || repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot) ||
+      state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    return;
+  }
+  if (changesPane_.ListRowCount(changesPane_.historyList()) !=
+      static_cast<int>(state_.WorkspaceModel().recentCommits.size())) {
+    return;
+  }
+  const git::CommitItem* item = changesPane_.CommitItemAt(row);
+  if (item == nullptr) {
+    return;
+  }
+
+  platform::CommitDetailRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = repositoryRoot;
+  request.objectId = item->objectId;
+  request.timeoutMilliseconds = kCommitDetailTimeoutMs;
+  request.readSerial = ++commitDetailSerial_;
+  request.bindingGeneration = tasks_.Identity().generation;
+  // 请求发出时就记下这一条：回来时按它核对，绝不用「现在恰好选中的那一条」认领旧结果。
+  pendingDetailCommit_ = *item;
+
+  ChangesPane::CommitDetailView loading;
+  loading.commit = &pendingDetailCommit_;
+  loading.loading = true;
+  changesPane_.ShowCommitDetail(loading);
+
+  commitDetailWorker_.Request(window, kCommitDetailCompleted, std::move(request),
+                              [](const platform::CommitDetailRequest& pending) {
+                                return platform::RunCommitDetailLoad(pending);
+                              });
+}
+
+void MainWindow::OnCommitDetailCompleted(HWND window, uint64_t completionSerial) {
+  platform::CommitDetailOutcome outcome;
+  if (!commitDetailWorker_.FetchLatest(completionSerial, &outcome)) {
+    return;  // 期间又提交了更晩的读取（用户换了另一条提交）：这份结果不再有意义。
+  }
+  // 序号只保证「这是最后一次提交的请求」；仓库身份与那条提交还要各核一次，
+  // 否则换仓库/刷新之后回来的一份旧详情会被当成本仓的现状。
+  if (outcome.bindingGeneration != tasks_.Identity().generation ||
+      outcome.objectId != pendingDetailCommit_.objectId ||
+      changesPane_.CommitDetailCommitId() != outcome.objectId) {
+    return;
+  }
+  ChangesPane::CommitDetailView view;
+  view.commit = &pendingDetailCommit_;
+  if (outcome.error != git::RepoError::none) {
+    view.error = outcome.message;  // 失败不留上一条的文本冒充现状。
+  } else {
+    view.text = outcome.text;
+  }
+  changesPane_.ShowCommitDetail(view);
+  // 这一步只读仓库：状态栏只说「读到了 / 为什么没读到」，不改操作结论。
+  state_.SetStatusNote(outcome.message);
+  RefreshTexts(window);
+}
+
+void MainWindow::CopyCommitDetailToClipboard(HWND window) {
+  const std::wstring text = changesPane_.CommitDetailText();
+  if (text.empty()) {
+    state_.SetStatusNote(L"现在没有可复制的提交详情：请先在「最近提交」里选中一条，并等它读出来。");
+    RefreshTexts(window);
+    return;
+  }
+  std::wstring failure;
+  if (!platform::CopyTextToClipboard(window, text, &failure)) {
+    state_.SetStatusNote(L"没能复制到剪贴板：" + failure + L" 面板上的文字仍可以直接选中后用 Ctrl+C。");
+    RefreshTexts(window);
+    return;
+  }
+  state_.SetStatusNote(L"已把这条提交的完整信息复制到剪贴板（只是复制，没有执行任何命令）。");
+  RefreshTexts(window);
 }
 
 void MainWindow::OnCommitChangesCompleted(HWND window, uint64_t completionSerial) {
@@ -3128,10 +3252,10 @@ bool MainWindow::ConfirmCloseWithActiveOperations(HWND window) {
 
 void MainWindow::OnChangesTabChanged(HWND window) {
   // 两个选项卡的栏位与分隔条都不是同一套：重排一次布局即可（控件显隐与分隔条摆放都在里面）。
-  // 另外把「文件变化」的清单与新选中的那一条对齐：切回提交历史时看到的必须是当前选中提交的清单，
-  // 而不是上次离开时那条的。
+  // 另外把「文件变化」清单与底部「提交详情」与新选中的那一条对齐：
+  // 切回提交历史时看到的必须是当前选中提交的内容，而不是上次离开时那条的。
   DoLayout(window);
-  ReconcileCommitFilesSelection(window);
+  ReconcileSelectedCommit(window);
 }
 
 void MainWindow::OnSplitterDragged(HWND window, int splitterId, int parentX) {
@@ -3608,6 +3732,7 @@ void MainWindow::BeginStopAllBackgroundWorkers() {
   workspaceWorker_.BeginStop();
   authorWorker_.BeginStop();
   commitChangesWorker_.BeginStop();
+  commitDetailWorker_.BeginStop();
   commitFlow_.BeginStop();
   undoFlow_.BeginStop();
   fetchFlow_.BeginStop();
@@ -3624,6 +3749,7 @@ void MainWindow::JoinAllBackgroundWorkers() {
   workspaceWorker_.Join();
   authorWorker_.Join();
   commitChangesWorker_.Join();
+  commitDetailWorker_.Join();
   commitFlow_.JoinWorkers();
   undoFlow_.JoinWorkers();
   fetchFlow_.JoinWorkers();
@@ -3694,6 +3820,9 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
     case kCommitChangesCompleted:
       OnCommitChangesCompleted(window, static_cast<uint64_t>(wParam));
       return 0;
+    case kCommitDetailCompleted:
+      OnCommitDetailCompleted(window, static_cast<uint64_t>(wParam));
+      return 0;
     case WM_NOTIFY: {
       // ListView 的双击以 WM_NOTIFY / NM_DBLCLK 上报父窗口。只认两块更改列表、提交历史列表
       // 与合作者列表，其余通知（包括提交表单里的其它控件）一律交回默认处理，不替别人吞掉消息。
@@ -3720,7 +3849,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
         return 0;
       }
       if (header != nullptr && header->code == LVN_ITEMCHANGED && header->idFrom == kIdHistoryList) {
-        // 选中另一条提交 → 后台读它的文件变化。
+        // 选中另一条提交 → 后台读它的文件变化与完整信息（两块面板同一判据，见 ReconcileSelectedCommit）。
         // 列表重建（刷新）时的选中项恢复也会走到这里：那一次不重新读，
         // 因为刷新之后 ApplyWorkspaceLists 会自己按新列表重对一次（避免用重建中的半截内容去请求）。
         const auto* changed = reinterpret_cast<const NMLISTVIEW*>(lParam);
@@ -3728,7 +3857,7 @@ LRESULT MainWindow::HandleMessage(HWND window, UINT message, WPARAM wParam, LPAR
             changed != nullptr && (changed->uNewState & LVIS_SELECTED) != 0 &&
             (changed->uOldState & LVIS_SELECTED) == 0;
         if (becameSelected && !changesPane_.UpdatingLists()) {
-          ReconcileCommitFilesSelection(window);
+          ReconcileSelectedCommit(window);
         }
         return 0;
       }

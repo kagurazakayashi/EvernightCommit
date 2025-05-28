@@ -30,12 +30,15 @@ bool ComputeBands(const RECT& client, const BandSpec& spec, Bands* out);
 // 变更区的布局参数。两个选项卡各自只有一条分隔条，因此只保留两个比例：
 //   stagingRatio —— 「变化信息」选项卡里未暂存列表占可用宽度的比例；
 //   historyRatio —— 「提交历史」选项卡里最近提交列表占可用宽度的比例。
+// detailHeight 是「提交历史」页底部那条「提交详情」带的高度（含分组框标题）：
+// 它横跨整页，两份列表因此各让出这一截高度。取 0 时不留这条带，也不扣它与列表之间的间隔。
 struct ChangesSpec {
   int splitterWidth = 7;
   int arrowColumnWidth = 118;
   int minListWidth = 168;
   int minArrowColumnWidth = 96;
   int gap = 6;
+  int detailHeight = 0;
   double stagingRatio = 0.34;
   double historyRatio = 0.34;
 };
@@ -48,11 +51,13 @@ struct StagingColumns {
   RECT staged{};
 };
 
-// 「提交历史」选项卡内容区：最近提交 | 分隔条 | 文件变化。
+// 「提交历史」选项卡内容区：上半是最近提交 | 分隔条 | 文件变化，下半是横跨整页的提交详情。
+// 三份上排的栏位高 = detail 高 = 区域高 − 详情带高 − 一个间隔（detailHeight 为 0 时不扣间隔）。
 struct HistoryColumns {
   RECT commits{};
   RECT splitter{};
   RECT files{};
+  RECT detail{};
 };
 
 // area 是选项卡内容区（已去掉标签条与内边距），各栏都填满它的高度。
