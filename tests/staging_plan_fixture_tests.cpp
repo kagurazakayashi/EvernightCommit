@@ -7,6 +7,10 @@
 // 取消暂存一侧覆盖：有 HEAD 时索引逐条退回 HEAD 而工作区字节不变、部分暂存（MM）只退回索引那一份、
 // 尚无提交时改用只写索引的形态且磁盘文件原样留下、重命名旧新路径成对撤回、
 // 子模块指针退回而不进入子模块、特殊字符不过度命中、大量多选，以及路径消失时的失败行为。
+// 两个批量按钮（「全部加入 →」/「← 全部移出」）另起一段：范围是整份工作区 / 整个索引的
+// 原生命令（`git add .` / `git restore --staged .`，无 HEAD 时是 `git reset -q -- .`），
+// 覆盖被忽略文件不进索引、工作区字节不变、尚无提交时只写索引，
+// 以及冲突待解决时整份拒绝（并实测核对“真跑就会改写冲突现场”这一条前提）。
 // 断言的是「索引里到底有什么」（对象 ID 一致才算内容一致），不是命令文本；
 // 相关用例还逐字节确认工作区文件没被改写。
 // 只在夹具自建的临时仓库里跑 Git，绝不接触真实仓库或远端。
@@ -1112,4 +1116,231 @@ GC_TEST(unstage_fixture_reset_form_reaches_the_same_index_when_head_exists) {
   RequirePaths(after.unstaged, {L"a.txt", L"b.txt"}, "未暂存侧");
   GC_CHECK(RequireItem(after.unstaged, L"a.txt", "未暂存侧").kind == ChangeKind::modified);
   GC_CHECK(RequireItem(after.unstaged, L"b.txt", "未暂存侧").kind == ChangeKind::deleted);
+}
+
+// ---------------------------------------------------------------------------
+// 两个批量按钮（「全部加入 →」/「← 全部移出」）：真实仓库里跑 git 原生的批量命令
+// ---------------------------------------------------------------------------
+
+// 批量形态：方案给出完整参数（没有路径清单），原样交给真实 Git，工作目录 = 仓库根。
+AppliedStaging RunWholeWorktreePlan(GitFixture& fixture, const StagingPlan& plan) {
+  GC_REQUIRE_MESSAGE(plan.delivery == StagingDelivery::wholeWorktree,
+                     "批量方案应是整份工作区形态：" + ToUtf8(plan.blockedReason));
+  GC_REQUIRE_MESSAGE(plan.pathspecEntries.empty(), "批量形态不构造路径清单");
+  AppliedStaging applied;
+  applied.plan = plan;
+  applied.run = fixture.RunInRepo(plan.arguments);
+  return applied;
+}
+
+// 索引里某个路径有几份 stage 记录：冲突条目是三份（1/2/3），已解决或未冲突时是一份。
+// IndexBlobs 按路径收成表，会把三份压成一条，所以这里单独数行数。
+size_t StageRecordCount(GitFixture& fixture, std::wstring_view path) {
+  const GitRun run = fixture.RunCheckedInRepo({L"ls-files", L"-s", L"--", std::wstring(path)});
+  return static_cast<size_t>(std::count(run.out.begin(), run.out.end(), L'\n'));
+}
+
+GC_TEST(batch_fixture_add_all_reaches_every_change_but_ignored_paths) {
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+  fixture.WriteFile(L".gitignore", "ignored.txt\n");
+  fixture.WriteFile(L"mod.txt", "head\n");
+  fixture.WriteFile(L"del.txt", "head\n");
+  fixture.StageAll();
+  fixture.Commit(L"基线");
+
+  fixture.WriteFile(L"mod.txt", "modified\n");  // 已跟踪文件的修改
+  std::filesystem::remove(std::filesystem::path(std::wstring(fixture.PathInRoot(L"repo/del.txt"))));
+  fixture.WriteFile(L"brand.txt", "brand new file\n");   // 未跟踪的新文件
+  fixture.WriteFile(L"ignored.txt", "stays ignored\n");  // 被 .gitignore 挡住
+
+  const WorkspaceModel before = Load(fixture);
+  RequirePaths(before.unstaged, {L"mod.txt", L"del.txt", L"brand.txt"}, "未暂存侧");
+  const std::map<std::wstring, std::string> worktreeBefore = SnapshotWorktree(fixture);
+  const std::map<std::wstring, std::string> head = HeadBlobs(fixture);
+
+  const AppliedStaging applied =
+      RunWholeWorktreePlan(fixture, gc::git::BuildStagingAddAllPlan(before.unstaged));
+  // 真的是 git 原生那条批量命令：全局选项 + add + 一项 `.`，一条路径都没点名。
+  GC_CHECK(applied.plan.commandLabel == L"git add .");
+  GC_CHECK(std::count(applied.plan.arguments.begin(), applied.plan.arguments.end(), L".") == 1);
+  GC_CHECK_MESSAGE(applied.plan.confirmationText.empty(),
+                   "普通改动不该要求额外确认：" + ToUtf8(applied.plan.confirmationText));
+  GC_CHECK_MESSAGE(applied.run.exitCode == 0, "git add . 失败：" + DescribeRun(applied.run));
+
+  const std::map<std::wstring, std::string> indexAfter = IndexBlobs(fixture);
+  // 三类变化一次全进索引：修改取工作区当前字节、删除把路径从索引里去掉、新文件整条加入。
+  GC_CHECK(BlobOf(indexAfter, L"mod.txt") != BlobOf(head, L"mod.txt"));
+  GC_CHECK(BlobOf(indexAfter, L"del.txt") == "<缺失>");
+  GC_CHECK(BlobOf(indexAfter, L"brand.txt") != "<缺失>");
+  // 被忽略的文件不因为“全部加入”就进索引：这正是 git add . 与 git add -A -f 的分界。
+  GC_CHECK(BlobOf(indexAfter, L"ignored.txt") == "<缺失>");
+  // git add 只写索引：磁盘上既不新增也不删除任何文件，被忽略的那份仍在原地。
+  GC_CHECK_MESSAGE(SnapshotWorktree(fixture) == worktreeBefore, "git add . 不该改写工作区任何文件");
+  GC_CHECK(ReadWorktreeFile(fixture, L"ignored.txt") == "stays ignored\n");
+
+  const WorkspaceModel after = Load(fixture);
+  RequirePaths(after.staged, {L"mod.txt", L"del.txt", L"brand.txt"}, "已暂存侧");
+  GC_CHECK_MESSAGE(after.unstaged.empty(), "全部加入后未暂存侧应为空：" + Listed(after.unstaged));
+}
+
+GC_TEST(batch_fixture_unstage_all_returns_index_to_head_and_keeps_worktree) {
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  InitWithCommit(fixture);
+  fixture.WriteFile(L"mod.txt", "head\n");
+  fixture.WriteFile(L"del.txt", "head\n");
+  fixture.WriteFile(L"part.txt", "head\n");
+  fixture.StageAll();
+  fixture.Commit(L"补齐基线");
+
+  fixture.WriteFile(L"mod.txt", "modified\n");
+  std::filesystem::remove(std::filesystem::path(std::wstring(fixture.PathInRoot(L"repo/del.txt"))));
+  fixture.WriteFile(L"brand.txt", "brand new file\n");
+  fixture.WriteFile(L"part.txt", "part-staged\n");
+  fixture.Stage({L"mod.txt", L"del.txt", L"brand.txt", L"part.txt"});
+  fixture.WriteFile(L"part.txt", "part-latest\n");  // MM：索引一份、磁盘另一份
+
+  const WorkspaceModel before = Load(fixture);
+  RequirePaths(before.staged, {L"mod.txt", L"del.txt", L"brand.txt", L"part.txt"}, "已暂存侧");
+  RequirePaths(before.unstaged, {L"part.txt"}, "未暂存侧");
+  const std::map<std::wstring, std::string> worktreeBefore = SnapshotWorktree(fixture);
+
+  StagingPlanOptions options;
+  options.repositoryHasHead = true;
+  options.restoreCommandSupported = true;
+  const AppliedStaging applied =
+      RunWholeWorktreePlan(fixture, gc::git::BuildStagingUnstageAllPlan(before.staged, options));
+  GC_CHECK(applied.plan.commandLabel == L"git restore --staged .");
+  GC_CHECK(applied.plan.arguments.back() == L".");  // 范围就是整个索引，不带任何路径
+  GC_CHECK(std::count(applied.plan.arguments.begin(), applied.plan.arguments.end(), L".") == 1);
+  GC_CHECK_MESSAGE(applied.run.exitCode == 0, "git restore --staged . 失败：" + DescribeRun(applied.run));
+
+  // 整个索引退回 HEAD：四条（含那条已暂存的新增）全部回到与 HEAD 逐条一致的状态。
+  const std::map<std::wstring, std::string> indexAfter = IndexBlobs(fixture);
+  GC_CHECK_MESSAGE(indexAfter == HeadBlobs(fixture),
+                   "索引的文件表应与 HEAD 逐条一致：" + DescribeTable(indexAfter));
+  GC_CHECK(BlobOf(indexAfter, L"brand.txt") == "<缺失>");
+  // 工作区逐字节不变：取消暂存只该动索引，磁盘上既不新增也不删除任何文件。
+  GC_CHECK_MESSAGE(SnapshotWorktree(fixture) == worktreeBefore, "取消暂存不该改写工作区任何文件");
+  GC_CHECK(ReadWorktreeFile(fixture, L"part.txt") == "part-latest\n");
+  GC_CHECK(!std::filesystem::exists(
+      std::filesystem::path(std::wstring(fixture.PathInRoot(L"repo/del.txt")))));  // 不会被凭空写回来
+
+  const WorkspaceModel after = Load(fixture);
+  GC_CHECK_MESSAGE(after.staged.empty(), "四条都应离开暂存侧：" + Listed(after.staged));
+  RequirePaths(after.unstaged, {L"mod.txt", L"del.txt", L"brand.txt", L"part.txt"}, "未暂存侧");
+  GC_CHECK(RequireItem(after.unstaged, L"del.txt", "未暂存侧").kind == ChangeKind::deleted);
+  GC_CHECK(RequireItem(after.unstaged, L"brand.txt", "未暂存侧").kind == ChangeKind::untracked);
+}
+
+GC_TEST(batch_fixture_unstage_all_in_unborn_repo_uses_only_index_reset) {
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+  fixture.WriteFile(L"first.txt", "one\n");
+  fixture.WriteFile(L"second.txt", "two\n");
+  fixture.Stage({L"first.txt", L"second.txt"});
+
+  const WorkspaceModel before = Load(fixture);
+  GC_REQUIRE_MESSAGE(before.staged.size() == 2, "尚无提交时暂存两条：" + Listed(before.staged));
+  const std::map<std::wstring, std::string> worktreeBefore = SnapshotWorktree(fixture);
+
+  StagingPlanOptions options;
+  options.repositoryHasHead = false;  // 仓库识别报出来的就是没有 HEAD，不靠“目录里有没有 refs”猜
+  options.restoreCommandSupported = true;
+  const AppliedStaging applied =
+      RunWholeWorktreePlan(fixture, gc::git::BuildStagingUnstageAllPlan(before.staged, options));
+  GC_CHECK(applied.plan.commandLabel == L"git reset -q -- .");
+  GC_CHECK(applied.plan.arguments.back() == L".");
+  GC_CHECK_MESSAGE(applied.run.exitCode == 0, "git reset -q -- . 失败：" + DescribeRun(applied.run));
+
+  GC_CHECK_MESSAGE(IndexBlobs(fixture).empty(), "两条都应离开索引：" + DescribeTable(IndexBlobs(fixture)));
+  // 只写索引的形态连 HEAD 层面的事都没做：分支仍然是一个尚无提交的分支。
+  GC_CHECK(fixture.RunInRepo({L"rev-parse", L"--verify", L"HEAD"}).exitCode != 0);
+  // 磁盘上的字节与工作区形态必须原样：不能因为“命令不好写”就去删文件。
+  GC_CHECK_MESSAGE(SnapshotWorktree(fixture) == worktreeBefore, "取消暂存不该删除或改写磁盘上的文件");
+
+  const WorkspaceModel after = Load(fixture);
+  GC_CHECK_MESSAGE(after.staged.empty(), "索引里不该再有条目：" + Listed(after.staged));
+  RequirePaths(after.unstaged, {L"first.txt", L"second.txt"}, "未暂存侧");
+  GC_CHECK(RequireItem(after.unstaged, L"first.txt", "未暂存侧").kind == ChangeKind::untracked);
+}
+
+// 冲突还没解决时点「← 全部移出」：整份拒绝，一条命令都不发。
+// 这也是批量形态唯一一处比逐条形态更硬的地方 —— 它没有“排除项”，只能整份拒绝。
+GC_TEST(batch_fixture_unstage_all_refuses_while_a_conflict_is_still_pending) {
+  GitFixture fixture;
+  PrepareFixture(fixture);
+  fixture.InitRepository(L"repo");
+  fixture.WriteFile(L"conf.txt", "shared\n");
+  fixture.WriteFile(L"plain.txt", "head\n");
+  fixture.StageAll();
+  fixture.Commit(L"基线");
+  fixture.WriteFile(L"conf.txt", "A-side\n");
+  fixture.StageAll();
+  fixture.Commit(L"A 侧");
+  fixture.RunCheckedInRepo({L"checkout", L"-b", L"other", L"HEAD~1"});
+  fixture.WriteFile(L"conf.txt", "B-side\n");
+  fixture.StageAll();
+  fixture.Commit(L"B 侧");
+  fixture.RunCheckedInRepo({L"checkout", L"main"});
+  const GitRun merged = fixture.RunInRepo({L"merge", L"other", L"-m", L"故意冲突"});
+  GC_REQUIRE_MESSAGE(merged.exitCode != 0, "合并应当失败并留下冲突：" + DescribeRun(merged));
+  // 冲突之外再暂存一条普通改动：否则“已暂存的更改”是空的，被拒的理由会变成“没有条目”。
+  fixture.WriteFile(L"plain.txt", "staged-change\n");
+  fixture.Stage({L"plain.txt"});
+
+  const WorkspaceModel before = Load(fixture);
+  RequirePaths(before.staged, {L"plain.txt"}, "已暂存侧");
+  GC_REQUIRE_MESSAGE(RequireItem(before.unstaged, L"conf.txt", "未暂存侧").kind == ChangeKind::conflicted,
+                     "用例前提：冲突条目出现在未暂存那一侧");
+  GC_REQUIRE_MESSAGE(StageRecordCount(fixture, L"conf.txt") == 3,
+                     "用例前提：冲突路径在索引里有三份 stage 记录");
+
+  // 「全部加入 →」这一侧只是弹确认（git add 把当前内容记为“已解决”，要不要那样做由用户点头），
+  // 所以这里只核对文案，不执行那条命令。
+  const StagingPlan addAll = gc::git::BuildStagingAddAllPlan(before.unstaged);
+  GC_REQUIRE_MESSAGE(addAll.delivery != StagingDelivery::blocked, ToUtf8(addAll.blockedReason));
+  GC_CHECK_MESSAGE(addAll.confirmationText.find(L"conf.txt") != std::wstring::npos,
+                   "确认文案要点名冲突路径：" + ToUtf8(addAll.confirmationText));
+  GC_CHECK(addAll.confirmationText.find(L"未合并") != std::wstring::npos);
+  GC_CHECK(addAll.confirmationText.find(L"没有排除项") != std::wstring::npos);
+
+  // 「← 全部移出」这一侧是硬拒绝：界面把整份仓库的冲突路径交给方案层，已暂存那一列里一个 U 都没有。
+  StagingPlanOptions options;
+  options.repositoryHasHead = true;
+  options.restoreCommandSupported = true;
+  for (const ChangeItem& item : before.unstaged) {
+    if (item.kind == ChangeKind::conflicted) {
+      options.unmergedPaths.push_back(item.path);
+    }
+  }
+  GC_REQUIRE_MESSAGE(options.unmergedPaths.size() == 1, "应当读出唯一一个冲突路径");
+  const std::map<std::wstring, std::string> worktreeBefore = SnapshotWorktree(fixture);
+  const std::map<std::wstring, std::string> indexBefore = IndexBlobs(fixture);
+  const StagingPlan plan = gc::git::BuildStagingUnstageAllPlan(before.staged, options);
+  GC_CHECK(plan.delivery == StagingDelivery::blocked);
+  GC_CHECK(plan.arguments.empty());
+  GC_CHECK(plan.pathspecEntries.empty());
+  GC_CHECK_MESSAGE(plan.blockedReason.find(L"conf.txt") != std::wstring::npos,
+                   "拒绝理由要点名冲突路径：" + ToUtf8(plan.blockedReason));
+  GC_CHECK(plan.blockedReason.find(L"未合并") != std::wstring::npos);
+
+  // 被拒 = 一条命令都没发：索引（含那三份 stage 记录）与工作区都原样。
+  GC_CHECK_MESSAGE(IndexBlobs(fixture) == indexBefore, "被拒时不该动索引");
+  GC_CHECK(StageRecordCount(fixture, L"conf.txt") == 3);
+  GC_CHECK_MESSAGE(SnapshotWorktree(fixture) == worktreeBefore, "被拒时不该动工作区");
+
+  // 前提复核（实测）：Git 本身会愉快地执行这条命令，冲突现场被悄悄改写 ——
+  // 三份 stage 记录收拢成 HEAD 那一份，而工作区里的冲突标记与 MERGE_HEAD 都还留着。
+  // 这正是这个按钮必须整份拒绝的理由，不是随手加的保险。
+  const GitRun native = fixture.RunInRepo({L"restore", L"--staged", L"."});
+  GC_CHECK_MESSAGE(native.exitCode == 0, "Git 会接受这条命令（所以只能由程序拒绝）：" + DescribeRun(native));
+  GC_CHECK_MESSAGE(StageRecordCount(fixture, L"conf.txt") == 1,
+                   "实测 restore --staged . 把三份记录收拢成一份");
+  GC_CHECK(ReadWorktreeFile(fixture, L"conf.txt").find("<<<<<<<") != std::string::npos);
+  GC_CHECK_MESSAGE(fixture.RunInRepo({L"rev-parse", L"--verify", L"MERGE_HEAD"}).exitCode == 0,
+                   "实测合并仍在进行中：MERGE_HEAD 没被清掉");
 }

@@ -5,6 +5,8 @@
 // 清单文件/字面 pathspec 两种传递形态的选择与旧版本的拒绝策略，以及 Git 版本判定本身。
 // 取消暂存一侧还覆盖：有无 HEAD 时的命令选择、只写索引的命令形态、
 // 以及「绝不出现 --hard / 不带路径的 git reset / 取消全部暂存」这一条底线。
+// 两个批量按钮（「全部加入 →」/「← 全部移出」）单独一组：它们的范围不是选中项，
+// 而是 git 原生批量命令那两项 pathspec（`git add .` / `git restore --staged .`）。
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -630,6 +632,221 @@ GC_TEST(unstage_inline_refuses_instead_of_broadening) {
   const StagingPlan filePlan = gc::git::BuildStagingUnstagePlan(selection, UnstageMode());
   GC_CHECK(filePlan.delivery == StagingDelivery::pathspecFile);
   GC_CHECK(filePlan.pathspecCount == 60);
+}
+
+// ---------------------------------------------------------------------------
+// 两个批量按钮（「全部加入 →」/「← 全部移出」）：git 原生的整份工作区 / 整个索引命令
+// ---------------------------------------------------------------------------
+
+// 批量形态的命令必须真的是 git 原生那条批量命令：一项 pathspec `.`、没有清单文件、
+// 没有排除项可加。这里把这个形状钉死，免得日后有人顺手把它改回逐条路径清单。
+GC_TEST(stage_all_uses_the_native_batch_command) {
+  const std::vector<ChangeItem> unstaged = {
+      Make(ChangeKind::modified, L"README.md"),
+      Make(ChangeKind::deleted, L"src/old.cpp"),
+      Make(ChangeKind::untracked, L"new file.txt"),
+  };
+  const StagingPlan plan = gc::git::BuildStagingAddAllPlan(unstaged);
+
+  GC_CHECK(plan.delivery == StagingDelivery::wholeWorktree);
+  GC_CHECK(plan.operationId == L"stage-add-all");
+  GC_CHECK(plan.commandLabel == L"git add .");
+  GC_CHECK(plan.pathspecEntries.empty());  // 批量形态不构造路径清单
+  GC_CHECK(plan.pathspecCount == 1);       // 命令里那一项就是 `.`
+  GC_CHECK(plan.selectedItems == 3);
+  GC_CHECK(!plan.arguments.empty());
+  GC_CHECK(plan.arguments.back() == kDot);
+  GC_CHECK(EntryCount(plan.arguments, kDot) == 1);
+  GC_CHECK(HasArgument(plan.arguments, L"add"));
+  // 扩大范围的开关一个都不要：范围已经是整份工作区，再加 --all/-u 只会把意思搞混。
+  GC_CHECK(!HasArgument(plan.arguments, kAll));
+  GC_CHECK(!HasArgument(plan.arguments, kAllLong));
+  GC_CHECK(!HasArgument(plan.arguments, kUpdate));
+  GC_CHECK(!HasArgument(plan.arguments, kDotSlash));
+  GC_CHECK(!HasArgument(plan.arguments, L"--pathspec-from-file"));
+  GC_CHECK(!HasArgument(plan.arguments, L"README.md"));  // 不当场点名任何一条路径
+  GC_CHECK(plan.displayName.find(L"3 项") != std::wstring::npos);
+
+  // 范围说明要一次说清「整份工作区」与三类实际语义（三类变化、忽略项、子模块只记指针）。
+  GC_CHECK(plan.notice.find(L"不分选中与未选中") != std::wstring::npos);
+  GC_CHECK(plan.notice.find(L"整份工作区") != std::wstring::npos);
+  GC_CHECK(plan.notice.find(L"git add .") != std::wstring::npos);
+  GC_CHECK(plan.notice.find(L"未跟踪的新文件") != std::wstring::npos);
+  GC_CHECK(plan.notice.find(L".gitignore") != std::wstring::npos);
+  GC_CHECK(plan.notice.find(L"gitlink") != std::wstring::npos);
+  GC_CHECK(plan.confirmationText.empty());
+}
+
+GC_TEST(stage_all_is_refused_when_that_side_is_empty) {
+  const StagingPlan plan = gc::git::BuildStagingAddAllPlan({});
+  GC_CHECK(plan.delivery == StagingDelivery::blocked);
+  GC_CHECK(plan.arguments.empty());
+  GC_CHECK(plan.pathspecEntries.empty());
+  GC_CHECK(plan.selectedItems == 0);
+  // 被拒的理由要说得出口：这一侧现在无东西可加，不是「你操作错了」。
+  GC_CHECK(plan.blockedReason.find(L"没有条目") != std::wstring::npos);
+  GC_CHECK(plan.blockedReason.find(L"没有执行任何命令") != std::wstring::npos);
+  GC_CHECK(plan.blockedReason.find(L"刷新") != std::wstring::npos);
+}
+
+GC_TEST(stage_all_asks_before_conflict_or_submodule) {
+  // 普通改动不需要确认（与逐条形态一致），只是这一次范围大。
+  const StagingPlan plain = gc::git::BuildStagingAddAllPlan(
+      {Make(ChangeKind::modified, L"a.txt"), Make(ChangeKind::untracked, L"b.txt")});
+  GC_CHECK(plain.confirmationText.empty());
+
+  // 冲突条目会被 `git add .` 记为已解决：批量形态没有排除项，必须由用户点头。
+  const StagingPlan conflict =
+      gc::git::BuildStagingAddAllPlan({Make(ChangeKind::conflicted, L"merge.txt")});
+  GC_CHECK(!conflict.confirmationText.empty());
+  GC_CHECK(conflict.confirmationText.find(L"merge.txt") != std::wstring::npos);
+  GC_CHECK(conflict.confirmationText.find(L"未合并") != std::wstring::npos);
+  // 确认文案要说清“这一次没有排除项”，不能照搬逐条那一套。
+  GC_CHECK(conflict.confirmationText.find(L"没有排除项") != std::wstring::npos);
+
+  // 子模块只记提交指针：与逐条形态同一句说明，但同样得先问一遍。
+  ChangeItem submodule = Make(ChangeKind::submodule, L"third/party");
+  submodule.submodule.commitChanged = true;
+  const StagingPlan withSubmodule = gc::git::BuildStagingAddAllPlan({submodule});
+  GC_CHECK(!withSubmodule.confirmationText.empty());
+  GC_CHECK(withSubmodule.confirmationText.find(L"third/party") != std::wstring::npos);
+  GC_CHECK(withSubmodule.confirmationText.find(L"gitlink") != std::wstring::npos);
+}
+
+// 批量取消暂存用哪条命令只看两件事：有没有 HEAD、这个 Git 认不认识 restore 子命令。
+GC_TEST(unstage_all_uses_the_native_batch_commands) {
+  const std::vector<ChangeItem> staged = {
+      MakeStaged(ChangeKind::modified, L"a.txt", L"M."),
+      MakeStaged(ChangeKind::added, L"new.txt", L"A."),
+  };
+  const StagingPlan restore = gc::git::BuildStagingUnstageAllPlan(staged, UnstageMode());
+  GC_CHECK(restore.delivery == StagingDelivery::wholeWorktree);
+  GC_CHECK(restore.operationId == L"stage-unstage-all");
+  GC_CHECK(restore.commandLabel == L"git restore --staged .");
+  GC_CHECK(HasArgument(restore.arguments, L"restore"));
+  GC_CHECK(HasArgument(restore.arguments, L"--staged"));
+  GC_CHECK(restore.arguments.back() == kDot);
+  GC_CHECK(EntryCount(restore.arguments, kDot) == 1);
+  GC_CHECK(restore.pathspecEntries.empty());
+  GC_CHECK(restore.pathspecCount == 1);
+  GC_CHECK(restore.selectedItems == 2);
+  GC_CHECK(restore.notice.find(L"只写索引") != std::wstring::npos);
+  GC_CHECK(restore.notice.find(L"git restore --staged .") != std::wstring::npos);
+  GC_CHECK(restore.notice.find(L"不分选中与未选中") != std::wstring::npos);
+  GC_CHECK(restore.confirmationText.empty());
+
+  // 仓库还没有任何提交：没有可退回的 HEAD，改用同样只写索引的 git reset -q -- .
+  const StagingPlan noHead =
+      gc::git::BuildStagingUnstageAllPlan(staged, UnstageMode(/*repositoryHasHead=*/false));
+  GC_CHECK(noHead.delivery == StagingDelivery::wholeWorktree);
+  GC_CHECK(noHead.commandLabel == L"git reset -q -- .");
+  GC_CHECK(HasArgument(noHead.arguments, L"reset"));
+  GC_CHECK(HasArgument(noHead.arguments, L"-q"));
+  GC_CHECK(noHead.arguments.back() == kDot);
+  GC_CHECK(EntryCount(noHead.arguments, kDot) == 1);
+  GC_CHECK(noHead.notice.find(L"git reset -q -- .") != std::wstring::npos);
+  GC_CHECK(noHead.notice.find(L"还没有任何提交") != std::wstring::npos);
+  // 两条命令都不许出现会丢改动的形态，也不许出现不带路径的 git reset。
+  for (const StagingPlan& plan : {restore, noHead}) {
+    GC_CHECK(!HasArgument(plan.arguments, L"--hard"));
+    GC_CHECK(!HasArgument(plan.arguments, L"checkout"));
+    GC_CHECK(!HasArgument(plan.arguments, L"clean"));
+    GC_CHECK(!HasArgument(plan.arguments, kAll));
+    GC_CHECK(!HasArgument(plan.arguments, kAllLong));
+    // 全局只读选项与逐条形态共用同一套，命令本身紧贴在最后那一项 `.` 前面。
+    GC_CHECK(HasArgument(plan.arguments, L"--no-optional-locks"));
+    GC_CHECK(HasArgument(plan.arguments, L"core.quotepath=off"));
+    GC_CHECK(plan.arguments.size() > 2);
+  }
+
+  // Git 太旧（没有 restore 子命令）：同样走 reset 形态，理由要说是版本不够。
+  const StagingPlan oldGit = gc::git::BuildStagingUnstageAllPlan(staged, UnstageOldGitMode());
+  GC_CHECK(oldGit.commandLabel == L"git reset -q -- .");
+  GC_CHECK(oldGit.notice.find(L"2.23") != std::wstring::npos);
+}
+
+GC_TEST(unstage_all_is_refused_when_that_side_is_empty) {
+  for (const bool hasHead : {true, false}) {
+    const StagingPlan plan =
+        gc::git::BuildStagingUnstageAllPlan({}, UnstageMode(hasHead));
+    GC_CHECK(plan.delivery == StagingDelivery::blocked);
+    GC_CHECK(plan.arguments.empty());
+    GC_CHECK(plan.selectedItems == 0);
+    GC_CHECK(plan.blockedReason.find(L"没有条目") != std::wstring::npos);
+    GC_CHECK(plan.blockedReason.find(L"没有执行任何命令") != std::wstring::npos);
+    GC_CHECK(plan.blockedReason.find(L"刷新") != std::wstring::npos);
+  }
+}
+
+// 批量形态唯一必须整份拒绝的一类：仓库里只要有未合并（冲突）条目，就没有「把它们留下、只处理其余条目」
+// 这个选项了（批量命令没有路径清单），于是整份拒绝——绝不悄悄把冲突现场收拾掉。
+GC_TEST(unstage_all_refuses_the_whole_plan_on_unmerged_item) {
+  const std::vector<ChangeItem> staged = {
+      MakeStaged(ChangeKind::modified, L"ok.txt", L"M."),
+      MakeStaged(ChangeKind::conflicted, L"merge.txt", L"UU"),
+  };
+  const StagingPlan plan = gc::git::BuildStagingUnstageAllPlan(staged, UnstageMode());
+  GC_CHECK(plan.delivery == StagingDelivery::blocked);
+  GC_CHECK(plan.arguments.empty());
+  GC_CHECK(plan.pathspecEntries.empty());  // 被拒时连清单也不构造
+  GC_CHECK(plan.blockedReason.find(L"merge.txt") != std::wstring::npos);
+  GC_CHECK(plan.blockedReason.find(L"未合并") != std::wstring::npos);
+  GC_CHECK(plan.blockedReason.find(L"解决冲突") != std::wstring::npos);
+
+  // 真实情况：冲突条目只出现在未暂存那一侧（见工作区状态解析），所以界面会把整份仓库的
+  // 冲突路径放进 options.unmergedPaths；已暂存那一列里一个 U 都没有，同样要整份拒绝。
+  StagingPlanOptions options = UnstageMode();
+  options.unmergedPaths = {L"merge.txt"};
+  const StagingPlan viaOptions =
+      gc::git::BuildStagingUnstageAllPlan({MakeStaged(ChangeKind::modified, L"ok.txt", L"M.")}, options);
+  GC_CHECK(viaOptions.delivery == StagingDelivery::blocked);
+  GC_CHECK(viaOptions.arguments.empty());
+  GC_CHECK(viaOptions.blockedReason.find(L"merge.txt") != std::wstring::npos);
+  GC_CHECK(viaOptions.blockedReason.find(L"未合并") != std::wstring::npos);
+  GC_CHECK(viaOptions.blockedReason.find(L"MERGE_HEAD") != std::wstring::npos);
+
+  // 同一个路径两侧都给（或给了两遍）时只报一次，不把条数算成两条。
+  StagingPlanOptions doubled = UnstageMode();
+  doubled.unmergedPaths = {L"merge.txt", L"merge.txt"};
+  const StagingPlan deduped = gc::git::BuildStagingUnstageAllPlan(
+      {MakeStaged(ChangeKind::conflicted, L"merge.txt", L"UU")}, doubled);
+  GC_CHECK(deduped.delivery == StagingDelivery::blocked);
+  GC_CHECK(deduped.blockedReason.find(L"1 个路径") != std::wstring::npos);
+}
+
+// 空列表不因为「整份仓库没有冲突」就变成可执行：这一侧本来就没条目，命令也不该发。
+GC_TEST(unstage_all_conflict_list_does_not_resurrect_empty_side) {
+  StagingPlanOptions options = UnstageMode();
+  options.unmergedPaths = {L"merge.txt"};
+  const StagingPlan plan = gc::git::BuildStagingUnstageAllPlan({}, options);
+  GC_CHECK(plan.delivery == StagingDelivery::blocked);
+  GC_CHECK(plan.arguments.empty());
+  GC_CHECK(plan.blockedReason.find(L"没有条目") != std::wstring::npos);
+}
+
+// 「内容只剩索引里那一份」的条目在批量形态下仍然要先点头：逐条形态可以把它们留在一边，
+// 批量形态不行，所以只能把后果说清、由用户自己决定还做不做这一次。
+GC_TEST(unstage_all_asks_before_dropping_index_only_content) {
+  const StagingPlan droppable = gc::git::BuildStagingUnstageAllPlan(
+      {MakeStaged(ChangeKind::added, L"gone.txt", L"AD")}, UnstageMode());
+  GC_CHECK(!droppable.confirmationText.empty());
+  GC_CHECK(droppable.confirmationText.find(L"gone.txt") != std::wstring::npos);
+  GC_CHECK(droppable.confirmationText.find(L"只存在于索引") != std::wstring::npos);
+  GC_CHECK(droppable.confirmationText.find(L"没有排除项") != std::wstring::npos);
+
+  // 工作区里还留着文件（Y 不是 D）就不算这一类：交点只有一份改动而已。
+  const StagingPlan safe = gc::git::BuildStagingUnstageAllPlan(
+      {MakeStaged(ChangeKind::added, L"kept.txt", L"A.")}, UnstageMode());
+  GC_CHECK(safe.confirmationText.empty());
+
+  // 子模块指针同样要先点头，且文案要说是往哪一边退。
+  ChangeItem submodule = MakeStaged(ChangeKind::submodule, L"third/party", L"M.");
+  submodule.submodule.untrackedChanges = true;
+  const StagingPlan withSubmodule =
+      gc::git::BuildStagingUnstageAllPlan({submodule}, UnstageMode());
+  GC_CHECK(!withSubmodule.confirmationText.empty());
+  GC_CHECK(withSubmodule.confirmationText.find(L"gitlink") != std::wstring::npos);
+  GC_CHECK(withSubmodule.confirmationText.find(L"没有排除项") != std::wstring::npos);
 }
 
 }  // namespace

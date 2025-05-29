@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <initializer_list>
 #include <string>
+#include <utility>
 
 #include "git/commit_detail.h"
 #include "git/commit_history.h"
@@ -27,6 +28,14 @@ constexpr std::wstring_view kExplicitBreak = L"\r\n";
 constexpr std::wstring_view kCommitDetailGreeting =
     L"选中「最近提交」里的某一条，这里显示它的完整信息（哈希、标题、作者与邮箱、作者时间、提交者时间、描述）。";
 
+// 中间那一栏四个按钮的标题：竖排次序自上而下就是它们的范围次序
+// （把整份工作区加进来 / 把选中的加进来 / 把选中的移出去 / 把整个索引移出去）。
+// 建控件与摆位置共用这几份文字，两处不会因拷具而走偏。
+constexpr std::wstring_view kStageAddAllLabel = L"全部加入 →";
+constexpr std::wstring_view kStageAddLabel = L"加入暂存区 →";
+constexpr std::wstring_view kStageRemoveLabel = L"← 移出暂存区";
+constexpr std::wstring_view kStageRemoveAllLabel = L"← 全部移出";
+
 [[nodiscard]] std::wstring TwoLine(std::wstring_view first, std::wstring_view second) {
   return std::wstring(first) + std::wstring(kExplicitBreak) + std::wstring(second);
 }
@@ -47,9 +56,11 @@ int ChangesPane::HintVerticalPadding(const UiMetrics& metrics) noexcept { return
 int ChangesPane::InnerInset(const UiMetrics& metrics) noexcept { return metrics.Scale(7); }
 
 int ChangesPane::ButtonStackHeight(const UiMetrics& metrics) noexcept {
-  // 两个方向各一行按钮 + 一个行距（暂存方向与导航方向已经不在一栏里了：
-  // 进入/返回子模块在「上游：」那一行右对齐）。
-  return 2 * metrics.ControlHeight() + metrics.RowGap();
+  // 四个按钮各占一行 + 三个行距。四行是同一栏里的竖排，自上而下：
+  // 「全部加入 →」、「加入暂存区 →」、「← 移出暂存区」、「← 全部移出」——
+  // 两个批量按钮就是把逐条按钮那一对向上下各撑开一格，中间两行仍是逐条操作。
+  // （暂存方向与导航方向已经不在一栏里了：进入/返回子模块在「上游：」那一行右对齐。）
+  return 4 * metrics.ControlHeight() + 3 * metrics.RowGap();
 }
 
 int ChangesPane::DetailHeight(const UiMetrics& metrics) noexcept {
@@ -65,8 +76,8 @@ int ChangesPane::DetailHeight(const UiMetrics& metrics) noexcept {
 int ChangesPane::MinimumHeight(const UiMetrics& metrics) noexcept {
   const int listNeed = GroupCaption(metrics) + ListHeaderHeight(metrics) + HintTextHeight(metrics) +
                        HintVerticalPadding(metrics) + InnerInset(metrics);
-  // 中间那一栏的两个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
-  // 否则第二个按钮会被摆到表单那一带上去。
+  // 中间那一栏的四个按钮是同一栏里的竖排：窗口缩到最小时，按钮列比列表列更需要这点高度，
+  // 否则下面那两个按钮会被摆到表单那一带上去。
   const int page = std::max(listNeed, ButtonStackHeight(metrics));
   // 「提交历史」那一页在两份列表下面还压着一条详情带，整页下限按它算：
   // 「变化信息」那一页只会比这个下限更宽裕，不会因此摆不下。
@@ -84,8 +95,10 @@ void ChangesPane::Create(HWND parent) {
   unstagedList_ = CreateReportListView(parent, kIdUnstagedList, changeColumns_);
   unstagedHint_ = CreateCenteredLabel(unstagedList_, L"", kIdUnstagedHint);
 
-  stageAdd_ = CreatePushButton(parent, L"加入暂存区 →", kIdStageAddButton);
-  stageRemove_ = CreatePushButton(parent, L"← 移出暂存区", kIdStageRemoveButton);
+  stageAddAll_ = CreatePushButton(parent, kStageAddAllLabel, kIdStageAddAllButton);
+  stageAdd_ = CreatePushButton(parent, kStageAddLabel, kIdStageAddButton);
+  stageRemove_ = CreatePushButton(parent, kStageRemoveLabel, kIdStageRemoveButton);
+  stageRemoveAll_ = CreatePushButton(parent, kStageRemoveAllLabel, kIdStageRemoveAllButton);
 
   stagedGroup_ = CreateGroupBox(parent, L"已暂存的更改", kIdStagedGroup);
   stagedList_ = CreateReportListView(parent, kIdStagedList, changeColumns_);
@@ -181,7 +194,8 @@ void ChangesPane::LayoutStaging(const StagingColumns& columns, const UiMetrics& 
   // 空状态说明不在这里显隐：它是各自那个列表的子窗口，列表一藏它自然跟着藏，列表露出来时
   // 它该不该露着只由「这一列有没有条目」决定（RebuildList 落地的那个结论）。
   // 整页一律 SW_SHOW 等于把已经藏起来的说明又摆回到行上面——用户看到的就是叠在清单上的空提示。
-  ShowControls(true, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
+  ShowControls(true, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAddAll_, stageAdd_,
+                      stageRemove_, stageRemoveAll_});
   ShowControls(false, {historyGroup_, historyList_, filesGroup_, filesList_, detailGroup_, detailEdit_,
                        detailCopyButton_});
 
@@ -191,21 +205,28 @@ void ChangesPane::LayoutStaging(const StagingColumns& columns, const UiMetrics& 
   const int gap = metrics.RowGap();
   const int rowHeight = metrics.ControlHeight();
   const int arrowWidth = columns.arrows.right - columns.arrows.left;
-  // 两行：加入暂存区 / 移出暂存区，在箭头列里竖排居中。
+  // 四行竖排居中：全部加入 → / 加入暂存区 → / ← 移出暂存区 / ← 全部移出。
+  // 每一行各自按自己的文字量宽，横向在箭头列里居中，宽窄不一也不会错位。
   const int stackHeight = ChangesPane::ButtonStackHeight(metrics);
   int top = columns.arrows.top + ((columns.arrows.bottom - columns.arrows.top) - stackHeight) / 2;
   top = std::max<int>(columns.arrows.top, top);
 
-  const int addWidth = std::min(arrowWidth, metrics.ButtonWidth(L"加入暂存区 →"));
-  const int removeWidth = std::min(arrowWidth, metrics.ButtonWidth(L"← 移出暂存区"));
-  Place(stageAdd_, Box(columns.arrows.left + (arrowWidth - addWidth) / 2, top, addWidth, rowHeight));
-  top += rowHeight + gap;
-  Place(stageRemove_,
-        Box(columns.arrows.left + (arrowWidth - removeWidth) / 2, top, removeWidth, rowHeight));
+  const std::pair<HWND, std::wstring_view> rows[] = {
+      {stageAddAll_, kStageAddAllLabel},
+      {stageAdd_, kStageAddLabel},
+      {stageRemove_, kStageRemoveLabel},
+      {stageRemoveAll_, kStageRemoveAllLabel},
+  };
+  for (const auto& [button, label] : rows) {
+    const int width = std::min(arrowWidth, metrics.ButtonWidth(label));
+    Place(button, Box(columns.arrows.left + (arrowWidth - width) / 2, top, width, rowHeight));
+    top += rowHeight + gap;
+  }
 }
 
 void ChangesPane::LayoutHistory(const HistoryColumns& columns, const UiMetrics& metrics) {
-  ShowControls(false, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAdd_, stageRemove_});
+  ShowControls(false, {unstagedGroup_, unstagedList_, stagedGroup_, stagedList_, stageAddAll_, stageAdd_,
+                       stageRemove_, stageRemoveAll_});
   ShowControls(true, {historyGroup_, historyList_, filesGroup_, filesList_, detailGroup_, detailEdit_,
                       detailCopyButton_});
 

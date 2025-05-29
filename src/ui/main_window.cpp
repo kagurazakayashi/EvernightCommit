@@ -95,6 +95,29 @@ constexpr std::wstring_view kTipStageAdd =
     L"与空格、中文都不会被当成通配、取反或选项，因此不会顺带改动没选中的文件。\r\n"
     L"“重命名”在工作区里是“旧路径已删除 + 新路径未跟踪”两条记录，要暂存这次重命名请把两条一起选中。\r\n"
     L"子模块条目只会让父仓库记录提交指针：子模块内部尚未提交的文件必须由那个仓库自己暂存并提交。";
+constexpr std::wstring_view kTipStageAddAll =
+    L"“全部加入 →”：把“未暂存的更改”里此刻全部条目一次交给 git 原生的批量命令 git add ."
+    L"（命令窗口把 Git 的工作目录设在仓库根，因此最后那一项 `.` 就是整份工作区）："
+    L"在新命令窗口里显示真实命令与 Git 的完整输出，执行结束后窗口保留，本程序自动重读两个列表。\r\n"
+    L"它不看选中项，也就没有“排除”这一步：已跟踪文件的修改、工作区里已经删掉的文件、"
+    L"以及未跟踪的新文件（含工作区里的改名）都会进索引；被 .gitignore 忽略的文件与目录不在内。"
+    L"只想暂存其中几项，请用下面的“加入暂存区 →”。\r\n"
+    L"索引里处于未合并（冲突）状态的条目会被 git add 记为已解决，子模块只会让父仓库记录提交指针："
+    L"这两类情况在发命令前会弹出确认，把 Git 的实际语义说清，由你决定是否继续（取消不碰仓库）。";
+constexpr std::wstring_view kTipStageRemoveAll =
+    L"“← 全部移出”：把“已暂存的更改”里此刻全部条目从索引撤回，命令是 git 原生的批量形态"
+    L"（有最近一次提交时 `git restore --staged .`；仓库还没有任何提交、或 Git 版本没有 restore 子命令时，"
+    L"改用同样只写索引的 `git reset -q -- .`）：在新命令窗口里显示真实命令与 Git 的完整输出，"
+    L"执行结束后窗口保留，本程序自动重读两个列表。\r\n"
+    L"它不看选中项，也就没有“排除”这一步。因此仓库里只要还有未合并（冲突）条目，"
+    L"这个按钮会整份拒绝并说明原因：冲突条目只会出现在“未暂存的更改”那一侧，而这两条命令"
+    L"会把整个索引（含那些冲突记录）一并处理，把它们收拢成最近一次提交里的那一份"
+    L"（工作区里的冲突标记与 MERGE_HEAD 却仍然留着）。"
+    L"请先按解决冲突的正常流程处理，再点“刷新”。\r\n"
+    L"这一步只写索引，绝不改写工作区：磁盘上的文件内容原样保留，也不会新写出或删除磁盘上的文件；"
+    L"绝不用 git restore 工作区、git reset --hard 或 git clean 这类会丢弃改动的命令，"
+    L"也不会执行不带路径的 git reset（只有那种形态才会改动 HEAD）。\r\n"
+    L"“内容只存在于索引里（磁盘上已没有那个文件）”的条目会在动手前弹出确认。";
 constexpr std::wstring_view kTipStageRemove =
     L"把“已暂存的更改”里选中的条目从索引撤回：在新命令窗口里显示真实命令与 Git 的完整输出，"
     L"执行结束后窗口保留，本程序自动重读两个列表。\r\n"
@@ -386,11 +409,13 @@ constexpr std::wstring_view kRepoInputPlaceholder = L"（未设置本地仓库�
 // 否则用户会以为空选择是一次“全量暂存/全量取消暂存”的快捷写法。
 constexpr std::wstring_view kNoSelectionHint =
     L"没有选中任何条目，因此没有执行任何 Git 命令。“加入暂存区 →”只处理选中的行，"
-    L"绝不会代为暂存整个仓库。请在“未暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击。";
+    L"绝不会代为暂存整个仓库。请在“未暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击；"
+    L"要把当前全部条目一次加入，用上面的“全部加入 →”（它执行 git 原生的 git add .）。";
 constexpr std::wstring_view kNoSelectionHintUnstage =
     L"没有选中任何条目，因此没有执行任何 Git 命令。“← 移出暂存区”只处理选中的行，"
     L"绝不会代为取消整个仓库的暂存（不带路径的 git reset 会连 HEAD 一起动，本程序不使用）。"
-    L"请在“已暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击。";
+    L"请在“已暂存的更改”里点选一行或多行（Ctrl/Shift 可多选）后再点击；"
+    L"要把索引里当前全部条目一次撤回，用下面的“← 全部移出”。";
 
 constexpr std::wstring_view kPickRepoTitle = L"选择本地仓库目录";
 constexpr std::wstring_view kPickGitTitle = L"选择 Git 程序（git.exe）";
@@ -561,7 +586,9 @@ void MainWindow::RegisterTooltips() {
   tooltips_.Add(repoBar_.fetchButton(), kTipFetch);
   tooltips_.Add(repoBar_.pullButton(), kTipPull);
   tooltips_.Add(repoBar_.statusButton(), kTipStatus);
+  tooltips_.Add(changesPane_.stageAddAllButton(), kTipStageAddAll);
   tooltips_.Add(changesPane_.stageAddButton(), kTipStageAdd);
+  tooltips_.Add(changesPane_.stageRemoveAllButton(), kTipStageRemoveAll);
   tooltips_.Add(changesPane_.stageRemoveButton(), kTipStageRemove);
   tooltips_.Add(changesPane_.unstagedList(), kTipUnstagedList);
   tooltips_.Add(changesPane_.stagedList(), kTipStagedList);
@@ -643,6 +670,11 @@ void MainWindow::UpdateCommandAvailability() {
       (state_.GitUsable() && state_.RepoUsable() && !tasks_.OperationInFlight()) ? TRUE : FALSE;
   ::EnableWindow(changesPane_.stageAddButton(), stagingReady);
   ::EnableWindow(changesPane_.stageRemoveButton(), stagingReady);
+  // 两个批量按钮的前提条件与逐条按钮逐字相同：它们也不要求“已选中条目”——
+  // 没有选中本来就与它们无关（范围是整份工作区/整个索引），真正的判据是“这一侧此刻有没有条目”，
+  // 那是一句该由点下去之后给出的具体说明（没条目时方案层整份拒绝，绝不发一条什么都不会做的命令）。
+  ::EnableWindow(changesPane_.stageAddAllButton(), stagingReady);
+  ::EnableWindow(changesPane_.stageRemoveAllButton(), stagingReady);
   // 子模块导航的两个按钮同理：不拿「选没选中子模块」「栈里有没有来路」去禁用按钮——
   // 灰掉让人以为功能坏了，点下去得到那句具体说明才知道下一步该做什么。
   // 只有一条硬性条件：Git 可用（导航全靠只读查询），而且这一次导航本身没有在途
@@ -866,6 +898,16 @@ void MainWindow::OnCommand(HWND window, WPARAM wParam) {
     case kIdStageRemoveButton:
       if (notifyCode == BN_CLICKED) {
         UnstageSelectedStaged(window);
+      }
+      break;
+    case kIdStageAddAllButton:
+      if (notifyCode == BN_CLICKED) {
+        StageAllUnstaged(window);
+      }
+      break;
+    case kIdStageRemoveAllButton:
+      if (notifyCode == BN_CLICKED) {
+        UnstageAllStaged(window);
       }
       break;
     case kIdEnterSubmoduleButton:
@@ -1832,6 +1874,77 @@ void MainWindow::UnstageSelectedStaged(HWND window) {
   words.confirmTitle = L"移出暂存区前请确认";
   words.cancelledHint = L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。";
   words.pathspecFilePrefix = L"gc-unstage";
+  words.rangeVerb = L"移出暂存区";
+  static_cast<void>(RunStagingPlan(window, plan, words));
+}
+
+bool MainWindow::StagingListMatchesModel(HWND window, HWND list, size_t itemCount) {
+  if (changesPane_.ListRowCount(list) == static_cast<int>(itemCount)) {
+    return true;
+  }
+  state_.SetStatusNote(
+      L"列表行数与已读取的仓库状态对不上，为避免按过期状态解释这次操作，本次没有执行任何命令。"
+      L"点“刷新”后重试。");
+  RefreshTexts(window);
+  return false;
+}
+
+void MainWindow::StageAllUnstaged(HWND window) {
+  if (!RequireWritePrerequisites(window, L"全部暂存")) {
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  // 批量按钮不要求“已选中条目”（范围是整份工作区），但列表与模型必须还是同一份：
+  // 那句“要不要先点头”（冲突、子模块）与范围里的条数都出自模型里的条目。
+  if (!StagingListMatchesModel(window, changesPane_.unstagedList(), model.unstaged.size())) {
+    return;
+  }
+
+  // 批量形态不看 Git 版本能力：命令里没有清单文件，也没有“排除项”，因此不传任何选项。
+  const git::StagingPlan plan = git::BuildStagingAddAllPlan(model.unstaged);
+
+  StagingLaunchWords words;
+  words.objectLabel = L"暂存";
+  words.buttonTitle = L"全部加入 →";
+  words.blockedTitle = L"无法全部加入暂存区";
+  words.confirmTitle = L"全部加入暂存区前请确认";
+  words.cancelledHint = L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。";
+  words.rangeVerb = L"暂存";
+  static_cast<void>(RunStagingPlan(window, plan, words));
+}
+
+void MainWindow::UnstageAllStaged(HWND window) {
+  if (!RequireWritePrerequisites(window, L"全部取消暂存")) {
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  if (!StagingListMatchesModel(window, changesPane_.stagedList(), model.staged.size())) {
+    return;
+  }
+
+  git::StagingPlanOptions planOptions;
+  // 批量形态用不到清单文件接口（pathspecFileSupported 不设置）；命令形态只看两件事：
+  // 有没有 HEAD，以及这个 Git 程序认不认识 restore 子命令（与逐条入口同一道判据）。
+  // 这两句判断即使因为外部操作而过期，两条命令都不会改动工作区，失败后紧跟的刷新会给出真实状态。
+  planOptions.repositoryHasHead = state_.Repo().detection.headResolved;
+  planOptions.restoreCommandSupported = git::SupportsRestoreCommand(state_.Git().version);
+  // 仓库里只要还有未合并（冲突）路径就整份拒绝执行：冲突条目只出现在“未暂存的更改”那一侧，
+  // 而批量命令没有排除项，会把整个索引（含那些冲突记录）一并处理。
+  // 本机实测 `git restore --staged .` 会把三份 stage 记录收拢成 HEAD 那一份，
+  // 工作区里的冲突标记与 MERGE_HEAD 却仍然留着 —— 那不是“解决冲突”，是改掉冲突现场。
+  for (const git::ChangeItem& item : model.unstaged) {
+    if (item.kind == git::ChangeKind::conflicted) {
+      planOptions.unmergedPaths.push_back(item.path);
+    }
+  }
+  const git::StagingPlan plan = git::BuildStagingUnstageAllPlan(model.staged, planOptions);
+
+  StagingLaunchWords words;
+  words.objectLabel = L"取消暂存";
+  words.buttonTitle = L"← 全部移出";
+  words.blockedTitle = L"无法全部移出暂存区";
+  words.confirmTitle = L"全部移出暂存区前请确认";
+  words.cancelledHint = L"已取消：没有打开命令窗口，也没有执行任何 Git 命令。";
   words.rangeVerb = L"移出暂存区";
   static_cast<void>(RunStagingPlan(window, plan, words));
 }

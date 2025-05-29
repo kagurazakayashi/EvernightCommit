@@ -63,11 +63,33 @@ namespace gc::git {
 //     （退出碼 1，其他合法路徑一条也沒被取消）；`git reset` 則把匹配不到的路徑當無事可做（退出碼 0）。
 //     界面都以「真實退出碼 + 之後的重讀」為準，不靠命令是否跑起來宣稱成功。
 
+// 「全部加入暫存區」/「← 全部移出」兩個批量按鈕（BuildStagingAddAllPlan /
+// BuildStagingUnstageAllPlan）的實測結論。這兩條命令的範圍是整份工作區 / 整個索引，
+// 命令裡只有一項 pathspec `.`，沒有路徑清單，也沒有「排除項」這一層：
+//   * `.` 的範圍 = 子進程的當前目錄，而命令窗口執行器把子進程工作目錄設成識別出的工作區根
+//     （既有形態，本機核對過），因此 `.` 就是整個倉庫，不是某個子目錄。
+//   * `git add .`（工作目錄 = 倉庫根）一次記下三類變化：已跟蹤文件的修改、工作區裡已經刪掉的
+//     文件、以及未跟蹤的新文件；被 .gitignore 忽略的不在內。本機實測（Git 2.55）它還會認出
+//     工作區裡的改名：把 c.txt 移成 c.moved 之後得到的是一條 `R c.txt -> c.moved`，
+//     不是「刪一條 + 加一條」。
+//   * 有 HEAD 時取消全部暫存用 `git restore --staged .`：整個索引退回 HEAD，工作區分毫未動。
+//     本機實測無提交的倉庫裡它當場失敗（`fatal: could not resolve 'HEAD'`，退出碼 128，索引未動），
+//     因此那種倉庫改用帶路徑的 `git reset -q -- .`（只寫索引，與逐條形態的無 HEAD 分支同源）。
+//   * 沒有排除項也是它唯一比逐條形態更危險的地方：倉庫裡處於未合併狀態的條目會被
+//     `git restore --staged .` 一併收攏成 HEAD 那一份（本機實測：索引裡三份 stage 記錄只剩
+//     HEAD 那一份，工作區裡的衝突標記與 MERGE_HEAD 卻仍然留著），所以批量移出遇到
+//     未合併條目時整份拒絕執行（逐條形態只拒絕被選中的那些），絕不靜默改寫衝突現場。
+//     注意衝突條目只出現在未暫存那一側（見工作區狀態解析），所以這道判斷看的是
+//     StagingPlanOptions::unmergedPaths（整份倉庫），不是只看已暫存那一列。
+// 兩個批量方向要使用者點頭的語義（未合併、子模組、內容只剩索引裡那一份）與逐條形態
+// 共用同一份文案構造，不另寫一套。
+
 // 傳遞選中條目的方式。界面據此決定要不要先寫清單臨時檔。
 enum class StagingDelivery {
-  blocked = 0,      // 不執行任何命令，由界面把原因講清楚
-  pathspecFile,     // 清單寫進 NUL 分隔的臨時檔，命令裡只出現檔名
-  inlinePathspec,   // 不支援清單接口的舊 Git：`:(literal)` 路徑直接進參數陣列
+  blocked = 0,        // 不執行任何命令，由界面把原因講清楚
+  wholeWorktree,      // 批量形態：整份工作區 / 整個索引，參數裡只有一項 `.`，不需要清單檔
+  pathspecFile,       // 清單寫進 NUL 分隔的臨時檔，命令裡只出現檔名
+  inlinePathspec,     // 不支援清單接口的舊 Git：`:(literal)` 路徑直接進參數陣列
 };
 
 // 構造方案的輸入條件。
@@ -85,6 +107,12 @@ struct StagingPlanOptions {
   // 當前 Git 程序是否有 `git restore` 子命令（2.23 起，見 SupportsRestoreCommand）。
   // 太舊的 Git 即使有 HEAD 也用 `git reset -q -- <路徑>`：兩者都只寫索引，後者到處都存在。
   bool restoreCommandSupported = true;
+  // 倉庫裡處於未合併（衝突）狀態的路徑：整份工作區都算，不只是「已暫存的更改」那一列
+  // （衝突條目只會出現在未暫存那一側）。批量取消暫存沒有路徑清單可用，命令會一併處理整個索引；
+  // 本機實測 `git restore --staged .` 會把衝突的三份 stage 記錄收攏成 HEAD 那一份，
+  // 而工作區裡的衝突標記與 MERGE_HEAD 卻仍然留著 —— 只要倉庫還有衝突就該整份拒絕。
+  // 逐條形態走自己運算的選中項判定，不用這一項。
+  std::vector<std::wstring> unmergedPaths;
 };
 
 struct StagingPlan {
@@ -97,12 +125,14 @@ struct StagingPlan {
   std::vector<std::wstring> arguments;
   std::wstring operationId;   // 執行器操作 ID（純 ASCII）
   std::wstring displayName;   // 命令窗口標題與狀態欄用的操作名
-  std::wstring commandLabel;  // 實際子命令的人讀名稱（git add / git restore --staged / git reset -q）
+  // 實際子命令的人讀名稱（git add / git restore --staged / git reset -q；批量形態寫成
+  // git add . / git restore --staged . / git reset -q -- .，讓「範圍是整份工作區」一眼可見）。
+  std::wstring commandLabel;
   std::wstring notice;        // 隨操作一直顯示的範圍說明
   std::wstring confirmationText;  // 非空 → 界面必須先讓使用者確認再執行
   std::wstring selectionSummary;  // 本次涉及的條目摘要（狀態欄用，已截斷）
-  size_t selectedItems = 0;       // 選中的條目數（未暫存或已暫存側，視方案而定）
-  size_t pathspecCount = 0;       // pathspecEntries 的條數（重命名會多一條）
+  size_t selectedItems = 0;       // 選中的條目數；批量形態是該側此刻的全部條目數
+  size_t pathspecCount = 0;       // pathspecEntries 的條數（重命名會多一條；批量形態固定為 1）
 };
 
 // Git 版本是否支援 NUL 分隔的路徑清單文件接口（2.25 起）。
@@ -125,6 +155,20 @@ struct StagingPlan {
 // selected 必須是點擊瞬間從模型拷貝的快照（按列表行序），函式本身不讀界面狀態。
 [[nodiscard]] StagingPlan BuildStagingAddPlan(const std::vector<ChangeItem>& selected,
                                               const StagingPlanOptions& options);
+
+// 主入口：由「未暫存的更改」此刻的全部條目構造一次批量 `<git add .>` 方案（「全部加入 →」）。
+// 這份輸入只用於範圍說明與必須點頭的語義提示（未合併、子模組）：命令本身不帶任何路徑，
+// 由 Git 按工作區現狀決定到底有哪些變化進索引，因此這裡的條目清單不會、也不能充當範圍邊界。
+// 該側一個條目都沒有時整份拒絕（blocked），不發一條「什麼都不會發生」的命令。
+[[nodiscard]] StagingPlan BuildStagingAddAllPlan(const std::vector<ChangeItem>& unstaged);
+
+// 主入口：由「已暫存的更改」此刻的全部條目構造一次批量「取消全部暫存」方案（「← 全部移出」）。
+// 有 HEAD 時是 `git restore --staged .`，尚無任何提交或 Git 太舊時是 `git reset -q -- .`
+// （兩者都只寫索引，工作區分毫未動）。倉庫裡任一未合併（衝突）條目（options.unmergedPaths，
+// 加上 staged 裡防禦性地可能帶 U 的那些）都讓整份方案被拒絕：批量形態沒有排除項，
+// 而這兩條命令都會把那些衝突記錄收攏成 HEAD 那一份。
+[[nodiscard]] StagingPlan BuildStagingUnstageAllPlan(const std::vector<ChangeItem>& staged,
+                                                     const StagingPlanOptions& options);
 
 // 主入口：由選中的**已暫存**條目構造一次「取消暫存」方案（把索引退回 HEAD，工作區不動）。
 // 有 HEAD 時是 `git restore --staged`，尚無任何提交時是 `git reset -q --`（兩者都只寫索引）。

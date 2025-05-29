@@ -43,6 +43,13 @@ enum ControlId : int {
 
   kIdStageAddButton = 160,
   kIdStageRemoveButton = 161,
+  // 两个方向的批量按钮，与上面两个摆在同一条竖列里：
+  //   「全部加入 →」在「加入暂存区 →」上方，「← 全部移出」在「← 移出暂存区」下方。
+  // 与逐条按钮的区别只有范围：它们执行的是 git 原生的批量命令（`git add .` /
+  // `git restore --staged .`，无 HEAD 或 Git 太旧时是 `git reset -q -- .`），
+  // 不看选中项、不需要先选中任何行，因此没有选中时的行为与逐条按钮正好相反（不是拒绝）。
+  kIdStageAddAllButton = 162,
+  kIdStageRemoveAllButton = 163,
 
   kIdCommitGroup = 170,
   kIdSummaryLabel = 171,

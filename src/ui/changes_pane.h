@@ -15,7 +15,7 @@
 namespace gc::ui {
 
 // 变更区：一个选项卡容器，两个选项卡。
-//   变化信息 —— 未暂存的更改 / 暂存方向的两个按钮 / 已暂存的更改；
+//   变化信息 —— 未暂存的更改 / 暂存方向的四个按钮 / 已暂存的更改；
 //   提交历史 —— 最近提交 / 文件变化。
 // 选项卡标签条由 SysTabControl32 画，页面内容仍是父窗口上的普通子控件：
 // 列表句柄、选中行、工具提示都不跨页搬家，主窗口在 WM_NOTIFY 里仍按 idFrom 认领通知。
@@ -32,7 +32,7 @@ public:
   // 当前选中的选项卡：0 = 变化信息，1 = 提交历史；控件还没建好时返回 0。
   [[nodiscard]] int ActiveTab() const noexcept;
 
-  // 「变化信息」页中间那一栏两个按钮竖排所需的高度。
+  // 「变化信息」页中间那一栏四个按钮竖排所需的高度（自上而下一行一个）。
   [[nodiscard]] static int ButtonStackHeight(const UiMetrics& metrics) noexcept;
   // 「提交历史」页底部那条「提交详情」带所需的高度（含分组框标题那一行）。
   [[nodiscard]] static int DetailHeight(const UiMetrics& metrics) noexcept;
@@ -87,6 +87,10 @@ public:
   [[nodiscard]] HWND tabControl() const noexcept { return tabs_; }
   [[nodiscard]] HWND stageAddButton() const noexcept { return stageAdd_; }
   [[nodiscard]] HWND stageRemoveButton() const noexcept { return stageRemove_; }
+  // 两个批量按钮：同一竖列的最上一行与最下一行，执行的是 git 原生的批量命令
+  // （`git add .` / `git restore --staged .`），不看选中项。
+  [[nodiscard]] HWND stageAddAllButton() const noexcept { return stageAddAll_; }
+  [[nodiscard]] HWND stageRemoveAllButton() const noexcept { return stageRemoveAll_; }
   // 两个更改列表本身：主窗口只取句柄挂说明性工具提示，不直接操作条目内容。
   [[nodiscard]] HWND unstagedList() const noexcept { return unstagedList_; }
   [[nodiscard]] HWND stagedList() const noexcept { return stagedList_; }
@@ -155,8 +159,10 @@ private:
   HWND stagedGroup_ = nullptr;
   HWND stagedList_ = nullptr;
   HWND stagedHint_ = nullptr;
+  HWND stageAddAll_ = nullptr;
   HWND stageAdd_ = nullptr;
   HWND stageRemove_ = nullptr;
+  HWND stageRemoveAll_ = nullptr;
   HWND historyGroup_ = nullptr;
   HWND historyList_ = nullptr;
   HWND historyHint_ = nullptr;
