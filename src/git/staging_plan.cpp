@@ -24,6 +24,13 @@ constexpr std::wstring_view kPathspecFileOption = L"--pathspec-from-file=";
 constexpr std::wstring_view kPathspecNulOption = L"--pathspec-file-nul";
 constexpr std::wstring_view kOperationId = L"stage-add";
 constexpr std::wstring_view kUnstageOperationId = L"stage-unstage";
+// 批量形态的操作 ID：同样是纯 ASCII、长度在 kMaxOperationIdLength 以内。
+// 与逐条形态分开：两者会在操作历史里各成一条，也便于命令窗口标题区别人与范围。
+constexpr std::wstring_view kAddAllOperationId = L"stage-add-all";
+constexpr std::wstring_view kUnstageAllOperationId = L"stage-unstage-all";
+// 批量形態的那一項 pathspec：`.` 的範圍 = 子進程當前目錄，而命令窗口執行器把子進程工作目錄
+// 設成識別出的工作區根，因此它就是整個倉庫（詳見頭部說明）。
+constexpr std::wstring_view kWholeWorktreePathspec = L".";
 
 // inline 形態的自設餘量：執行器另有「64 個參數」與「8000 字元行長」兩道硬性檢查，
 // 這裡先收緊，使「放不下」在構造階段就换来一句明确說明，而不是等執行器拒收後才報錯。
@@ -367,6 +374,43 @@ void ApplyDelivery(StagingPlan& plan, const std::vector<std::wstring>& entries,
       std::to_wstring(kMaxInlineCommandChars) + L" 字符）。\n" + shape.tooManyTail;
 }
 
+// 批量形態的參數陣列：全局只讀選項 + 子命令 + 子命令自己的選項 + 一項 pathspec `.`。
+// 與逐條形態共用同一組全局選項，兩者之間只差「範圍」。
+std::vector<std::wstring> BuildWholeWorktreeArguments(
+    std::wstring_view subcommand, const std::vector<std::wstring>& subcommandFlags) {
+  std::vector<std::wstring> arguments;
+  for (const std::wstring_view prefix : kGlobalPrefix) {
+    arguments.push_back(std::wstring(prefix));
+  }
+  arguments.push_back(std::wstring(subcommand));
+  for (const std::wstring& flag : subcommandFlags) {
+    arguments.push_back(flag);
+  }
+  arguments.push_back(std::wstring(kWholeWorktreePathspec));
+  return arguments;
+}
+
+// 批量形態必須說清「`.` 為什麼等於整個倉庫」：範圍由子進程的工作目錄決定，
+// 而命令窗口執行器把工作目錄設成工作區根（識別出來的那個倉庫根）。少這一句，
+// 用戶對著 `.` 只能猜它是不是「當前子目錄」。
+constexpr std::wstring_view kWholeWorktreeScopeNote =
+    L"范围是整份工作区：命令窗口把 Git 的工作目录设在仓库根，因此命令最后那一项 . "
+    L"就是整个仓库，而不是某个子目录。";
+
+// 批量形態「不分選中與未選中」這一件事寫在範圍說明的最前面：逐條按鈕講的是「只處理選中的」，
+// 兩個批量按鈕正好相反，不准讓人按慣性以為它們也只看選中的行列。
+[[nodiscard]] std::wstring BuildWholeSideScopeText(std::wstring_view sideLabel, size_t itemCount) {
+  return L"本次不分选中与未选中：这条命令处理“" + std::wstring(sideLabel) + L"”里当前全部 " +
+         std::to_wstring(itemCount) + L" 项。";
+}
+
+// 取消暫存時為什麼不用 git restore --staged：兩種場合共用同一套判斷與同一種替代形態。
+[[nodiscard]] std::wstring UnstageAllResetReason(const StagingPlanOptions& options) {
+  return options.repositoryHasHead
+             ? L"当前 Git 版本没有 git restore 子命令（2.23 起才有）"
+             : L"本仓库还没有任何提交，没有可退回的 HEAD 版本，git restore --staged 会直接失败（本机实测）";
+}
+
 }  // namespace
 
 namespace {
@@ -618,6 +662,152 @@ StagingPlan BuildStagingUnstagePlan(const std::vector<ChangeItem>& selected,
         JoinWith(confirmParts, L"\n\n") +
         L"\n\n是否仍在命令窗口里执行这条 " + std::wstring(shape.commandLabel) +
             L"？（取消不会改动仓库。）";
+  }
+  return plan;
+}
+
+StagingPlan BuildStagingAddAllPlan(const std::vector<ChangeItem>& unstaged) {
+  StagingPlan plan;
+  plan.selectedItems = unstaged.size();
+
+  // 这一侧一个条目都没有时绝不发命令：`git add .` 此时会正常退出（退出码 0）却什么都没改，
+  // 命令窗口里那一趟只会让人以为「做了点什么」。宁可给一句「现在没有可加入的内容」。
+  if (unstaged.empty()) {
+    plan.blockedReason =
+        L"“未暂存的更改”里现在没有条目，因此没有执行任何命令：工作区里没有可加入暂存区的变化。"
+        L"请先点“刷新”确认工作区现状，再有针对性地重试。";
+    return plan;
+  }
+
+  plan.delivery = StagingDelivery::wholeWorktree;
+  plan.operationId = std::wstring(kAddAllOperationId);
+  plan.displayName = L"全部加入暂存区 " + std::to_wstring(unstaged.size()) + L" 项";
+  plan.commandLabel = L"git add .";
+  plan.arguments = BuildWholeWorktreeArguments(kAddSubcommand, {});
+  plan.pathspecCount = 1;  // 命令里只有一项 pathspec：`.`
+  plan.selectionSummary = L"“未暂存的更改”当前全部 " + std::to_wstring(unstaged.size()) + L" 项";
+
+  // 范围说明必须把「这一条命令到底会动什么」一次讲完：三类变化、被忽略的文件不在内、
+  // 子模块只记指针。逐条按钮那句「只处理选中的行」在这里正好相反，不能照搬。
+  plan.notice = BuildWholeSideScopeText(L"未暂存的更改", unstaged.size()) +
+                std::wstring(kWholeWorktreeScopeNote) +
+                L"命令是 git 原生的批量形态 git add .：它会记下三类变化——已跟踪文件的修改、"
+                L"工作区里已经删掉的文件、以及未跟踪的新文件（含工作区里的改名，"
+                L"Git 会记成一条重命名）；被 .gitignore 忽略的文件与目录不会被加进来。"
+                L"子模块在父仓库里只有一条 gitlink 记录，git add 不会进入子模块暂存它内部的任何文件。"
+                L"命令窗口里可以看到实际执行的命令与 Git 的完整输出。要只暂存其中几项，"
+                L"请改用“加入暂存区 →”。";
+
+  // 未合并（冲突）条目会被 `git add .` 记为已解决，子模块只记指针：都与普通改动不同，
+  // 而且批量形态没有排除项，所以必须让用户在这一步点头（文案与逐条形态共用同一套构造）。
+  std::vector<std::wstring> confirmParts;
+  const std::wstring conflictNotice = BuildConflictNotice(unstaged);
+  if (!conflictNotice.empty()) {
+    confirmParts.push_back(conflictNotice);
+  }
+  const std::wstring submoduleNotice = BuildSubmoduleNotice(unstaged);
+  if (!submoduleNotice.empty()) {
+    confirmParts.push_back(submoduleNotice);
+  }
+  if (!confirmParts.empty()) {
+    plan.confirmationText =
+        JoinWith(confirmParts, L"\n\n") +
+        L"\n\n这条命令没有排除项，会一并处理整份工作区。是否仍在命令窗口里执行这条 git add .？"
+        L"（取消不会改动仓库。）";
+  }
+  return plan;
+}
+
+StagingPlan BuildStagingUnstageAllPlan(const std::vector<ChangeItem>& staged,
+                                       const StagingPlanOptions& options) {
+  StagingPlan plan;
+  plan.selectedItems = staged.size();
+
+  if (staged.empty()) {
+    plan.blockedReason =
+        L"“已暂存的更改”里现在没有条目，因此没有执行任何命令：索引里没有相对最近一次提交的暂存内容。"
+        L"请先点“刷新”确认工作区现状，再有针对性地重试。";
+    return plan;
+  }
+
+  // 冲突条目只会出现在未暂存那一侧（见工作区状态解析），所以整份仓库的冲突路径由调用方
+  // 从模型里取出来放进 options.unmergedPaths；这里再补上 staged 里可能带 U 的那些
+  // （防御性：条目来源如果将来变成两侧都给，这道判断仍然成立），去重后保持原顺序。
+  std::vector<std::wstring> unmerged;
+  const auto noteUnmerged = [&unmerged](const std::wstring& path) {
+    if (std::find(unmerged.begin(), unmerged.end(), path) == unmerged.end()) {
+      unmerged.push_back(path);
+    }
+  };
+  for (const std::wstring& path : options.unmergedPaths) {
+    noteUnmerged(path);
+  }
+  for (const ChangeItem& item : staged) {
+    if (IsUnmergedStatusCode(item.statusCode)) {
+      noteUnmerged(item.path);
+    }
+  }
+  if (!unmerged.empty()) {
+    plan.blockedReason = L"仓库里有 " + std::to_wstring(unmerged.size()) +
+                         L" 个路径处于未合并（冲突）状态，因此批量移出暂存区没有执行任何命令：\n" +
+                         JoinWith(unmerged, L"\n") +
+                         L"\n这条批量命令不给排除项，会把整个索引一并处理；实测它把这些冲突记录"
+                         L"收拢成最近一次提交里的那一份，工作区里的冲突标记与 MERGE_HEAD 却仍然留着。\n"
+                         L"请先按解决冲突的正常流程处理（在工作区把内容改好后用“加入暂存区”记下解决结果，"
+                         L"或明确地中止合并），再点“刷新”。本程序不会用任何命令替你把冲突“收拾掉”。";
+    return plan;
+  }
+
+  const bool useRestore = options.repositoryHasHead && options.restoreCommandSupported;
+  plan.delivery = StagingDelivery::wholeWorktree;
+  plan.operationId = std::wstring(kUnstageAllOperationId);
+  plan.displayName = L"全部移出暂存区 " + std::to_wstring(staged.size()) + L" 项";
+  plan.pathspecCount = 1;  // 命令里只有一项 pathspec：`.`
+  plan.selectionSummary = L"“已暂存的更改”当前全部 " + std::to_wstring(staged.size()) + L" 项";
+  if (useRestore) {
+    // 有 HEAD、且这个 Git 认识 restore 子命令：命令就是 `git restore --staged .`。
+    plan.commandLabel = L"git restore --staged .";
+    plan.arguments = BuildWholeWorktreeArguments(kRestoreSubcommand, {L"--staged"});
+  } else {
+    // 换用 reset 的两种理由由 UnstageAllResetReason 一句话说全，界面与这里共用那一句。
+    plan.commandLabel = L"git reset -q -- .";
+    plan.arguments = BuildWholeWorktreeArguments(kResetSubcommand, {L"-q"});
+  }
+
+  // 范围说明与「全部加入 →」同一套写法：先说清「不分选中与未选中」，再说 `.` 为什么等于整个仓库，
+  // 最后把这一条命令到底会动什么讲完（只写索引、绝不碰工作区、绝不碰 HEAD）。
+  plan.notice = BuildWholeSideScopeText(L"已暂存的更改", staged.size()) +
+                std::wstring(kWholeWorktreeScopeNote) + L"命令是 git 原生的批量形态 " +
+                plan.commandLabel + L"：";
+  if (useRestore) {
+    plan.notice += L"把整个索引退回最近一次提交的版本。";
+  } else {
+    plan.notice += UnstageAllResetReason(options) + L"，因此改用这种只写索引的形态。";
+  }
+  plan.notice +=
+      L"这一步只写索引，绝不改写工作区：磁盘上的文件一个字节都不动，也不会新写出或删除磁盘上的任何文件；"
+      L"只有不带路径的 git reset 才会改动 HEAD，本程序绝不使用那种形态，"
+      L"也绝不用 --hard、git checkout -- 或 git clean 这类会丢弃工作区改动的命令。"
+      L"命令窗口里可以看到实际执行的命令与 Git 的完整输出。要只移出其中几项，"
+      L"请改用“← 移出暂存区”。";
+
+  // 两类条目在动手前必须先点头（文案与逐条形态共用同一套构造）：内容只剩索引里那一份的
+  // （退回 HEAD 等于把那份内容删掉），以及子模块指针（父仓库只退回 gitlink，子模块内部分毫未动）。
+  // 批量形态没有排除项，所以只能把后果说清、由用户决定还做不做这一次。
+  std::vector<std::wstring> confirmParts;
+  const std::wstring indexOnlyNotice = BuildIndexOnlyContentNotice(staged);
+  if (!indexOnlyNotice.empty()) {
+    confirmParts.push_back(indexOnlyNotice);
+  }
+  const std::wstring submoduleNotice = BuildUnstageSubmoduleNotice(staged);
+  if (!submoduleNotice.empty()) {
+    confirmParts.push_back(submoduleNotice);
+  }
+  if (!confirmParts.empty()) {
+    plan.confirmationText =
+        JoinWith(confirmParts, L"\n\n") +
+        L"\n\n这条命令没有排除项，会把整个索引一并处理。是否仍在命令窗口里执行这条 " +
+        plan.commandLabel + L"？（取消不会改动仓库。）";
   }
   return plan;
 }

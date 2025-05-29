@@ -135,9 +135,20 @@ private:
   // 选择范围在点击瞬间按行号核对后拷成快照，之后的刷新/迟到结果都不会改变本次执行的范围。
   void StageSelectedUnstaged(HWND window);
   void UnstageSelectedStaged(HWND window);
+  // 两个批量入口（「全部加入 →」/「← 全部移出」）：它们不看选中项，执行的是 git 原生的批量命令
+  // （git add . / git restore --staged .，无 HEAD 或 Git 太旧时是 git reset -q -- .）。
+  // 「要不要先点头」（冲突、子模块、内容只剩索引里那一份）与逐条入口共用同一套文案；
+  // 批量移出另外多一道硬拒绝：仓库里只要还有未合并（冲突）路径就整份不执行（见 .cpp 里的实测注解）。
+  void StageAllUnstaged(HWND window);
+  void UnstageAllStaged(HWND window);
+  // 批量入口的前提核对：列表当前显示的行数必须与刚读回来的模型一致。批量命令的范围不取自列表，
+  // 但「要不要先点头」与范围说明里的数目都取自模型里的条目（冲突、子模块），列表停在上一份内容上时
+  // 那几句话就可能是错的；对不上时写好状态栏并返回 false（不发任何命令）。
+  [[nodiscard]] bool StagingListMatchesModel(HWND window, HWND list, size_t itemCount);
 
-  // 一次「按选中条目执行的暂存方向操作」的界面措辞与形态参数：两个方向只差文案与清单文件名前缀，
-  // 共同的流程（拒绝说明、确认框、清单写出、命令窗口启动）只实现一遍，避免两处各自漂移。
+  // 一次暂存方向操作的界面措辞与形态参数：逐条与批量共四个入口只差文案与清单文件名前缀，
+  // 共同的流程（拒绝说明、确认框、清单写出、命令窗口启动）只实现一遍，避免各处各自漂移。
+  // （批量形态不写清单文件，pathspecFilePrefix 那一项走不到，留空即可。）
   struct StagingLaunchWords {
     std::wstring_view objectLabel;        // 「暂存」/「取消暂存」：前提核对与行数不符时的说明用
     std::wstring_view buttonTitle;        // 行核对失败时提醒用户重新点击的按钮名

@@ -14,6 +14,7 @@ add_executable(gc_tests
   commit_changes_fixture_tests.cpp
   commit_detail_fixture_tests.cpp
   commit_form_session_tests.cpp
+  commit_form_time_tests.cpp
   commit_history_fixture_tests.cpp
   commit_history_tests.cpp
   commit_identity_tests.cpp

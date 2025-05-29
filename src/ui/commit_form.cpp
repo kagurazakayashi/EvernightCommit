@@ -47,6 +47,11 @@ void SetDate(HWND picker, const SYSTEMTIME& time) {
   ::SendMessageW(picker, DTM_SETSYSTEMTIME, GDT_VALID, reinterpret_cast<LPARAM>(&time));
 }
 
+// 读回控件内部的完整 SYSTEMTIME（含显示不出来的那一半）。
+bool ReadFullDate(HWND picker, SYSTEMTIME& out) {
+  return ::SendMessageW(picker, DTM_GETSYSTEMTIME, 0, reinterpret_cast<LPARAM>(&out)) == GDT_VALID;
+}
+
 // 日期与时间的可选界：与 git/commit_date 的年份界同一个来源。
 // 不设这两块控件时，用户能敲到 1601 或 30827 这类 Git 根本收不下的年份；
 // 控件里就拦掉，比提交时再拒绝友好得多。
@@ -161,14 +166,21 @@ void CommitForm::SetTimes(const SYSTEMTIME& authorTime, const SYSTEMTIME& commit
 }
 
 void CommitForm::MirrorCommitterTime() {
-  SYSTEMTIME authorValue{};
-  if (::SendMessageW(authorDate_, DTM_GETSYSTEMTIME, 0, reinterpret_cast<LPARAM>(&authorValue)) !=
-      GDT_VALID) {
+  SYSTEMTIME authorDate{};
+  SYSTEMTIME authorClock{};
+  if (!ReadFullDate(authorDate_, authorDate) || !ReadFullDate(authorClock_, authorClock)) {
     return;  // 作者那半边读不出值（本程序没用 DTS_SHOWNONE，正常不会走到这里）：不动提交者。
   }
+  // 与 AuthorWallTime 同一套拼法：日期取前者、时分秒取后者。日期控件内部也存着一份
+  // 用户看不见的时分秒（建立控件时的那一刻），整份抄过去就会把它当成作者挑的时间。
+  SYSTEMTIME mirrored = authorDate;
+  mirrored.wHour = authorClock.wHour;
+  mirrored.wMinute = authorClock.wMinute;
+  mirrored.wSecond = authorClock.wSecond;
+  mirrored.wMilliseconds = authorClock.wMilliseconds;
   const ProgrammaticTimeWrite guard(settingTimes_);
-  SetDate(committerDate_, authorValue);
-  SetDate(committerClock_, authorValue);
+  SetDate(committerDate_, mirrored);
+  SetDate(committerClock_, mirrored);
 }
 
 git::CivilTime CommitForm::AuthorWallTime() const {

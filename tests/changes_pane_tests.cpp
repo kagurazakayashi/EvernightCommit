@@ -258,3 +258,89 @@ GC_TEST(changes_pane_staging_page_hides_the_detail_band) {
 
   ::DestroyWindow(host);
 }
+
+// 断言信息要带上真实窗口文本，而测试框架的说明参数是窄字符串（现有用例也各自备一份这个小转换）。
+[[nodiscard]] std::string Utf8(const std::wstring& text) {
+  if (text.empty()) {
+    return {};
+  }
+  const int size = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                         nullptr, 0, nullptr, nullptr);
+  std::string narrow(static_cast<size_t>(size), '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), narrow.data(), size,
+                        nullptr, nullptr);
+  return narrow;
+}
+
+// 中间那一栏现在是四个按钮一条竖列，自上而下：「全部加入 →」、「加入暂存区 →」、
+// 「← 移出暂存区」、「← 全部移出」——两个批量按钮就是把逐条那一对向上下各撑开一格。
+// 断言对象是四个按钮的真实窗口文本与屏幕矩形：纯逻辑用例碰不到「按钮到底摆在哪一行」，
+// 而「批量的在上面/下面」正是这一栏唯一的功能边界（点错一行就会执行另一种范围的命令）。
+GC_TEST(changes_pane_layout_places_four_staging_buttons_in_order) {
+  const HWND host = MakeHost();
+  GC_REQUIRE(host != nullptr, "测试宿主窗口创建失败，无法验证四个暂存按钮的摆放");
+  ChangesPane pane;
+  pane.Create(host);
+  const UiMetrics metrics;
+
+  const HWND buttons[] = {pane.stageAddAllButton(), pane.stageAddButton(), pane.stageRemoveButton(),
+                          pane.stageRemoveAllButton()};
+  const wchar_t* const labels[] = {L"全部加入 →", L"加入暂存区 →", L"← 移出暂存区", L"← 全部移出"};
+  for (int i = 0; i < 4; ++i) {
+    GC_REQUIRE(buttons[i] != nullptr, "变更区少了暂存方向的按钮，用例前提已变化");
+    std::wstring text(::GetWindowTextLengthW(buttons[i]), L'\0');
+    ::GetWindowTextW(buttons[i], text.data(), static_cast<int>(text.size()) + 1);
+    GC_CHECK_MESSAGE(text == labels[i],
+                     "按钮文字与它执行的命令必须对得上，实际是：" + Utf8(text));
+  }
+
+  const StagingColumns columns = StagingOf();
+  pane.LayoutStaging(columns, metrics);
+
+  RECT rects[4]{};
+  for (int i = 0; i < 4; ++i) {
+    ::GetWindowRect(buttons[i], &rects[i]);
+    // 屏幕矩形换算成宿主窗口的客户区坐标，才能与 ComputeStagingColumns 给出的栏位对比。
+    ::MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<LPPOINT>(&rects[i]), 2);
+    GC_CHECK_MESSAGE(::IsWindowVisible(buttons[i]) != FALSE, "「变化信息」那一页要露出四个按钮");
+    GC_CHECK_MESSAGE(rects[i].right - rects[i].left > 0 && rects[i].bottom - rects[i].top > 0,
+                     "按钮要有真实面积，否则用户看到的是压扁的一条");
+    GC_CHECK_MESSAGE(rects[i].bottom - rects[i].top == metrics.ControlHeight(),
+                     "每个按钮各占一行，行高必须一致");
+  }
+
+  // 自上而下的次序与行距：四个按钮一行一个，中间不许多出一格空行。
+  const int step = metrics.ControlHeight() + metrics.RowGap();
+  for (int i = 1; i < 4; ++i) {
+    GC_CHECK_MESSAGE(rects[i].top > rects[i - 1].top,
+                     "四个按钮的上下次序被摆错了：「全部加入 →」必须在最上、「← 全部移出」在最下");
+    GC_CHECK(rects[i].top - rects[i - 1].top == step);
+  }
+
+  // 横向都落在箭头那一栏里，且中线一致：批量按钮文字更短、宽度各按自己的文字量算，
+  // 但一栏按钮左右错开就不是一条竖列了（允许 1 像素的整数除法误差）。
+  const int center = rects[0].left + (rects[0].right - rects[0].left) / 2;
+  for (int i = 0; i < 4; ++i) {
+    GC_CHECK(rects[i].left >= columns.arrows.left && rects[i].right <= columns.arrows.right);
+    const int own = rects[i].left + (rects[i].right - rects[i].left) / 2;
+    GC_CHECK(center > own ? center - own <= 1 : own - center <= 1);
+  }
+
+  // 整列高度按四行算：窗口缩到最小时够不够高，判据就是这一个函数。
+  GC_CHECK(ChangesPane::ButtonStackHeight(metrics) ==
+           4 * metrics.ControlHeight() + 3 * metrics.RowGap());
+
+  // 切到「提交历史」：四个按钮一起藏起来，不许盖在详情带上。
+  pane.LayoutHistory(HistoryWithDetailBand(metrics), metrics);
+  for (const HWND button : buttons) {
+    GC_CHECK_MESSAGE(::IsWindowVisible(button) == FALSE, "「提交历史」那一页不许露出暂存按钮");
+  }
+
+  // 切回来仍要能重新摆回那条竖列（不是藏了就搬不回来）。
+  pane.LayoutStaging(columns, metrics);
+  for (const HWND button : buttons) {
+    GC_CHECK(::IsWindowVisible(button) != FALSE);
+  }
+
+  ::DestroyWindow(host);
+}
