@@ -27,7 +27,7 @@ constexpr wchar_t kBoundExe[] = L"C:\\Program Files\\Git\\bin\\git.exe";
 // 界面此刻的仓库与 Git 程序**故意**与绑定值不同：接线若从界面重猜，断言就会失败。
 OperationContext MakeContext(std::wstring currentRoot) {
   OperationContext ctx;
-  ctx.notifyWindow = nullptr;
+  ctx.notify = nullptr;
   ctx.gitExecutable = L"C:\\other\\git.exe";
   ctx.detection = RepoDetection{};
   ctx.detection.root = std::move(currentRoot);

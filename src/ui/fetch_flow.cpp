@@ -4,7 +4,6 @@
 #include <utility>
 
 #include "git/repository.h"
-#include "platform/windows/remote_choice_dialog.h"
 #include "ui/commands.h"
 
 namespace gc::ui {
@@ -15,7 +14,7 @@ void FetchFlow::Start(OperationHost& host, const OperationContext& ctx) {
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kFetchProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kFetchProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kFetchProbeCompleted, std::move(request),
                   [](const platform::FetchProbeRequest& pending) {
                     return platform::RunFetchProbeLoad(pending);
                   });
@@ -44,14 +43,17 @@ void FetchFlow::OnProbeCompleted(OperationHost& host, const OperationContext& ct
 
   if (plan.state == git::FetchPlanState::chooseRemote) {
     // 分支配置定不下目标：把既有远端一个个摆出来，目标（名字与 URL）必须看得见才谈得上「不猜」。
-    platform::RemoteChoiceSpec spec;
-    spec.title = L"选择 fetch 的远端";
-    spec.label = plan.explanation;
+    platform::SingleChoiceRequest request;
+    request.title = L"选择 fetch 的远端";
+    request.label = plan.explanation;
     for (const git::FetchRemoteEntry& entry : plan.candidates) {
-      spec.items.push_back({entry.name, entry.fetchUrl});
+      request.items.push_back({entry.name, entry.fetchUrl});
     }
-    const RemoteChoiceLayoutHints hints{/*labelRows=*/3, /*contentWidth=*/420, /*listHeight=*/140};
-    const std::optional<size_t> picked = host.PromptRemoteChoice(std::move(spec), hints);
+    request.okText = L"抓取选中的远端";
+    request.hints.labelRows = 3;
+    request.hints.contentWidth = 420;
+    request.hints.listHeight = 140;
+    const std::optional<size_t> picked = host.PromptSingleChoice(std::move(request));
     if (!picked.has_value() || *picked >= plan.candidates.size()) {
       host.SetStatus(L"已取消：没有打开命令窗口，也没有接触任何远端或改动仓库。");
       return;

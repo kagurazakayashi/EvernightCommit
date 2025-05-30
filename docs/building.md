@@ -14,7 +14,7 @@
 | Windows SDK | Windows 10 SDK（`GetDpiForWindow`、`AdjustWindowRectExForDpi` 需 10.0.14393+；本工程按 `_WIN32_WINNT=0x0A00` 编译） | 10.0.26100.0 |
 | CMake | 3.28（`CMakePresets` schema 8；C++20 支持自 3.12 的 `cxx_std_20` 起即有）。`vs2026-x64` 预设另需 **4.2 及以上**：“Visual Studio 18 2026” 生成器自 CMake 4.2 提供 | VS 2026 自带 4.3.1-msvc1；MSYS2 4.4.2（无 Visual Studio 生成器） |
 | 生成器 | Visual Studio 生成器，或 Ninja（需自带 `cl`/`rc` 的开发者环境） | VS 2026 + Ninja 1.13 |
-| 目标平台 | Windows x64（仅支持 x64，非 Windows 会在配置阶段直接报错） | — |
+| 目标平台 | Windows x64（仅支持 x64，非 Windows 会在配置阶段直接报错；共用业务逻辑层可在其他系统按第 5 节单独做编译核对） | — |
 
 > 注意：MSYS2 自带的 `cmake` 不提供 Visual Studio 生成器，且其 `link.exe` 会遮蔽 MSVC 链接器。
 > 请使用 Visual Studio 安装目录下的 CMake，或独立的 CMake 发行版。
@@ -124,7 +124,43 @@ cmake --preset vs2026-x64 '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:
 找不到窗口，请在反馈时附上状态栏原文与操作目录里 `spec.txt` 的内容（路径见状态栏
 提示），以便定位是哪一个环节。
 
-## 5. 实测基线说明
+## 5. 共用层的边界核对（非 Windows 环境）
+
+程序本身仍然只能在 Windows 构建：根 `CMakeLists.txt` 在非 Win32 环境配置阶段直接报错。
+但 `src/git/`、`src/app/` 与 `src/platform/` 里那份平台无关契约不该再需要任何 Windows 头，
+这一点可以在 Linux/macOS 上用编译器验证，比读代码可靠——**它只是边界核对，不是跨平台交付**：
+`std::wstring` 在两侧宽度不同（Windows UTF-16、Linux 32 位），所以通过与否不代表行为等价。
+
+在项目根目录执行（需要 GCC 或 Clang，不需要 Qt/wxWidgets）：
+
+```sh
+# 1) 共用业务逻辑层逐个语法编译（36 个 .cpp，应当一条错误都不出）
+for f in src/git/*.cpp src/app/*.cpp; do g++ -std=c++20 -fsyntax-only -Isrc "$f" || echo "FAIL $f"; done
+
+# 2) 契约层 + 九个操作控制器的头文件 + ui/operation_host.h：
+#    这份文件不参与 Windows 构建，专门用来让「拆分有没有被改回去」变成编译器能回答的问题
+g++ -std=c++20 -fsyntax-only -Isrc tests/portable_boundary_check.cpp
+
+# 3) 文本核对：这三条 grep 都应当没有任何命中（注释里指向实现位置不算）
+grep -rn '#include <windows.h>' src/git src/app src/platform/*.h
+grep -rn '#include "platform/windows' src/git src/app src/platform/*.h src/ui/operation_host.h
+grep -rnE '\b(HWND|HFONT|HINSTANCE|WPARAM|LPARAM|WM_APP)\b' src/git src/app src/platform/*.h src/ui/operation_host.h
+# 前两条必须零命中；第三条只允许命中注释（// 之后的说明文字），出现在代码里即为越界。
+```
+
+第 2、3 条同时是本轮拆分的验收口径：控制器与主窗口之间那条窄接口
+（`src/ui/operation_host.h`）不含原生句柄，Win32 侧的解释工作集中在
+`src/platform/windows/notification.cpp` 与 `src/ui/main_window.cpp` 的
+`ToRemoteChoiceSpec`/`ToIdentityPromptSpec` 两处。
+
+在 Linux 上还可以把纯逻辑用例跑起来核对行为没被拆坏，但那需要自备一个不含
+Windows 分组表的运行器（`tests/support/test_main.cpp` 包含 `platform/windows/` 头，
+只为 Windows 构建），而且**它不计入任何回归结论**——Windows 侧的完整分组
+（`pure` / `windows` / `git-readonly` / `git-mutating`）仍须按第 2 节用
+`ctest --preset …` 在 Windows 上执行。
+
+
+## 6. 实测基线说明
 
 本工程多轮开发中的“实测”结论来自同一台 Windows 11 x64 开发机、UTF-8 代码页形态，
 不同时期 PATH 上的 Git 分别为 **2.56.0.windows.1**（早期暂存/提交/撤回相关核验）与

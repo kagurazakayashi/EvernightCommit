@@ -115,3 +115,9 @@ build\ninja-x64\bin\Debug\gc_tests.exe --group git-mutating
 - 任何测试都不指向真实远端与用户仓库；开发过程中若需临时验证 Git 行为，
   一律在会话自有的临时目录里进行，且不得执行 `git commit`/`git push`
   （与本项目对开发会话的一贯约束一致：提交/推送始终由项目所有者本人决定并执行）。
+
+- 非 Windows 环境只有两类可申报的结果：`building.md` 第 5 节那条共用层编译核对，以及另配
+  运行器后跑起来的纯逻辑用例（验收分组表在 `tests/support/test_main.cpp`，它包含 Win32 头，
+  因此按原样在 Linux 上编译不了）。两者都不属于 `pure`/`windows`/`git-readonly`/`git-mutating`
+  四个分组，不能代替 Windows 侧的回归，也不能用来宣称 Linux 可用：`std::wstring` 在两侧
+  宽度不同（Windows 是 UTF-16，Linux 是 32 位单元），同一条断言并不是同一个含义。

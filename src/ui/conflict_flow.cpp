@@ -35,7 +35,7 @@ void ConflictFlow::RequestProbe(OperationHost& host, const OperationContext& ctx
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kConflictProbeTimeoutMs;
-  probeWorker_.Request(ctx.notifyWindow, kConflictProbeCompleted, std::move(request),
+  probeWorker_.Request(ctx.notify, kConflictProbeCompleted, std::move(request),
                        [](const platform::ConflictProbeRequest& pending) {
                          return platform::RunConflictProbeLoad(pending);
                        });
@@ -106,7 +106,7 @@ void ConflictFlow::RequestRecheck(OperationHost& host, const OperationContext& c
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kConflictProbeTimeoutMs;
-  recheckWorker_.Request(ctx.notifyWindow, kConflictRecheckCompleted, std::move(request),
+  recheckWorker_.Request(ctx.notify, kConflictRecheckCompleted, std::move(request),
                          [](const platform::ConflictProbeRequest& pending) {
                            return platform::RunConflictProbeLoad(pending);
                          });
@@ -196,7 +196,7 @@ void ConflictFlow::BeginFailedReport(OperationHost& host, const OperationContext
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kConflictProbeTimeoutMs;
-  aftermathWorker_.Request(ctx.notifyWindow, kConflictAftermathCompleted, std::move(request),
+  aftermathWorker_.Request(ctx.notify, kConflictAftermathCompleted, std::move(request),
                            [](const platform::ConflictProbeRequest& pending) {
                              return platform::RunConflictProbeLoad(pending);
                            });

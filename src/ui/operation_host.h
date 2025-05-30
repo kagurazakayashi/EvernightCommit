@@ -1,7 +1,5 @@
 #pragma once
 
-#include <windows.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -19,10 +17,16 @@
 #include "git/repository.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
-#include "platform/windows/identity_prompt.h"
-#include "platform/windows/remote_choice_dialog.h"
+#include "platform/dialogs.h"
+#include "platform/notification.h"
 
 namespace gc::ui {
+
+// 本文件是操作控制器与界面之间的那条窄接口，属于**共用契约**：它不包含任何 Windows 头文件，
+// 也不出现 HWND、HFONT、WM_APP 这类原生类型。当前只有 Win32 过渡实现（ui/main_window.*）实现它，
+// 后续统一的 wxWidgets 界面在同一份契约上另写实现，控制器与 git/ app/ 的代码不必再改。
+// 例外说明：CommandLaunchOptions 里的路径与文案仍是 std::wstring（UTF-16 语义）。字符串类型
+// 的统一收口是另一件事，见 docs/architecture.md「已知待办差异」，本步不一次改完。
 
 // 一次命令窗口操作的发起参数。查看类操作（viewKind 有值）与写操作在“退出码算什么”上
 // 语义不同，所以这里带的不是文案，而是判定所需的类别。
@@ -76,7 +80,7 @@ struct CommandLaunchOptions {
 // 可变窗口状态：这样「预检回来时界面早已换了仓库」一定能被 detection.root 对比出来，
 // 复核的两份事实也都确定属于同一个落点。通知分派时由主窗口现场采集（每个异步事件一份）。
 struct OperationContext {
-  HWND notifyWindow = nullptr;      // 后台完成通知的投递目标（主窗口）
+  platform::NotificationTarget notify = nullptr;  // 后台完成通知的投递目标（主窗口/主事件处理器）
   std::wstring gitExecutable;       // 已验证可用的 git.exe
   git::RepoDetection detection;     // 仓库识别结果：工作区根、Git 目录、HEAD 状态、分支……
   bool repoUsable = false;          // 此刻仍有可用工作区（识别失败/裸仓库时控制器据此作废旧结果）
@@ -91,20 +95,9 @@ struct OperationContext {
   std::size_t stagedItemCount = 0;  // 界面当前「已暂存的更改」条目数（点击瞬间摘要留档用）
 };
 
-// 「要点列表让用户单选」那次弹窗的布局参数（字号、边距这些一律由主窗口按 DPI 度量填，
-// 控制器只给出内容与行数）。
-struct RemoteChoiceLayoutHints {
-  int labelRows = 3;       // 「为什么要在这里选」那句说明留几行
-  int contentWidth = 420;  // 对话框内容宽度（DIP）
-  int listHeight = 140;    // 列表区高度（DIP）
-};
-
-// 「问一个字串」那次弹窗的布局参数，与单选列表框同一套规矩：几何由主窗口按 DPI 填。
-struct TextInputLayoutHints {
-  int labelRows = 3;       // 输入框上方那句说明的行数
-  int noteRows = 2;        // 框内校验说明预留的行数
-  int contentWidth = 420;  // 对话框内容宽度（DIP）
-};
+// 「要点列表让用户单选」与「问一个字串」两类对话框的请求/结果都在 platform/dialogs.h，
+// 本层只负责把它们交给界面实现；几何提示（DIP 行高、内容宽度）由实现按当前 DPI 换算，
+// 控制器只给出内容与行数，绝不接触字体句柄、模板 ID 或原生窗口参数。
 
 // 操作控制器需要的界面服务：呈现确认与结果、启动命令窗口操作、请求刷新。
 // 由主窗口实现；控制器不持有 HWND，也不得经这里回头读任何可变窗口状态——
@@ -134,14 +127,14 @@ public:
   // 风险提示，命令一个字都不加——按钮文字由调用方给出，两种形态都要点明哪个按钮是什么。
   virtual bool RiskConfirm(const std::wstring& title, const std::wstring& mainInstruction,
                            const std::wstring& yesButton, const std::wstring& body) = 0;
-  // 单选列表框（fetch 选远端、pull 选整合方式共用）：返回选中下标；取消返回空。
-  virtual std::optional<size_t> PromptRemoteChoice(platform::RemoteChoiceSpec spec,
-                                                   const RemoteChoiceLayoutHints& hints) = 0;
-  // 单行文本输入框（与「合作者」那一套模态输入同一份实现，几何同样由主窗口按 DPI 填）：
+  // 单选列表框（fetch 选远端、pull 选整合方式、首次推送选目标与历史菜单共用这一条）：
+  // 返回选中下标；取消（含关掉窗口）返回空。请求里的内容与行数由控制器给，
+  // 字体与 DPI 换算在实现那一侧，本层不认识原生对话框参数。
+  virtual std::optional<size_t> PromptSingleChoice(platform::SingleChoiceRequest request) = 0;
+  // 单行文本输入框（与「合作者」那一套模态输入同一份实现，几何同样由界面实现按 DPI 填）：
   // 确定返回输入值，取消返回空。validate 只在框内做纯形态提示——这里绝不能同步等子进程，
   // 权威裁定由控制器在输入之后于后台问回来（例如首次推送的 git check-ref-format）。
-  virtual std::optional<std::wstring> PromptForText(platform::IdentityPromptSpec spec,
-                                                    const TextInputLayoutHints& hints) = 0;
+  virtual std::optional<std::wstring> PromptForText(platform::TextPromptRequest request) = 0;
 
   // 占用命令窗口单槽并启动一次操作；false = 没跑起来（原因已被执行路径写进状态栏）。
   virtual bool LaunchCommandWindow(const git::CommandWindowOperation& operation,

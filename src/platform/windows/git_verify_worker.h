@@ -1,6 +1,6 @@
 #pragma once
 
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 #include "platform/windows/git_toolchain.h"
 
 namespace gc::platform {

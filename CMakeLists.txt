@@ -2,12 +2,17 @@ cmake_minimum_required(VERSION 3.28)
 
 project(EvernightCommit
   VERSION 0.1.0
-  DESCRIPTION "Windows 原生 Git 提交工具（Win32 + Common Controls）"
+  DESCRIPTION "Git 图形操作工具：共用业务逻辑 + 平台适配层（当前界面是 Win32 过渡实现）"
   LANGUAGES CXX RC)
 
+# 本轮拆分只做到「共用层不再需要 Windows 头」，Windows 界面与平台实现仍在原地。
+# 整个可执行目标因此还只能在 Windows 构建；共用层能不能在别的系统编译，
+# 用 docs/building.md 里那条 g++ 语法核对命令验证，不在此处放行未验证的构建。
 if(NOT WIN32)
   message(FATAL_ERROR
-    "本工程只支持 Windows：需要 MSVC 与 Windows SDK 提供的 Win32 GUI API。")
+    "本程序当前只提供 Windows 构建：需要 MSVC 与 Windows SDK 提供的 Win32 GUI 与平台实现。"
+    "src/git、src/app 与 src/platform 的契约头已不依赖 Windows 头，"
+    "可在 Linux 上按 docs/building.md 的命令单独做编译核对。")
 endif()
 
 # x64 判定：64 位指针只是必要条件，ARM64 同样为 8 字节。MSVC 下以编译器
@@ -120,6 +125,13 @@ add_library(gc_core STATIC
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
 
+# ---------- 平台无关的能力契约（只有头文件，不含任何原生句柄） ----------
+# src/platform/*.h：后台任务代次、完成通知投递目标、本机时区换算、对话框内容。
+# 这一层只有声明与模板，具体的系统调用留在 windows/；wxWidgets 界面将来接同一份契约。
+add_library(gc_platform_contract INTERFACE)
+target_include_directories(gc_platform_contract INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gc_platform_contract INTERFACE gc_build_settings gc_core)
+
 # ---------- Windows 平台能力 ----------
 add_library(gc_platform STATIC
   src/platform/windows/author_config.cpp
@@ -138,6 +150,7 @@ add_library(gc_platform STATIC
   src/platform/windows/identity_prompt.cpp
   src/platform/windows/local_time.cpp
   src/platform/windows/locale_text.cpp
+  src/platform/windows/notification.cpp
   src/platform/windows/operation_history_store.cpp
   src/platform/windows/path_picker.cpp
   src/platform/windows/pathspec_file.cpp
@@ -155,31 +168,39 @@ add_library(gc_platform STATIC
   src/platform/windows/win_path.cpp
   src/platform/windows/workspace_status.cpp)
 target_include_directories(gc_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-# 平台层在 Win32 能力之上复用 git/ 的纯逻辑（PATH 搜索、版本输出判定）。
-target_link_libraries(gc_platform PUBLIC gc_build_settings gc_core comctl32 ole32 shell32 uuid)
+# 平台层在 Win32 能力之上复用 git/ 的纯逻辑（PATH 搜索、版本输出判定），
+# 并实现 src/platform/ 里那份与操作系统无关的契约。
+target_link_libraries(gc_platform PUBLIC gc_build_settings gc_platform_contract
+  comctl32 ole32 shell32 uuid)
 
-# ---------- Win32 界面 ----------
+# ---------- 界面 ----------
+# 两类文件分开列，边界就是这次拆分的结果：
+#   * 操作控制器（flow_*、upstream_write_flow）只认 ui/operation_host.h 那条窄接口和
+#     src/platform/ 的契约，将来 wxWidgets 界面接着用；
+#   * Win32 过渡实现（main_window、控件、布局、消息号表）是本轮要被 wxWidgets 替换掉的部分。
 add_library(gc_ui STATIC
-  src/ui/action_bar.cpp
-  src/ui/changes_pane.cpp
+  # ---- 操作控制器（跨平台，随统一界面保留） ----
   src/ui/commit_flow.cpp
-  src/ui/commit_form.cpp
-  src/ui/controls.cpp
   src/ui/conflict_flow.cpp
   src/ui/fetch_flow.cpp
-  src/ui/layout.cpp
-  src/ui/main_window.cpp
   src/ui/pull_flow.cpp
   src/ui/push_flow.cpp
-  src/ui/repo_bar.cpp
   src/ui/restore_flow.cpp
-  src/ui/splitter.cpp
   src/ui/submodule_flow.cpp
   src/ui/undo_flow.cpp
-  src/ui/ui_metrics.cpp
-  src/ui/upstream_write_flow.cpp)
+  src/ui/upstream_write_flow.cpp
+  # ---- Win32 过渡实现（只服务当前的 Windows 界面，待 wxWidgets 取代） ----
+  src/ui/action_bar.cpp
+  src/ui/changes_pane.cpp
+  src/ui/commit_form.cpp
+  src/ui/controls.cpp
+  src/ui/layout.cpp
+  src/ui/main_window.cpp
+  src/ui/repo_bar.cpp
+  src/ui/splitter.cpp
+  src/ui/ui_metrics.cpp)
 target_include_directories(gc_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(gc_ui PUBLIC gc_core gc_platform
+target_link_libraries(gc_ui PUBLIC gc_core gc_platform_contract gc_platform
   comctl32 gdi32 user32 uxtheme)
 target_compile_definitions(gc_ui PRIVATE
   GC_VERSION_STRING="${PROJECT_VERSION}"

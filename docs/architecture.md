@@ -12,16 +12,57 @@
   操作编排：写操作准入门（哪个流程可以开始、其余流程以何种顺序拒绝、拒绝文案
   原文）与各操作的终端结论文字都在这里；操作历史的记录数据模型与按记录恢复的
   准入判定也在这里（这一层不碰文件系统与时钟）。
+- `src/platform/`（只有头文件）是**平台无关的能力契约**：进程之外的系统能力——
+  后台任务与任务代次、完成通知的投递目标、本机时区换算、程序自绘对话框的内容——
+  在这里只声明数据与语义，不含任何原生句柄。目录里的 `git_task_worker.h` 是唯一的
+  例外：代次作废与工作线程这套规则与操作系统无关，实现也在这一层。
 - `src/platform/windows/` 承载进程创建、环境块装配、Unicode/路径处理、管道、
-  临时文件、时钟与其他原生集成。
-- `src/ui/` 承载 Win32 控件、事件、布局与用户确认。每个编排级 Git 操作
-  （提交/撤回/fetch/pull/推送/冲突处理/按记录恢复）有独立的操作控制器，持有自己的阶段、
-  后台工作器、已确认方案与复核数据；控制器只通过窄接口 `ui/operation_host.h` 与不可变上下文
-  快照接触主窗口，流程中途绝不读取主窗口的可变状态。
+  临时文件、时钟与其他原生集成，并**实现**上面那份契约里由系统负责的部分。
+- `src/ui/` 分成两半：九个操作控制器与 `operation_host.h` 那条窄接口属于共用界面逻辑，
+  只依赖 `app/`、`git/` 与 `src/platform/` 契约；窗口过程、控件、布局、消息号表是
+  **Win32 过渡实现**，将来由统一的 wxWidgets 界面取代（见「过渡期的 Win32 界面」）。
 - `tests/` 是纯逻辑测试与明确标注的隔离 Windows/Git 集成测试。
 - `resources/` 是图标、版本资源、manifest 等应用资源。
 
 平台 I/O 不进入 Git 规划与解析代码；业务流转不进入控件布局代码。
+
+## 依赖方向（本轮拆分后的实际状态）
+
+```
+src/git/ ──►（无依赖，纯 std）
+src/app/ ──► src/git/
+src/platform/*.h（契约） ──► src/git/、src/app/（只取数据模型）
+src/platform/windows/ ──► 契约 + src/git/ + src/app/     （Win32 实现，含 subprocess/utf_text/win_path 等）
+src/ui/*flow*、operation_host.h（控制器与窄接口） ──► 契约 + src/app/ + src/git/
+src/ui/ 其余（main_window、控件、布局、commands.h） ──► 上面全部 + <windows.h>
+```
+
+三条可核对的硬边界（`docs/building.md` 给了 Linux 侧的一条命令化检查）：
+
+1. `src/git/`、`src/app/`、`src/platform/*.h` 里没有任何 `#include <windows.h>`，
+   也没有对 `platform/windows/` 头文件的包含（注释里指向实现位置不算）。
+2. `src/ui/operation_host.h` 不出现 `HWND`/`HFONT`/`WM_APP`/对话框模板 ID；
+   原生句柄只在 `src/ui/main_window.*` 与 `src/platform/windows/` 内部出现，
+   `src/platform/windows/notification.cpp` 是全工程唯一把 `NotificationTarget`
+   解释成 `HWND` 的地方。
+3. 共用的 git/app 层不反向依赖界面：`gc_core` 不链接 `gc_platform`、`gc_ui`。
+
+## src/platform/（平台无关契约，只有头文件）
+
+| 文件 | 提供什么 | Windows 实现落在哪 |
+| --- | --- | --- |
+| `notification.h` | `NotificationTarget`（不透明投递目标）、`CompletionMessageId`（完成通道号）、`PostCompletionNotification()` | `windows/notification.cpp`（`PostMessageW`，wParam 带序号） |
+| `git_task_worker.h` | `StopFlag`/`StopRequested` 与 `GitTaskWorker<请求,结果>`：工作线程执行、按提交序号作废旧结果、`BeginStop`+`Join` 两阶段收尾 | 全部就在这份头文件里（std 线程与互斥），只有通知投递走 `notification.h` |
+| `dialogs.h` | `ChoiceItem`、`SingleChoiceRequest`、`TextPromptRequest`、`DialogLayoutHints`：单选列表框与单行输入框要问什么（取消由调用方拿到空答复表示，不设结果结构体），以及 DIP 行高与内容宽度 | `windows/identity_prompt.*`、`windows/remote_choice_dialog.*`（模板、字体、DPI 像素换算），由 `ui/main_window.*` 的 `ToRemoteChoiceSpec`/`ToIdentityPromptSpec` 翻译 |
+| `local_time.h` | `LocalInstant`、`ResolveLocalWallTime`、`CurrentLocalInstant`、`LocalTimeZoneName`、`FormatLocalEpochSeconds` | `windows/local_time.cpp`（`SYSTEMTIME`/`TIME_ZONE_INFORMATION`）；`windows/local_time.h` 另留两个 `SYSTEMTIME` 换算，只给 Win32 控件用 |
+
+契约里的 `PostCompletionNotification` 与那几句时间换算是**声明在共用层、实现在平台库**的
+自由函数：一个构建里只有一份实现，链接期就能发现漏实现，比虚表接口更省一层间接。
+后续要收敛但本轮**没有**动的能力（仍在 `platform/windows/` 里被界面直接调用）：
+子进程执行器、环境块装配、路径与 Git 目录探测、临时文件写出、剪贴板、
+`persistent_store`/`operation_history_store` 的读锁与原子发布、目录与可执行文件选择框。
+它们目前只被 Win32 过渡界面和平台库内部消费，等 wxWidgets 界面落地时再按同一模式提出来，
+现在先套一层抽象只会多出没有第二个实现来验证的空壳。
 
 ## src/git/（纯逻辑）
 
@@ -118,10 +159,18 @@ unreadable），Git 目录读不动或任一痕迹读不回来时整轮 `readabl
 「看不见」当成「没有流程」。
 
 界面辅助：`path_picker`、`remote_choice_dialog`（模态单选，也复用为 pull 的
-合并/变基选择）、`identity_prompt`（合作者输入框，校验不过不关闭）、
-`git_task_worker` / `git_verify_worker`（通用后台任务与核实控制器）。
+合并/变基选择与操作历史菜单；它收的是 `platform::RemoteChoiceSpec`——含 `HFONT` 与像素布局，
+只有 `ui/main_window.*` 会从共用契约 `platform::SingleChoiceRequest` 翻译过来）、
+`identity_prompt`（合作者输入框，校验不过不关闭，同一套翻译规矩）、`notification.cpp`
+（`PostCompletionNotification` 的 Win32 实现）、`clipboard`、`local_time.h` 里那两个
+`SYSTEMTIME` 换算。`git_verify_worker` 是 Git --version 验证的后台别名，
+`platform::git_task_worker` 的代次机制在共用层，这里只剩 `GitExeVerification` 这个结果类型。
 
 ## src/ui/
+
+本目录两类文件要分开读：九个操作控制器加 `operation_host.h` 那条窄接口是随统一界面保留的
+共用部分，其余（`main_window`、控件、布局、度量、消息号表）是 Win32 过渡实现，
+逐文件名单见下面的「过渡期的 Win32 界面」。
 
 `main_window`（窗口与消息循环）、`repo_bar`、`changes_pane`（一个选项卡控件两页：`变化信息`
 是未暂存/箭头列/已暂存三栏，`提交历史` 是最近提交 | 分隔条 | 文件变化两栏，同一页底部再压一条横跨
@@ -146,6 +195,48 @@ unreadable），Git 目录读不动或任一痕迹读不回来时整轮 `readabl
 操作历史走同样那条收尾：启动当场落那条在途行、终态用同一个 ID 改写，关闭时把还没结案的那一条
 补成「结果未知」再由那次保存落盘——只写记录，不中断仍在命令窗口里跑的 Git；
 它不属于七个被编排的 Git 操作，不占用命令窗口槽位。控制器通过 `operation_host` 窄接口与主窗口交互；导航用的换绑定与表单收交分别是 `NavigateRepository` 与 `ClearFormForNavigation` / `ApplyHeldFormForNavigation`，仍走既有的识别→绑定→重读链路，不另开第二套。
+
+## 过渡期的 Win32 界面
+
+统一界面这一步还没开始，当前的 Windows 界面就是**过渡实现**，本轮把它和随迁移保留的部分
+在目录与构建目标上分开列出（`CMakeLists.txt` 的 `gc_ui` 按两类分组注释）：
+
+| 归类 | 文件 | 迁移时的处置 |
+| --- | --- | --- |
+| 随统一界面保留（共用） | `ui/operation_host.h`、`ui/commit_flow.*`、`undo_flow.*`、`fetch_flow.*`、`pull_flow.*`、`push_flow.*`、`conflict_flow.*`、`restore_flow.*`、`submodule_flow.*`、`upstream_write_flow.*` | 继续消费 `app/` 状态与 `src/platform/` 契约；需要处理的是下面两条遗留项 |
+| Win32 过渡实现（将被 wxWidgets 取代） | `ui/main_window.*`、`controls.*`、`layout.*`、`ui_metrics.*`、`splitter.*`、`repo_bar.*`、`action_bar.*`、`commit_form.*`、`changes_pane.*`、`commands.h`、`resource_ids.h`、`src/main.cpp` | 窗口过程、控件、DPI 度量与消息号表都在这一档；`commands.h`/`resource_ids.h` 顶部有同样的标记 |
+
+`tests/support/fake_operation_host.h` 实现的是共用那条窄接口，因此控制器的接线测试
+在未来界面上原样可用。
+
+## 已知待办差异（本轮刻意没做完的部分）
+
+按影响大小排列，都不改变当前 Windows 行为，只是迁移到 wxWidgets/Linux 之前必须先处理的口子：
+
+1. **字符串编码边界**：`git/`、`app/` 与窄接口普遍使用 `std::wstring`，在 Windows 上是
+   UTF-16，在 Linux 上 `wchar_t` 是 32 位——同一段代码在两侧并不等价，代理对长度、
+   `commit_detail` 的截断上限那类判定尤其明显。本轮不一次性改字符类型，
+   先按 AGENTS.md 的要求把边界写清楚：Linux 落地时必须换成显式的 UTF-8 或 UTF-16 单元类型，
+   转换失败一律拒绝，不许用替代字符冒充原值。
+2. **完成通道还是 Win32 号**：控制器提交后台任务时传的是 `ui/commands.h` 里的 `WM_APP+n`
+   （`CompletionMessageId` 已能原样承载）。迁移时要换成与消息循环无关的通道枚举，
+   由各平台界面把通道映射到 wx 事件；`CommandWindowRunner` 那条 `kCompletionMessage`
+   与命令窗口观察线程也一并跟着走。
+3. **控制器仍直呼 `platform/windows/*_probe.h`**：这些头文件本轮已经不含任何 Windows 类型，
+   请求/结果/依赖注入都是纯数据，`CollectXxx` 那套编排本来就能脱离 Win32 测试；
+   留在 windows 目录的原因是 `RunXxxLoad` 里绑定了本平台的子进程执行器。
+   下一步应把「请求 + 结果 + 依赖」提到 `src/platform/`，只把执行器装配留在各平台。
+   同样情况见 `commit_message_file`、`pathspec_file`、`win_path`（`undo_flow.cpp` 用它读流程痕迹）。
+4. **主窗口直接使唤平台设施**：`main_window.h` 里持久化存储、目录选择框、剪贴板、
+   Git 工具链验证都是 Win32 实现的直接调用。这些接口目前只被过渡界面消费，
+   等 wx 界面出现时再按 `dialogs.h` 那样提出契约，不在此刻凭空造抽象。
+5. **构建与交付**：根 `CMakeLists.txt` 仍然只放行 Windows 构建（非 Win32 直接在配置阶段
+   报错，报错文本已说明共用层可以单独做编译核对）。Linux 的 wxWidgets 依赖获取、
+   链接方式与运行库部署要求都还没验证，不宣称支持。
+6. **进程与终端**：命令窗口执行器依赖 `cmd /k` 与 `CreateProcessW`；Linux 侧要换成
+   用户自己的终端模拟器，同时保留「用户触发的操作能看见真实命令与输出」这条产品行为。
+   交互式 Git 的终端、hooks、SSH、凭据助手与编辑器环境沿用现有分类名单，
+   PATH 分隔符（`;` 对 `:`）与盘符联动项那套规则需要按平台分叉。
 
 ## tests/
 

@@ -65,7 +65,7 @@ void SubmoduleFlow::Enter(CommitOperationHost& host, const OperationContext& ctx
   request.flags = item.submodule;
   request.itemIsSubmodule = true;
   request.timeoutMilliseconds = kSubmoduleProbeTimeoutMs;
-  entryWorker_.Request(ctx.notifyWindow, kSubmoduleEntryProbeCompleted, std::move(request),
+  entryWorker_.Request(ctx.notify, kSubmoduleEntryProbeCompleted, std::move(request),
                        [](const platform::SubmoduleEntryRequest& pending) {
                          return platform::RunSubmoduleEntryLoad(pending);
                        });
@@ -281,7 +281,7 @@ void SubmoduleFlow::StartPointerProbe(CommitOperationHost& host, const Operation
   request.submoduleDirectory =
       git::JoinWorktreeFilePath(ctx.detection.root, hop.submodulePath);
   request.timeoutMilliseconds = kSubmoduleProbeTimeoutMs;
-  pointerWorker_.Request(ctx.notifyWindow, kSubmodulePointerProbeCompleted, std::move(request),
+  pointerWorker_.Request(ctx.notify, kSubmodulePointerProbeCompleted, std::move(request),
                          [](const platform::SubmodulePointerRequest& pending) {
                            return platform::RunSubmodulePointerLoad(pending);
                          });

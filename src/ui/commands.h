@@ -6,6 +6,14 @@
 
 namespace gc::ui {
 
+// ⚠ Win32 过渡实现专用（见 docs/architecture.md「过渡期的 Win32 界面」）。
+// 本文件是 Windows 消息循环的私有编号表：控件 ID、WM_APP 完成通知号、SetTimer 号与
+// 各项超时/防抖时长。它不属于共用契约：统一的 wxWidgets 界面用自己的事件类型与定时器，
+// 不需要这里的任何一个数字。共用层（git/ app/ ui/operation_host.h platform/ 契约）
+// 一律不许包含本文件。
+// 其中「超时与防抖的取值」是业务承诺（哪一类查询允许等多久、超时后怎么结案），
+// 迁移界面时要把这些数值原样带过去，只有编号形态需要换掉。
+
 // 子控件命令 ID。仅用于 WM_COMMAND / WM_NOTIFY 路由，值本身无外部含义。
 enum ControlId : int {
   kIdNone = 0,

@@ -6,8 +6,6 @@
 
 #include "git/commit_history.h"
 #include "git/repository.h"
-#include "platform/windows/identity_prompt.h"
-#include "platform/windows/remote_choice_dialog.h"
 #include "ui/commands.h"
 
 namespace gc::ui {
@@ -31,7 +29,7 @@ void PushFlow::Start(OperationHost& host, const OperationContext& ctx) {
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPushProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kPushProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPushProbeCompleted, std::move(request),
                   [](const platform::PushProbeRequest& pending) {
                     return platform::RunPushProbeLoad(pending);
                   });
@@ -142,7 +140,7 @@ void PushFlow::RequestExecutionRecheck(OperationHost& host, const OperationConte
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPushProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kPushProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPushProbeCompleted, std::move(request),
                   [](const platform::PushProbeRequest& pending) {
                     return platform::RunPushProbeLoad(pending);
                   });
@@ -186,7 +184,7 @@ void PushFlow::StartFirstPushTargets(OperationHost& host, const OperationContext
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kFirstPushTargetsTimeoutMs;
-  targetsWorker_.Request(ctx.notifyWindow, kFirstPushTargetsCompleted, std::move(request),
+  targetsWorker_.Request(ctx.notify, kFirstPushTargetsCompleted, std::move(request),
                          [](const platform::FirstPushTargetsRequest& pending) {
                            return platform::RunFirstPushTargetsLoad(pending);
                          });
@@ -212,22 +210,24 @@ void PushFlow::HandleFirstPushTargets(OperationHost& host, const OperationContex
 
   // 第一步：选目标远端。分支与那份完整提交 ID 先摆在说明里——「推哪一份」必须先看得见，
   // 才谈得上「推到哪里」。
-  platform::RemoteChoiceSpec spec;
-  spec.title = L"首次推送：选择目标远端";
-  spec.label =
+  platform::SingleChoiceRequest request;
+  request.title = L"首次推送：选择目标远端";
+  request.label =
       L"分支 " + firstPushBase_.branchName + L" 还没有上游。这次要把 " +
       git::ShortObjectId(firstPushBase_.headObjectId) + L"（完整 ID " + firstPushBase_.headObjectId +
       L"）首次推送到下面某个远端。列表里每个远端后面的地址都是 Git 自己展开的实际发布地址"
       L"（pushurl 优先、insteadOf 改写已叠好）。取消不会执行任何命令、不会接触远端、不会写配置。";
-  spec.okText = L"推到这个远端";
-  spec.cancelText = L"取消";
-  spec.emptyItemDetail = L"（这个远端没能问出发布地址）";
-  spec.needSelectionHint = L"先在列表里点选一个远端，再按确定。（取消不会执行任何命令）";
+  request.okText = L"推到这个远端";
+  request.cancelText = L"取消";
+  request.emptyItemDetail = L"（这个远端没能问出发布地址）";
+  request.needSelectionHint = L"先在列表里点选一个远端，再按确定。（取消不会执行任何命令）";
   for (const git::FirstPushRemoteCandidate& candidate : selectable) {
-    spec.items.push_back({candidate.name, candidate.urlsDisplay()});
+    request.items.push_back({candidate.name, candidate.urlsDisplay()});
   }
-  const RemoteChoiceLayoutHints hints{/*labelRows=*/4, /*contentWidth=*/460, /*listHeight=*/160};
-  const std::optional<size_t> picked = host.PromptRemoteChoice(std::move(spec), hints);
+  request.hints.labelRows = 4;
+  request.hints.contentWidth = 460;
+  request.hints.listHeight = 160;
+  const std::optional<size_t> picked = host.PromptSingleChoice(std::move(request));
   if (!picked.has_value() || *picked >= selectable.size()) {
     Abandon(host, L"已取消：没有选目标远端，因此没有打开命令窗口、没有接触任何远端、没有写任何配置。");
     return;
@@ -236,7 +236,7 @@ void PushFlow::HandleFirstPushTargets(OperationHost& host, const OperationContex
 
   // 第二步：目标分支名。建议值是当前分支名，但**不替用户按下确定**——
   // 这个名字最终由 Git 的 check-ref-format 裁定，输入框里只做纯形态提示（不能在这里等子进程）。
-  platform::IdentityPromptSpec namePrompt;
+  platform::TextPromptRequest namePrompt;
   namePrompt.title = L"首次推送：目标分支名";
   namePrompt.label = L"要把这条分支推到远端「" + firstPushRemoteName_ +
                      L"」的哪个分支名？默认用本地分支名，改成别的也可以。"
@@ -244,11 +244,13 @@ void PushFlow::HandleFirstPushTargets(OperationHost& host, const OperationContex
   namePrompt.initialValue = firstPushBase_.branchName;
   namePrompt.okText = L"就用这个分支名";
   namePrompt.cancelText = L"取消";
+  namePrompt.hints.labelRows = 3;
+  namePrompt.hints.noteRows = 2;
+  namePrompt.hints.contentWidth = 460;
   namePrompt.validate = [](const std::wstring& value) {
     return git::DescribeFirstPushBranchNameProblem(value);
   };
-  const TextInputLayoutHints nameHints{/*labelRows=*/3, /*noteRows=*/2, /*contentWidth=*/460};
-  const std::optional<std::wstring> entered = host.PromptForText(std::move(namePrompt), nameHints);
+  const std::optional<std::wstring> entered = host.PromptForText(std::move(namePrompt));
   if (!entered.has_value()) {
     Abandon(host, L"已取消：没有输入目标分支名，因此没有打开命令窗口、没有接触任何远端、"
                   L"没有写任何配置。");
@@ -258,23 +260,24 @@ void PushFlow::HandleFirstPushTargets(OperationHost& host, const OperationContex
 
   // 第三步：要不要设上游。「推送」与「写本地配置」是两件事，这里就问清楚，
   // 后面确认框里也会分别列出。
-  // 选项数在本地记一份：spec 是按值交给对话框的（移动之后不能再用它的 items 做上界判定）。
+  // 选项数在本地记一份：请求是按值交给对话框的（移动之后不能再用它的 items 做上界判定）。
   constexpr size_t kUpstreamChoiceCount = 2;
-  platform::RemoteChoiceSpec upstreamSpec;
-  upstreamSpec.title = L"首次推送：要不要设置上游";
-  upstreamSpec.label = L"推送到远端「" + firstPushRemoteName_ + L"」的 " +
-                       git::ShortObjectId(firstPushBase_.headObjectId) + L" → refs/heads/" +
-                       firstPushBranchName_ +
-                       L"。这条分支现在没有上游：要不要在推送成功之后，把上游写进这个仓库的本地配置？";
-  upstreamSpec.okText = L"按选中的做";
-  upstreamSpec.cancelText = L"取消";
-  upstreamSpec.items.push_back({std::wstring(kUpstreamChoiceOnlyPush),
-                                std::wstring(kUpstreamChoiceOnlyPushDetail)});
-  upstreamSpec.items.push_back({std::wstring(kUpstreamChoiceSetUpstream),
-                                std::wstring(kUpstreamChoiceSetUpstreamDetail)});
-  const RemoteChoiceLayoutHints upstreamHints{/*labelRows=*/3, /*contentWidth=*/460, /*listHeight=*/90};
-  const std::optional<size_t> upstreamChoice =
-      host.PromptRemoteChoice(std::move(upstreamSpec), upstreamHints);
+  platform::SingleChoiceRequest upstreamRequest;
+  upstreamRequest.title = L"首次推送：要不要设置上游";
+  upstreamRequest.label = L"推送到远端「" + firstPushRemoteName_ + L"」的 " +
+                          git::ShortObjectId(firstPushBase_.headObjectId) + L" → refs/heads/" +
+                          firstPushBranchName_ +
+                          L"。这条分支现在没有上游：要不要在推送成功之后，把上游写进这个仓库的本地配置？";
+  upstreamRequest.okText = L"按选中的做";
+  upstreamRequest.cancelText = L"取消";
+  upstreamRequest.items.push_back({std::wstring(kUpstreamChoiceOnlyPush),
+                                   std::wstring(kUpstreamChoiceOnlyPushDetail)});
+  upstreamRequest.items.push_back({std::wstring(kUpstreamChoiceSetUpstream),
+                                   std::wstring(kUpstreamChoiceSetUpstreamDetail)});
+  upstreamRequest.hints.labelRows = 3;
+  upstreamRequest.hints.contentWidth = 460;
+  upstreamRequest.hints.listHeight = 90;
+  const std::optional<size_t> upstreamChoice = host.PromptSingleChoice(std::move(upstreamRequest));
   if (!upstreamChoice.has_value() || *upstreamChoice >= kUpstreamChoiceCount) {
     Abandon(host, L"已取消：没有打开命令窗口、没有接触任何远端、没有写任何配置。");
     return;
@@ -296,7 +299,7 @@ void PushFlow::StartFirstPushProbe(OperationHost& host, const OperationContext& 
   request.remoteName = firstPushRemoteName_;
   request.targetBranchRef = git::BuildFirstPushTargetBranchRef(firstPushBranchName_);
   request.timeoutMilliseconds = kFirstPushProbeTimeoutMs;
-  firstWorker_.Request(ctx.notifyWindow, kFirstPushProbeCompleted, std::move(request),
+  firstWorker_.Request(ctx.notify, kFirstPushProbeCompleted, std::move(request),
                        [](const platform::FirstPushProbeRequest& pending) {
                          return platform::RunFirstPushProbeLoad(pending);
                        });
@@ -435,7 +438,7 @@ void PushFlow::BeginVerification(OperationHost& host, const OperationContext& ct
   request.pushCommandSucceeded = commandSucceeded;
   request.commandConclusion = std::wstring(conclusion);
   request.timeoutMilliseconds = kPushVerifyTimeoutMs;
-  verifyWorker_.Request(ctx.notifyWindow, kPushVerifyCompleted, std::move(request),
+  verifyWorker_.Request(ctx.notify, kPushVerifyCompleted, std::move(request),
                         [](const platform::PushVerifyRequest& pending) {
                           return platform::RunPushVerifyLoad(pending);
                         });
@@ -505,7 +508,7 @@ void PushFlow::StartUpstreamRecheck(OperationHost& host, const OperationContext&
                                ? ctx.detection.absoluteGitDir
                                : std::wstring();
   request.timeoutMilliseconds = kPushProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kPushProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPushProbeCompleted, std::move(request),
                   [](const platform::PushProbeRequest& pending) {
                     return platform::RunPushProbeLoad(pending);
                   });

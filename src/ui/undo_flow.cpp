@@ -25,7 +25,7 @@ void UndoFlow::Start(OperationHost& host, const OperationContext& ctx) {
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kUndoProbeTimeoutMs;
-  probeWorker_.Request(ctx.notifyWindow, kUndoProbeCompleted, std::move(request),
+  probeWorker_.Request(ctx.notify, kUndoProbeCompleted, std::move(request),
                        [](const platform::UndoProbeRequest& pending) {
                          return platform::RunUndoProbeLoad(pending);
                        });
@@ -90,7 +90,7 @@ void UndoFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ctx,
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kUndoRecheckTimeoutMs;
-  recheckWorker_.Request(ctx.notifyWindow, kUndoRecheckCompleted, std::move(request),
+  recheckWorker_.Request(ctx.notify, kUndoRecheckCompleted, std::move(request),
                          [](const platform::UndoProbeRequest& pending) {
                            return platform::CaptureUndoHeadSnapshot(
                                pending.exePath, pending.repositoryDirectory, pending.timeoutMilliseconds);

@@ -1,7 +1,5 @@
 #pragma once
 
-#include <windows.h>
-
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -12,9 +10,18 @@
 #include <thread>
 #include <utility>
 
+#include "platform/notification.h"
+
 namespace gc::platform {
 
-// 后台任务的停止信号。程序退出时 WM_DESTROY 要等工作线程收尾：线程在“下一条查询”
+// ---------- 后台任务与任务代次（平台无关） ----------
+//
+// 本文件原来在 src/platform/windows/ 下，唯一与 Win32 有关的一行是 PostMessageW。
+// 「序号作废 + 工作线程 + 两阶段停止」这套代次规则与操作系统无关，因此整份提到共用层：
+// 投递方式改为调用 platform::PostCompletionNotification，由当前平台的实现负责
+// （Windows 用 WM_APP，后续 wxWidgets 用自定义事件），业务语义一个字没变。
+
+// 后台任务的停止信号。程序退出时界面收尾要等工作线程收尾：线程在“下一条查询”
 // 之前看到这一位被置起，就把剩下的查询按“没有执行”收场，不再逐个启动子进程把各自的
 // 超时耗完。共享的是同一份标志：worker 持有并翻牌，请求携带引用，任务体逐条核对。
 // 空指针（测试夹具直接调用 Collect*/Load* 的场合）表示“无人喊停”，行为与从前一致。
@@ -24,11 +31,11 @@ using StopFlag = std::shared_ptr<std::atomic<bool>>;
   return flag != nullptr && flag->load(std::memory_order_relaxed);
 }
 
-// 后台一次性任务控制器：任务在工作线程执行，GUI 线程不等待、不冻结。
+// 后台一次性任务控制器：任务在工作线程执行，界面线程不等待、不冻结。
 // 每次提交携带递增序号，只有仍属于“最新一次提交”的结果会被 FetchLatest 取回，
 // 较慢完成的旧结果自动作废，不会覆盖用户之后的选择。
-// body 只在工作线程调用，结果也只在锁保护下写入；UI 线程收到通知后再读取，
-// 完成通知通过 PostMessageW 发出（wParam=序号），不直接触碰任何控件。
+// body 只在工作线程调用，结果也只在锁保护下写入；界面线程收到通知后再读取，
+// 完成通知按 (投递目标, 通道号, 序号) 发出，不直接触碰任何控件。
 template <typename TaskRequest, typename TaskResult>
 class GitTaskWorker {
 public:
@@ -40,10 +47,11 @@ public:
   ~GitTaskWorker() { Shutdown(); }
 
   // 提交一次任务；工作线程惰性启动。
-  void Request(HWND notifyWindow, UINT completionMessage, TaskRequest request, Body body) {
+  void Request(NotificationTarget notifyTarget, CompletionMessageId completionMessage,
+               TaskRequest request, Body body) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_ || !body) {
-      return;  // 窗口已销毁，不再接受新任务。
+      return;  // 界面已结束，不再接受新任务。
     }
     // 请求类型带 stopFlag 字段时（生产用的探测请求都带）把本 worker 的停止信号挂上去：
     // 任务体在每一条查询之前核对它，退出时的收尾因此只等“当前这一条”，不等剩余的全部。
@@ -51,7 +59,7 @@ public:
       request.stopFlag = stopFlag_;
     }
     ++submittedSerial_;
-    pending_ = PendingTask{std::move(request), std::move(body), notifyWindow, completionMessage,
+    pending_ = PendingTask{std::move(request), std::move(body), notifyTarget, completionMessage,
                            submittedSerial_};
     if (!thread_.joinable()) {
       thread_ = std::thread([this] { Loop(); });
@@ -59,7 +67,7 @@ public:
     condition_.notify_all();
   }
 
-  // UI 线程在收到通知后调用：仅当 completionSerial 仍是最新提交且结果未被消费时返回 true。
+  // 界面线程在收到通知后调用：仅当 completionSerial 仍是最新提交且结果未被消费时返回 true。
   bool FetchLatest(uint64_t completionSerial, TaskResult* out) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!hasResult_ || completionSerial != submittedSerial_ || completionSerial != completedSerial_ ||
@@ -84,7 +92,7 @@ public:
     condition_.notify_all();
   }
 
-  // 第二阶段：等待工作线程结束。窗口收尾的用法是先对所有 worker 各调一次 BeginStop，
+  // 第二阶段：等待工作线程结束。界面收尾的用法是先对所有 worker 各调一次 BeginStop，
   // 再逐个 Join——各线程同时收场，总等待按“最长的一条在途查询”计，
   // 而不是十个探测超时相加。
   void Join() {
@@ -104,8 +112,8 @@ private:
   struct PendingTask {
     TaskRequest request;
     Body body;
-    HWND window = nullptr;
-    UINT message = 0;
+    NotificationTarget target = nullptr;
+    CompletionMessageId message = 0;
     uint64_t serial = 0;
   };
 
@@ -113,8 +121,8 @@ private:
     for (;;) {
       TaskRequest request;
       Body body;
-      HWND window = nullptr;
-      UINT message = 0;
+      NotificationTarget target = nullptr;
+      CompletionMessageId message = 0;
       uint64_t serial = 0;
       {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -126,7 +134,7 @@ private:
         }
         request = pending_->request;
         body = pending_->body;
-        window = pending_->window;
+        target = pending_->target;
         message = pending_->message;
         serial = pending_->serial;
         processedSerial_ = serial;
@@ -140,7 +148,7 @@ private:
         completedSerial_ = serial;
         consumed_ = false;
       }
-      ::PostMessageW(window, message, static_cast<WPARAM>(serial), 0);
+      PostCompletionNotification(target, message, serial);
     }
   }
 
