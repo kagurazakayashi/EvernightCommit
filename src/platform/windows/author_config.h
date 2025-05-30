@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "git/author_config.h"
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

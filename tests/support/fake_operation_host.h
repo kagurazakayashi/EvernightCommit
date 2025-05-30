@@ -39,14 +39,12 @@ public:
         ConfirmRecord{title, mainInstruction + L" ｜按钮：" + yesButton + L" ｜" + body, false});
     return nextRiskConfirmResult.value_or(true);
   }
-  std::optional<size_t> PromptRemoteChoice(gc::platform::RemoteChoiceSpec spec,
-                                           const gc::ui::RemoteChoiceLayoutHints&) override {
-    remoteChoices.push_back(spec.title);
+  std::optional<size_t> PromptSingleChoice(gc::platform::SingleChoiceRequest request) override {
+    remoteChoices.push_back(request.title);
     return nextRemoteChoice;
   }
-  std::optional<std::wstring> PromptForText(gc::platform::IdentityPromptSpec spec,
-                                            const gc::ui::TextInputLayoutHints&) override {
-    textPrompts.push_back(spec.title);
+  std::optional<std::wstring> PromptForText(gc::platform::TextPromptRequest request) override {
+    textPrompts.push_back(request.title);
     return nextText;
   }
 

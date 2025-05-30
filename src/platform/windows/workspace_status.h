@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "git/workspace_status.h"
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

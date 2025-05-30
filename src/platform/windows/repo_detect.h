@@ -1,6 +1,5 @@
 #pragma once
 
-#include <windows.h>
 
 #include <condition_variable>
 #include <cstdint>
@@ -12,7 +11,7 @@
 #include <vector>
 
 #include "git/repository.h"
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

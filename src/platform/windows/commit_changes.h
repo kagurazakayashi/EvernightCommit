@@ -5,7 +5,7 @@
 
 #include "git/commit_changes.h"
 #include "git/repository.h"  // GitQueryRunner
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

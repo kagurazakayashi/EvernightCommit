@@ -1688,7 +1688,8 @@ bool MainWindow::AdmitGitFlow(HWND window, app::GitFlow requested, std::wstring_
 
 OperationContext MainWindow::CaptureOperationContext() const {
   OperationContext ctx;
-  ctx.notifyWindow = window_.get();
+  // 共用契约只带一个不透明地址：HWND 隐式转成 void*，反向解释只发生在平台实现里。
+  ctx.notify = window_.get();
   ctx.gitExecutable = state_.Git().path;
   ctx.detection = state_.Repo().detection;
   ctx.repoUsable = state_.RepoUsable();
@@ -2004,27 +2005,23 @@ void MainWindow::RunFormValidation(HWND window, std::wstring_view prefixNote) {
   RefreshTexts(window);
 }
 
-platform::IdentityPromptSpec MainWindow::MakeCoauthorPrompt(const std::wstring& title,
+platform::TextPromptRequest MainWindow::MakeCoauthorPrompt(const std::wstring& title,
                                                            const std::wstring& initial,
                                                            int editingRow) const {
-  platform::IdentityPromptSpec spec;
-  spec.title = title;
-  spec.label = L"合作者（姓名 <邮箱>）";
-  spec.initialValue = initial;
-  spec.font = metrics_.Font();
-  spec.layout.margin = metrics_.Margin();
-  spec.layout.gap = metrics_.RowGap();
-  spec.layout.width = metrics_.Scale(320);
-  spec.layout.labelHeight = metrics_.LabelHeight();
-  spec.layout.editHeight = metrics_.ControlHeight();
-  spec.layout.noteHeight = 2 * metrics_.LabelHeight();  // 校驗說明留兩行，長原因不被裁掉。
-  spec.layout.buttonWidth = metrics_.ButtonWidth(L"确定");
-  spec.layout.buttonHeight = metrics_.ControlHeight();
+  // 这里只给内容与行数；字体、边距、按钮宽度一律由 PromptForText→ToIdentityPromptSpec
+  // 按本窗口的 DPI 度量填，与合作者以外的输入框共用同一套换算。
+  platform::TextPromptRequest request;
+  request.title = title;
+  request.label = L"合作者（姓名 <邮箱>）";
+  request.initialValue = initial;
+  request.hints.labelRows = 1;
+  request.hints.noteRows = 2;      // 校验说明留两行，长原因不被裁掉。
+  request.hints.contentWidth = 320;
 
-  // 校驗在框裡跑：格式不對或與既有條目重複時不關閉、原地把原因寫給使用者。
-  // 比較鍵由 git/commit_identity 決定（姓名摺疊空白、郵箱只摺疊 ASCII 大小寫），界面不另立一套規則。
+  // 校验在框里跑：格式不对或与既有条目重复时不关闭，原地把原因写给使用者。
+  // 比较键由 git/commit_identity 决定（姓名折叠空白、邮箱只折叠 ASCII 大小写），界面不另立一套规则。
   const std::vector<std::wstring> existing = commitForm_.Coauthors();
-  spec.validate = [existing, editingRow](const std::wstring& text) -> std::wstring {
+  request.validate = [existing, editingRow](const std::wstring& text) -> std::wstring {
     const std::wstring formatIssue = git::ValidateGitIdentity(text, L"合作者");
     if (!formatIssue.empty()) {
       return formatIssue;
@@ -2041,20 +2038,20 @@ platform::IdentityPromptSpec MainWindow::MakeCoauthorPrompt(const std::wstring& 
     }
     return {};
   };
-  return spec;
+  return request;
 }
 
 void MainWindow::AddCoauthor(HWND window) {
-  const platform::IdentityPromptResult entered =
-      platform::PromptForIdentity(window, MakeCoauthorPrompt(L"添加合作者", L"", -1));
-  if (!entered.accepted) {
+  const std::optional<std::wstring> entered =
+      PromptForText(MakeCoauthorPrompt(L"添加合作者", L"", -1));
+  if (!entered.has_value()) {
     state_.SetFormNote(L"没有添加合作者：输入框已取消，列表与表单内容都没改动。");
     RefreshTexts(window);
     return;
   }
   git::GitIdentity parsed;
   std::wstring error;
-  if (!git::ParseGitIdentity(entered.value, &parsed, &error, L"合作者")) {
+  if (!git::ParseGitIdentity(*entered, &parsed, &error, L"合作者")) {
     // 輸入框已經校過一次，走到這裡只能是環境異常；照實報告，不把壞條目收進列表。
     state_.SetFormNote(L"这条合作者没有收进列表：" + error);
     RefreshTexts(window);
@@ -2098,16 +2095,16 @@ void MainWindow::EditCoauthorAt(HWND window, int row) {
     RefreshTexts(window);
     return;
   }
-  const platform::IdentityPromptResult entered =
-      platform::PromptForIdentity(window, MakeCoauthorPrompt(L"修改合作者", current[static_cast<size_t>(row)], row));
-  if (!entered.accepted) {
+  const std::optional<std::wstring> entered =
+      PromptForText(MakeCoauthorPrompt(L"修改合作者", current[static_cast<size_t>(row)], row));
+  if (!entered.has_value()) {
     state_.SetFormNote(L"没有改动这条合作者：输入框已取消。");
     RefreshTexts(window);
     return;
   }
   git::GitIdentity parsed;
   std::wstring error;
-  if (!git::ParseGitIdentity(entered.value, &parsed, &error, L"合作者")) {
+  if (!git::ParseGitIdentity(*entered, &parsed, &error, L"合作者")) {
     state_.SetFormNote(L"这条合作者没有被改上去：" + error);
     RefreshTexts(window);
     return;
@@ -3661,39 +3658,68 @@ bool MainWindow::RiskConfirm(const std::wstring& title, const std::wstring& main
   return button == IDYES;
 }
 
-std::optional<size_t> MainWindow::PromptRemoteChoice(platform::RemoteChoiceSpec spec,
-                                                     const RemoteChoiceLayoutHints& hints) {
-  // 内容（标题、说明、条目、按钮文案）由控制器给出；几何与字体在这里按主窗口的 DPI 度量补齐，
-  // 与界面其它地方一致，也让控制器不接触任何度量状态。
+platform::RemoteChoiceSpec MainWindow::ToRemoteChoiceSpec(
+    const platform::SingleChoiceRequest& request) const {
+  // 内容（标题、说明、条目、按钮文案）由请求原样带过来；字体与几何在这里按主窗口的 DPI
+  // 度量补齐，与界面其它地方一致，也让控制器不接触任何度量状态和原生句柄。
+  platform::RemoteChoiceSpec spec;
+  spec.title = request.title;
+  spec.label = request.label;
+  spec.okText = request.okText;
+  spec.cancelText = request.cancelText;
+  spec.emptyItemDetail = request.emptyItemDetail;
+  spec.needSelectionHint = request.needSelectionHint;
+  spec.items.reserve(request.items.size());
+  for (const platform::ChoiceItem& item : request.items) {
+    spec.items.push_back({item.label, item.detail});
+  }
   spec.font = metrics_.Font();
   spec.layout.margin = metrics_.Margin();
   spec.layout.gap = metrics_.RowGap();
-  spec.layout.width = metrics_.Scale(hints.contentWidth);
-  spec.layout.labelHeight = hints.labelRows * metrics_.LabelHeight();
-  spec.layout.listHeight = metrics_.Scale(hints.listHeight);
-  spec.layout.buttonWidth = metrics_.ButtonWidth(spec.okText);
+  spec.layout.width = metrics_.Scale(request.hints.contentWidth);
+  spec.layout.labelHeight = request.hints.labelRows * metrics_.LabelHeight();
+  spec.layout.listHeight = metrics_.Scale(request.hints.listHeight);
+  spec.layout.buttonWidth = metrics_.ButtonWidth(request.okText);
   spec.layout.buttonHeight = metrics_.ControlHeight();
-  const platform::RemoteChoiceResult choice = platform::PromptForRemoteChoice(window_.get(), spec);
+  return spec;
+}
+
+std::optional<size_t> MainWindow::PromptSingleChoice(platform::SingleChoiceRequest request) {
+  const platform::RemoteChoiceResult choice =
+      platform::PromptForRemoteChoice(window_.get(), ToRemoteChoiceSpec(request));
   if (!choice.accepted || choice.selectedIndex < 0) {
     return std::nullopt;
   }
   return static_cast<size_t>(choice.selectedIndex);
 }
 
-std::optional<std::wstring> MainWindow::PromptForText(platform::IdentityPromptSpec spec,
-                                                     const TextInputLayoutHints& hints) {
-  // 与「合作者」那一套输入框共用同一份对话框实现与同一套 DPI 度量：控制器只给内容与行数，
-  // 几何一律在这里按本窗口的度量填，高 DPI 下和界面其它部分一致。
+platform::IdentityPromptSpec MainWindow::ToIdentityPromptSpec(
+    const platform::TextPromptRequest& request) const {
+  // 与单选框同一套规矩：内容归请求，字体与像素归本窗口的度量层。
+  platform::IdentityPromptSpec spec;
+  spec.title = request.title;
+  spec.label = request.label;
+  spec.initialValue = request.initialValue;
+  spec.okText = request.okText;
+  spec.cancelText = request.cancelText;
+  spec.validate = request.validate;
   spec.font = metrics_.Font();
   spec.layout.margin = metrics_.Margin();
   spec.layout.gap = metrics_.RowGap();
-  spec.layout.width = metrics_.Scale(hints.contentWidth);
-  spec.layout.labelHeight = hints.labelRows * metrics_.LabelHeight();
+  spec.layout.width = metrics_.Scale(request.hints.contentWidth);
+  spec.layout.labelHeight = request.hints.labelRows * metrics_.LabelHeight();
   spec.layout.editHeight = metrics_.ControlHeight();
-  spec.layout.noteHeight = hints.noteRows * metrics_.LabelHeight();
-  spec.layout.buttonWidth = metrics_.ButtonWidth(spec.okText);
+  spec.layout.noteHeight = request.hints.noteRows * metrics_.LabelHeight();
+  spec.layout.buttonWidth = metrics_.ButtonWidth(request.okText);
   spec.layout.buttonHeight = metrics_.ControlHeight();
-  const platform::IdentityPromptResult result = platform::PromptForIdentity(window_.get(), spec);
+  return spec;
+}
+
+std::optional<std::wstring> MainWindow::PromptForText(platform::TextPromptRequest request) {
+  // 与「合作者」那一套输入框共用同一份对话框实现：控制器只给内容与行数，
+  // 几何一律在这里按本窗口的度量填，高 DPI 下和界面其它部分一致。
+  const platform::IdentityPromptResult result =
+      platform::PromptForIdentity(window_.get(), ToIdentityPromptSpec(request));
   if (!result.accepted) {
     return std::nullopt;
   }
@@ -4487,11 +4513,10 @@ std::wstring HistoryRowDetail(const app::OperationRecord& record) {
 }  // namespace
 
 void MainWindow::ShowOperationHistory(HWND window) {
-  RemoteChoiceLayoutHints hints;
-  hints.contentWidth = 620;
-  hints.listHeight = 260;
-
-  platform::RemoteChoiceSpec menu;
+  platform::SingleChoiceRequest menu;
+  menu.hints.contentWidth = 620;
+  menu.hints.listHeight = 260;
+  menu.hints.labelRows = 3;
   menu.title = L"操作历史";
   menu.label = L"选择要对这份操作历史做的操作（取消不改动任何东西）。位置：" + HistoryStorageLine();
   menu.items = {
@@ -4507,8 +4532,7 @@ void MainWindow::ShowOperationHistory(HWND window) {
   menu.okText = L"继续";
   menu.emptyItemDetail = L"";
   menu.needSelectionHint = L"先选一项，再按确定。（取消不执行任何操作）";
-  hints.labelRows = 3;
-  const std::optional<size_t> choice = PromptRemoteChoice(menu, hints);
+  const std::optional<size_t> choice = PromptSingleChoice(menu);
   if (!choice.has_value()) {
     return;
   }
@@ -4523,7 +4547,7 @@ void MainWindow::ShowOperationHistory(HWND window) {
       ShowInfo(L"操作历史存储位置", HistoryStorageLine());
       return;
     case 4: {
-      platform::IdentityPromptSpec spec;
+      platform::TextPromptRequest spec;
       spec.title = L"设置操作历史的保留期限与条数";
       spec.label =
           L"输入「保留天数,最大条数」，逗号分隔。保留天数 0＝不按天淘汰（上限 3650）；条数 1.." +
@@ -4552,11 +4576,10 @@ void MainWindow::ShowOperationHistory(HWND window) {
         }
         return {};
       };
-      TextInputLayoutHints textHints;
-      textHints.labelRows = 3;
-      textHints.noteRows = 2;
-      textHints.contentWidth = 460;
-      const std::optional<std::wstring> value = PromptForText(spec, textHints);
+      spec.hints.labelRows = 3;
+      spec.hints.noteRows = 2;
+      spec.hints.contentWidth = 460;
+      const std::optional<std::wstring> value = PromptForText(spec);
       if (!value.has_value()) {
         return;
       }
@@ -4593,7 +4616,7 @@ void MainWindow::ShowOperationHistory(HWND window) {
     ShowInfo(L"操作历史", L"还没有任何记录。勾上「记录操作历史」之后的写操作才会被记录下来。");
     return;
   }
-  platform::RemoteChoiceSpec list;
+  platform::SingleChoiceRequest list;
   list.title = L"操作历史记录";
   list.label = L"选中一条记录后，可按其恢复线索重新预检并确认恢复（仅引用级可回退者）；取消不执行任何操作。";
   // 最新排在最前，便于查看；下标映射回真实记录。
@@ -4603,8 +4626,10 @@ void MainWindow::ShowOperationHistory(HWND window) {
   list.okText = L"处理选中记录";
   list.emptyItemDetail = L"";
   list.needSelectionHint = L"先在列表里点选一条记录，再按确定。（取消不执行任何操作）";
-  hints.listHeight = 320;
-  const std::optional<size_t> picked = PromptRemoteChoice(list, hints);
+  list.hints.contentWidth = 620;
+  list.hints.listHeight = 320;
+  list.hints.labelRows = 3;
+  const std::optional<size_t> picked = PromptSingleChoice(list);
   if (!picked.has_value()) {
     return;
   }

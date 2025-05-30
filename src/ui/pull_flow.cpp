@@ -6,7 +6,6 @@
 
 #include "git/commit_history.h"
 #include "git/repository.h"
-#include "platform/windows/remote_choice_dialog.h"
 #include "ui/commands.h"
 
 namespace gc::ui {
@@ -19,7 +18,7 @@ void PullFlow::Start(OperationHost& host, const OperationContext& ctx) {
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPullProbeTimeoutMs;
   request.includeRelationship = false;
-  worker_.Request(ctx.notifyWindow, kPullProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPullProbeCompleted, std::move(request),
                   [](const platform::PullProbeRequest& pending) {
                     return platform::RunPullProbeLoad(pending);
                   });
@@ -119,7 +118,7 @@ void PullFlow::OnFetchSettled(OperationHost& host, const OperationContext& ctx, 
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPullProbeTimeoutMs;
   request.includeRelationship = true;
-  worker_.Request(ctx.notifyWindow, kPullProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPullProbeCompleted, std::move(request),
                   [](const platform::PullProbeRequest& pending) {
                     return platform::RunPullProbeLoad(pending);
                   });
@@ -165,17 +164,19 @@ void PullFlow::ComposeAndConfirmIntegrate(OperationHost& host, const OperationCo
     }
     case git::PullPlanState::chooseStrategy: {
       // 分叉而配置没定策略：合并与变基两种做法摆出来，选完还会再有一次带风险清单的确认。
-      platform::RemoteChoiceSpec spec;
-      spec.title = L"选择这次 pull 的整合方式";
-      spec.label = plan.explanation;
+      platform::SingleChoiceRequest request;
+      request.title = L"选择这次 pull 的整合方式";
+      request.label = plan.explanation;
       for (const std::wstring& candidate : plan.strategyCandidates) {
-        spec.items.push_back({candidate, L""});
+        request.items.push_back({candidate, L""});
       }
-      spec.okText = L"按选中的方式整合";
-      spec.emptyItemDetail.clear();  // 这里没有第二栏，别补一句与远端无关的占位。
-      spec.needSelectionHint = L"先在列表里点选一种整合方式，再按确定。（取消不会执行任何命令）";
-      const RemoteChoiceLayoutHints hints{/*labelRows=*/4, /*contentWidth=*/560, /*listHeight=*/110};
-      const std::optional<size_t> picked = host.PromptRemoteChoice(std::move(spec), hints);
+      request.okText = L"按选中的方式整合";
+      request.emptyItemDetail.clear();  // 这里没有第二栏，别补一句与远端无关的占位。
+      request.needSelectionHint = L"先在列表里点选一种整合方式，再按确定。（取消不会执行任何命令）";
+      request.hints.labelRows = 4;
+      request.hints.contentWidth = 560;
+      request.hints.listHeight = 110;
+      const std::optional<size_t> picked = host.PromptSingleChoice(std::move(request));
       if (!picked.has_value() || *picked >= plan.strategyCandidates.size()) {
         Abandon(host, L"已取消整合方式的选择：" + fetchLeftover);
         return;
@@ -210,7 +211,7 @@ void PullFlow::RequestExecutionRecheck(OperationHost& host, const OperationConte
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPullProbeTimeoutMs;
   request.includeRelationship = false;
-  worker_.Request(ctx.notifyWindow, kPullProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kPullProbeCompleted, std::move(request),
                   [](const platform::PullProbeRequest& pending) {
                     return platform::RunPullProbeLoad(pending);
                   });
@@ -279,7 +280,7 @@ void PullFlow::BeginIntegrationFailedReport(OperationHost& host, const Operation
   request.repositoryDirectory = ctx.detection.root;
   request.absoluteGitDir = ctx.detection.absoluteGitDir;
   request.timeoutMilliseconds = kPullRecheckTimeoutMs;
-  aftermathWorker_.Request(ctx.notifyWindow, kPullAftermathCompleted, std::move(request),
+  aftermathWorker_.Request(ctx.notify, kPullAftermathCompleted, std::move(request),
                            [](const platform::PullAftermathRequest& pending) {
                              return platform::RunPullAftermathLoad(pending);
                            });

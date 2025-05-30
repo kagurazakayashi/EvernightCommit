@@ -6,7 +6,7 @@
 #include "git/first_push_plan.h"
 #include "git/push_plan.h"
 #include "git/repository.h"
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

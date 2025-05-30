@@ -45,7 +45,7 @@ void RestoreFlow::Start(OperationHost& host, const OperationContext& ctx, git::R
   stage_ = Stage::preConfirmProbe;
 
   const platform::RestoreProbeRequest request = MakeRequest(ctx, clues_, kRestoreProbeTimeoutMs);
-  probeWorker_.Request(ctx.notifyWindow, kRestoreProbeCompleted, request,
+  probeWorker_.Request(ctx.notify, kRestoreProbeCompleted, request,
                        [](const platform::RestoreProbeRequest& pending) {
                          return platform::RunRestoreProbeLoad(pending);
                        });
@@ -109,7 +109,7 @@ void RestoreFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ct
   request.absoluteGitDir = binding_.absoluteGitDir;
   request.branchRef = plan_.targetRef;
   request.timeoutMilliseconds = kRestoreRecheckTimeoutMs;
-  recheckWorker_.Request(ctx.notifyWindow, kRestoreRecheckCompleted, std::move(request),
+  recheckWorker_.Request(ctx.notify, kRestoreRecheckCompleted, std::move(request),
                          [](const platform::RestoreProbeRequest& pending) {
                            return platform::CaptureRestoreRecheck(pending);
                          });

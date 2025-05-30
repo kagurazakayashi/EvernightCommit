@@ -16,6 +16,7 @@
 #include "app/task_coordinator.h"
 #include "git/commit_message.h"
 #include "git/staging_plan.h"
+#include "platform/dialogs.h"
 #include "platform/windows/author_config.h"
 #include "platform/windows/command_window_runner.h"
 #include "platform/windows/commit_changes.h"
@@ -23,6 +24,7 @@
 #include "platform/windows/git_verify_worker.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/path_picker.h"
+#include "platform/windows/remote_choice_dialog.h"
 #include "platform/windows/operation_history_store.h"
 #include "platform/windows/persistent_store.h"
 #include "platform/windows/raii.h"
@@ -50,6 +52,14 @@ namespace gc::ui {
 
 inline constexpr const wchar_t* kMainWindowWindowClass = L"EvernightCommit.MainWindow";
 inline constexpr const wchar_t* kWindowTitle = L"Git 提交工具";
+
+// ⚠ Win32 过渡实现（见 docs/architecture.md「过渡期的 Win32 界面」一节）。
+// 本类连同 controls/layout/ui_metrics/splitter/repo_bar/action_bar/commit_form/changes_pane
+// 与 commands.h、resource_ids.h 一起，是**要被统一 wxWidgets 界面取代的那一份**；
+// 它对外只通过 ui/operation_host.h 那条不含原生句柄的窄接口与操作控制器打交道，
+// 原生参数（HWND、HFONT、对话框模板、WM_APP 号）全部止于本文件与本类实现。
+// 九个操作控制器（commit/undo/fetch/pull/push/conflict/restore/submodule/upstream-write）
+// 不属于本段：它们消费应用层状态，随统一界面保留。
 
 // 主窗口：窗口过程分发、子面板装配与布局、基础设施读取（Git 验证/仓库识别/工作区/作者身份）、
 // 命令窗口执行器；六个被编排的 Git 操作（创建提交/撤回/fetch/pull/推送/冲突与暂停流程）各由一个操作控制器
@@ -228,10 +238,19 @@ private:
   void AddCoauthor(HWND window);
   void RemoveSelectedCoauthors(HWND window);
   void EditCoauthorAt(HWND window, int row);
-  // 合作者输入框的尺寸与文案：尺寸全部取自主窗口的 DPI 度量，保持与界面其它地方一致。
-  [[nodiscard]] platform::IdentityPromptSpec MakeCoauthorPrompt(const std::wstring& title,
-                                                                const std::wstring& initial,
-                                                                int editingRow) const;
+  // 合作者输入框的内容与行数：只填 platform::TextPromptRequest，字体与 DPI 像素
+  // 由 PromptForText 那一次翻译统一补齐，保持与界面其它地方一致。
+  [[nodiscard]] platform::TextPromptRequest MakeCoauthorPrompt(const std::wstring& title,
+                                                               const std::wstring& initial,
+                                                               int editingRow) const;
+  // ---------- 平台无关请求 → Win32 对话框参数（过渡实现的唯一翻译点） ----------
+  // 控制器与本页界面代码只给出内容与行数；字体柄、模板 ID、DPI 像素只出现在这两个函数里。
+  // wxWidgets 界面后续在同一份 platform::SingleChoiceRequest / TextPromptRequest 上另写实现，
+  // 业务流程不需要跟着改。
+  [[nodiscard]] platform::RemoteChoiceSpec ToRemoteChoiceSpec(
+      const platform::SingleChoiceRequest& request) const;
+  [[nodiscard]] platform::IdentityPromptSpec ToIdentityPromptSpec(
+      const platform::TextPromptRequest& request) const;
   // 表单内容属于哪一个工作区（按折叠后的工作区根比较，换 Git 程序不算换仓库）。
   [[nodiscard]] std::wstring FormRepositoryKey() const;
   // 切换仓库时对已有表单内容的处理：有用户内容就问「保留还是放弃」，程序不替人猜。
@@ -353,12 +372,12 @@ private:
   void ShowWarning(const std::wstring& title, const std::wstring& body) override;
   bool RiskConfirm(const std::wstring& title, const std::wstring& mainInstruction,
                    const std::wstring& yesButton, const std::wstring& body) override;
-  std::optional<size_t> PromptRemoteChoice(platform::RemoteChoiceSpec spec,
-                                           const RemoteChoiceLayoutHints& hints) override;
+  // 单选框：控制器给内容（platform::SingleChoiceRequest），字体与 DPI 像素在这里补齐，
+  // 再交给 Win32 过渡实现弹框。fetch 选远端、pull 选整合方式、首次推送与历史菜单共用这一条。
+  std::optional<size_t> PromptSingleChoice(platform::SingleChoiceRequest request) override;
   // 单行输入框：与「合作者」那一套模态框同一份实现，几何同样按本窗口的 DPI 度量填。
   // 首次推送向导用它问目标分支名（框内的 validate 只做纯形态提示，权威裁定在后台问 Git）。
-  std::optional<std::wstring> PromptForText(platform::IdentityPromptSpec spec,
-                                            const TextInputLayoutHints& hints) override;
+  std::optional<std::wstring> PromptForText(platform::TextPromptRequest request) override;
   bool LaunchCommandWindow(const git::CommandWindowOperation& operation,
                            const CommandLaunchOptions& options) override;
   void ScheduleRefresh() override;

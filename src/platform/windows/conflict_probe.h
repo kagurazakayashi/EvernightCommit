@@ -5,7 +5,7 @@
 
 #include "git/conflict_state.h"
 #include "git/repository.h"
-#include "platform/windows/git_task_worker.h"
+#include "platform/git_task_worker.h"
 
 namespace gc::platform {
 

@@ -1,9 +1,12 @@
 ![EvernightCommit 图标](resources/EvernightCommit.ico)
 
-# EvernightCommit —— Windows 原生 Git 提交工具
+# EvernightCommit —— Git 提交图形工具（当前交付 Windows）
 
-EvernightCommit 是一款只面向 Windows 的 Git 图形界面工具，原生 Win32 + Common Controls
-编写，不依赖任何跨平台 GUI 框架。窗口标题为“Git 提交工具”。
+EvernightCommit 是一款 Git 图形界面工具。业务逻辑（Git 机器输出解析、操作方案与确认判定）
+与平台能力已经分成两层，界面则按统一的 wxWidgets 收敛；**当前能构建、能运行的仍然只有
+Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现，不依赖跨平台 GUI 框架。
+窗口标题为“Git 提交工具”。跨平台拆分进度与还差的环节见
+[docs/architecture.md](docs/architecture.md) 的「过渡期的 Win32 界面」和「已知待办差异」。
 
 它的设计取向是**看得见、不越权**：你主动触发的每一次 Git 操作（暂存、取消暂存、提交、
 撤回、`fetch`、`pull`、推送、`status`）都在一个新开的命令窗口里执行**真实的 git 命令**，
@@ -16,7 +19,9 @@ EvernightCommit 是一款只面向 Windows 的 Git 图形界面工具，原生 W
 ## 支持平台与前提
 
 - **操作系统**：仅支持 Windows x64（Windows 10 及以上）。其他平台或非 x64 架构在构建
-  配置阶段就会直接报错，程序也不提供 ARM64 版本。
+  配置阶段就会直接报错，程序也不提供 ARM64 版本。共用业务逻辑层已经不再依赖 Windows 头，
+  可以在 Linux 上单独做编译核对（命令见 [docs/building.md](docs/building.md)），
+  但那不等于 Linux 版可用——平台实现与界面还没迁移。
 - **Git 命令行工具**：必须外部安装（推荐 [Git for Windows](https://git-scm.com/download/win)），
   本程序不携带、不安装 Git。启动时会自动在 PATH 里寻找 `git.exe` 并后台验证；也可以手动
   粘贴路径或用“浏览…”指定。机器上装着好几个 `git.exe` 时，下拉列表按来源排档：

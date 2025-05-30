@@ -7,14 +7,14 @@
 #include "git/commit_identity.h"
 #include "git/repository.h"
 #include "platform/windows/commit_message_file.h"
-#include "platform/windows/local_time.h"
+#include "platform/local_time.h"
 #include "ui/commands.h"
 
 namespace gc::ui {
 namespace {
 
 // 把一段墙上时间换算成「交给 Git 的值 + 给人看的说明」；失败时写原因并返回 false。
-// 时区与偏移一律按这一刻在本机实际生效的值问（platform/windows/local_time），
+// 时区与偏移一律按这一刻在本机实际生效的值问（platform/local_time），
 // 交给 Git 的日期串带着偏移，不会按「读它的那个进程的时区」被挪动。
 bool BuildCommitTimeChoice(const git::CivilTime& wall, git::CommitTimeChoice* out,
                            std::wstring* refusal) {
@@ -115,7 +115,7 @@ void CommitFlow::RequestPreflightProbe(CommitOperationHost& host, const Operatio
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kCommitProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kCommitProbeCompleted, std::move(request),
                   [](const platform::CommitProbeRequest& pending) {
                     return platform::RunCommitProbeLoad(pending);
                   });
@@ -245,7 +245,7 @@ void CommitFlow::RequestExecutionRecheck(CommitOperationHost& host, const Operat
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
   request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  worker_.Request(ctx.notifyWindow, kCommitProbeCompleted, std::move(request),
+  worker_.Request(ctx.notify, kCommitProbeCompleted, std::move(request),
                   [](const platform::CommitProbeRequest& pending) {
                     return platform::RunCommitProbeLoad(pending);
                   });
