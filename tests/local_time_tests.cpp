@@ -58,7 +58,7 @@ GC_TEST(local_time_now_matches_independent_bias_and_clock) {
 
   // 控件里显示的墙上时间就是系统给出的本机关历时间（只到秒）。
   const CivilTime expectedWall = gc::platform::CivilFromSystemTime(systemNow);
-  GC_CHECK(now.wall.year == expectedWall.year && now.wall.month == expectedWall.month &&
+  GC_CHECK_MESSAGE(now.wall.year == expectedWall.year && now.wall.month == expectedWall.month &&
                now.wall.day == expectedWall.day,
            "墙上时间的日期部分应与 GetLocalTime 一致");
 
@@ -122,7 +122,7 @@ GC_TEST(local_time_rejects_values_outside_supported_range) {
     const LocalInstant result = gc::platform::ResolveLocalWallTime(bad);
     GC_CHECK_MESSAGE(!result.valid, "不该接受：" + Describe(result));
     GC_CHECK_MESSAGE(!result.failureReason.empty(), "拒绝时必须给原因");
-    GC_CHECK(result.utcEpochSeconds == 0 && result.offsetMinutes == 0,
+    GC_CHECK_MESSAGE(result.utcEpochSeconds == 0 && result.offsetMinutes == 0,
              "拒绝时不能留下半个换算结果");
   }
 }

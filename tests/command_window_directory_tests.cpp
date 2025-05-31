@@ -421,7 +421,7 @@ GC_TEST(directory_sweep_keeps_live_and_unknown_and_removes_only_stale) {
   // 不是靠放开来放宽生产规则。
   markerHold.Reset();
   leaseHold.Reset();
-  GC_CHECK(::SetFileAttributesW(deniedResult.c_str(), FILE_ATTRIBUTE_NORMAL) != 0, "还原只读失败");
+  GC_CHECK_MESSAGE(::SetFileAttributesW(deniedResult.c_str(), FILE_ATTRIBUTE_NORMAL) != 0, "还原只读失败");
   static_cast<void>(MarkOlderThanThreshold(live));
   static_cast<void>(MarkOlderThanThreshold(leased));
   static_cast<void>(MarkOlderThanThreshold(denied));

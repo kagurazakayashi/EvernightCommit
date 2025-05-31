@@ -388,9 +388,10 @@ GC_TEST(repository_binding_invalidates_every_identity_change_not_just_the_path) 
   current.generation = 7;
   current.gitExePath = binding.gitExePath;
   current.workTreeRoot = binding.workTreeRoot;
-  GC_CHECK(binding.MatchesCurrent(true, current, binding.absoluteGitDir, binding.gitExePath,
-                                  binding.workTreeRoot),
-           "同一身份必须放行，否则每一步都会被自己作废");
+  // 带说明的断言用 GC_CHECK_MESSAGE（GC_CHECK 只收一个实参，多给的说明在 MSVC 下被静默丢掉）。
+  GC_CHECK_MESSAGE(binding.MatchesCurrent(true, current, binding.absoluteGitDir, binding.gitExePath,
+                                          binding.workTreeRoot),
+                   "同一身份必须放行，否则每一步都会被自己作废");
 
   // 没有可用工作区（识别失败/裸仓库）时，身份即使字面没变也不能继续等那份结果。
   GC_CHECK(!binding.MatchesCurrent(false, current, binding.absoluteGitDir, binding.gitExePath,

@@ -2,7 +2,7 @@
 // 用真实 Git 驱动生产逻辑（platform::ProbeConflictMarkers、platform::CollectConflictState
 // 与 git::InterpretConflictState / git::BuildConflict*Plan），再把判读结论与仓库里的实际状态对着看。
 //
-// 分组口径（运行器把夹具文件里未列入只读名单的用例归入 git-mutating）：
+// 分组口径（运行器把夹具文件里未列入「只读」与「只提交」两张名单的用例归入 git-push 即禁止侧）：
 //   * 前两条只跑 `git init`、只读查询与在临时根里造物（建目录、写痕迹档案、写工作区文件但不 add）：
 //     不建提交、不推送、不动索引、不改任何配置 —— 逐行核实过，登记进 test_main.cpp 的只读名单；
 //   * 后面每条都要提交图（制造真冲突、真变基、真 --continue/--abort 的后果），

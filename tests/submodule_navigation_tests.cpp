@@ -15,6 +15,7 @@
 //   * 允许进入时带上的交代：指针归父仓库、内部已跟踪改动与未跟踪文件归子模块自己，
 //     以及这一步只换绑定、不 add/commit/push/init。
 // 真实 Git 的落地（真子模块、真 gitlink）在 submodule_navigation_fixture_tests.cpp 验证。
+#include <algorithm>  // std::find：HasArgument 用它，此前只靠 MSVC 的间接包含侥幸编过
 #include <cstdio>
 #include <initializer_list>
 #include <string>

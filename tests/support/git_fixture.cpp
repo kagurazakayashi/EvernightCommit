@@ -357,6 +357,9 @@ GitRun GitFixture::RunWithBlock(const std::wstring& program,
                                 const std::vector<std::wstring>& arguments,
                                 const std::wstring& workingDirectory,
                                 const std::wstring& environmentBlock) {
+  // 所有夹具执行都过这一个口子（Run/RunInRepo/RunChecked/Commit/Push/RemoteRig 都在下面），
+  // 所以「本轮不许推送」在这里兜底：分组表归错了也会被拦下，而不是悄悄推出去。
+  GuardGitPushForTest(arguments, "夹具");
   const platform::SubprocessRunResult raw = platform::RunHiddenCaptured(
       program, arguments, workingDirectory, kGitTimeoutMs, environmentBlock.c_str());
   GitRun run;

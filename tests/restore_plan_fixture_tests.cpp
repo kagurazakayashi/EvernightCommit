@@ -12,8 +12,9 @@
 //     别的引用、索引、工作区一字不差。提交对象由夹具的 plumbing 辅助造（write-tree +
 //     hash-object），全程不执行 git commit / git push。
 //
-// 最后一条会先建两次真实提交，属于 git-mutating：按 AGENTS 的提交/推送限制只由维护者本人运行，
-// 会话不代跑。它验证恢复用的原子 update-ref（带预期旧值）在真实仓库里确实把分支挪回，
+// 最后一条会先建两次真实提交，属于 git-commit（只提交、不推送）：按 2026-10-17 起的授权边界
+// 可以由会话自跑，前提是提交只发生在用例自有的隔离临时仓库里。它验证恢复用的原子
+// update-ref（带预期旧值）在真实仓库里确实把分支挪回，
 // 以及「预期旧值对不上时 Git 原样拒绝、引用不动」这条原子保护。
 #include "git/restore_plan.h"
 
@@ -215,8 +216,8 @@ GC_TEST(restore_ref_integrity_queries_match_real_git_contract) {
   GC_CHECK(gc::git::DescribeRefIntegrityRefusal(integrity, L"refs/heads/main").empty());
 }
 
-// git-mutating：复现审查里那条"删符号引用时误伤被指向的分支"的证据，并证明本程序发出的
-// 命令形态不会跟随。它需要真实建提交与真删引用，按约束只由维护者本人运行：
+// git-commit（只建提交、不推送）：复现审查里那条"删符号引用时误伤被指向的分支"的证据，并证明本程序发出的
+// 命令形态不会跟随。它需要真实建提交与真删引用，属 git-commit（不推送）：
 //   gc_tests.exe restore_symref_update_ref_does_not_follow
 // 期望的三件事：
 //   1) 不带 --no-deref 的删除形态（本程序修复前的形态）会把 victim 删掉，alias 反而留着；
@@ -319,8 +320,9 @@ GC_TEST(restore_symref_update_ref_does_not_follow) {
   }
 }
 
-// git-mutating：建两次提交，验证恢复用的原子 update-ref 真的把分支挪回、且预期旧值不符时拒绝。
-// 按约束只由维护者运行：gc_tests.exe restore_update_ref（或 --group git-mutating）。
+// git-commit（建两次真实提交、不推送）：验证恢复用的原子 update-ref 真的把分支挪回、
+// 且预期旧值不符时拒绝。按 2026-10-17 起的授权边界可自动运行：
+//   gc_tests --group git-commit   或   gc_tests restore_update_ref
 GC_TEST(restore_update_ref_fixture_moves_branch_back_and_rejects_stale_old) {
   GitFixture fixture;
   std::string reason;

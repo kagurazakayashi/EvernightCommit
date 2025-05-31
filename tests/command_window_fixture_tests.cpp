@@ -43,6 +43,9 @@ void PrepareFixture(GitFixture& fixture) {
 }
 
 CommandWindowOperation MakeOperation(const GitFixture& fixture, std::vector<std::wstring> arguments) {
+  // 命令窗口这条执行路径不经过 GitFixture::Run，所以闸门在这里单独上一道：
+  // 用例把参数交给真实 Git 之前，先确认它不是「把提交写到远端」。
+  GuardGitPushForTest(arguments, "命令窗口");
   CommandWindowOperation operation;
   operation.operationId = L"status";
   operation.displayName = L"status";

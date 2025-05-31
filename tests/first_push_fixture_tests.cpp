@@ -4,9 +4,14 @@
 // 然后拿 bare 远端与仓库配置文件里的实际状态验结论。远端只有本机临时根里的 bare 仓库，
 // 全程不联网（夹具环境写死 GIT_ALLOW_PROTOCOL=file，任何网络 URL 在发起连接前就被 Git 拒绝）。
 //
-// 分组口径（运行器按文件把未列入只读名单的用例归入 git-mutating）：
+// 分组口径（运行器把夹具文件里未列入「只读」与「只提交」两张名单的用例归入 git-push 即禁止侧）：
 //   * 只读那两条只发 check-ref-format / rev-parse / ls-remote，不建提交、不推送；
-//   * 其余用例会在自己的临时目录里 commit 与 push（含向 bare 的推送），一律交给维护者运行。
+//   * 只发 config 的两条（targets 列远端、上游写入两步）在自己的临时目录里建提交但不 push，
+//     逐例核实后进 git-commit 名单；
+//   * 剩下四条一律留在 git-push（禁止自动运行那一侧），不注册进 ctest，只由项目所有者本人
+//     设 GC_ALLOW_PUSH=1 后点名运行。其中三条会把方案合成的那条 push 原样交给真实 Git
+//     （含向 bare 的推送）；第四条 first_push_probe_fixture_sends_no_remote_query_for_rejected_ref_name
+//     其实只断言「被拒的方案参数为空」，因为它碰到 push 方案对象而按拿不准一律留禁止侧处理。
 //
 // 覆盖的场景：
 //   * check-ref-format 的退出码契约与「不认 `--`」这条实测事实（本程序因此只交完整 refs/ 形态）；

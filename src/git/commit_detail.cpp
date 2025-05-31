@@ -1,6 +1,7 @@
 #include "git/commit_detail.h"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "git/repository.h"  // NulRecordsAreComplete：记录边界约定与「最近提交」共用同一处判定
 
@@ -38,6 +39,52 @@ void TrimTrailingNewlines(std::wstring* text) {
   while (!text->empty() && (text->back() == L'\n' || text->back() == L'\r')) {
     text->pop_back();
   }
+}
+
+// 一个码位在 UTF-16 里占几个单元。两侧 wchar_t 宽度不同（Windows 就是 UTF-16 单元，
+// Linux 是 32 位码位），所以「几个单元」必须自己算，不能拿 size() 当长度。
+size_t Utf16UnitsOfCodePoint(const std::wstring& text, size_t index) {
+#ifdef _WIN32
+  const wchar_t lead = text[index];
+  if (lead >= 0xD800 && lead <= 0xDBFF) {
+    // 高代理只有后面确实跟着低代理才构成一个完整码位；孤立高代理本身就是单个单元，
+    // 按 1 计，截断点也自然落在它后面，不会切出半个字符。
+    const wchar_t next = index + 1 < text.size() ? text[index + 1] : L'\0';
+    return (next >= 0xDC00 && next <= 0xDFFF) ? 2 : 1;
+  }
+  return 1;
+#else
+  return static_cast<uint32_t>(text[index]) > 0xFFFFu ? 2 : 1;
+#endif
+}
+
+// 该码位占几个 wchar_t 元素（Windows 的代理对是 2 个元素，Linux 恒为 1 个）。
+size_t ElementsOfCodePoint(const std::wstring& text, size_t index) {
+#ifdef _WIN32
+  return Utf16UnitsOfCodePoint(text, index) == 2 ? 2 : 1;
+#else
+  static_cast<void>(text);
+  static_cast<void>(index);
+  return 1;
+#endif
+}
+
+// 按 UTF-16 单元数上限截断描述：同一提交在两个平台上留下的必须是同一段文字。
+// 截点一律落在码位边界上——落在代理对中间会留下孤立的半字符，
+// 编辑框与剪贴板都会拿到非法的 UTF-16。
+std::wstring TruncateToUtf16Limit(const std::wstring& text, size_t limit, bool* truncated) {
+  size_t units = 0;
+  size_t index = 0;
+  while (index < text.size()) {
+    const size_t width = Utf16UnitsOfCodePoint(text, index);
+    if (units + width > limit) {
+      break;
+    }
+    units += width;
+    index += ElementsOfCodePoint(text, index);
+  }
+  *truncated = index < text.size();
+  return text.substr(0, index);
 }
 
 }  // namespace
@@ -121,17 +168,11 @@ CommitDetailParseResult ParseCommitDetail(std::wstring_view nulSeparatedOutput,
   // 作者为空、标题为空、没有描述都是 Git 允许的真实提交（--allow-empty-message 等），不算解析错误。
   detail.description = std::wstring(tokens[6]);
   TrimTrailingNewlines(&detail.description);
-  if (detail.description.size() > kCommitDetailDescriptionLimit) {
-    detail.description.resize(kCommitDetailDescriptionLimit);
-    // 截点正好落在代理对中间会留下一个孤立的半字符：编辑框与剪贴板都会拿到非法的 UTF-16。
-    if (!detail.description.empty()) {
-      const wchar_t last = detail.description.back();
-      if (last >= 0xD800 && last <= 0xDBFF) {
-        detail.description.pop_back();
-      }
-    }
-    detail.descriptionTruncated = true;
-  }
+  // 上限按 UTF-16 单元数计（不是按本机 wchar_t 个数）：否则同一条提交在两个平台上
+  // 留下的文字长度不一样，Linux 还会因为把 emoji 当成一个单元而多留一半。
+  detail.description =
+      TruncateToUtf16Limit(detail.description, kCommitDetailDescriptionLimit,
+                           &detail.descriptionTruncated);
 
   result.ok = true;
   result.detail = std::move(detail);

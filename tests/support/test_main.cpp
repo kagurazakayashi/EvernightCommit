@@ -2,13 +2,19 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "support/push_guard.h"
+
+#ifdef _WIN32
+// 命令窗口辅助入口只在 Windows 那条执行链上存在（见 main() 里的用法）。
 #include "platform/windows/command_window_helper.h"
+#endif
 
 namespace gc::test {
 namespace {
@@ -16,29 +22,37 @@ namespace {
 // ---------------------------------------------------------------------------
 // 验收分组（详见 docs/testing.md 的「测试分组」一节）。
 //
-// 目的是给「AI 会话可自跑」与「必须用户亲跑」划一条可执行的界线：
+// 目的是给「AI 会话可自跑」与「必须使用者亲跑」划一条可执行的界线：
 //   pure         —— 纯逻辑：不启动任何子进程、不碰真实 Git/文件系统副作用。
 //   windows      —— 真实 Win32 集成：启动 cmd.exe/建真实目录与句柄，但绝不启动 Git。
 //   git-readonly —— 真实 Git 集成，但逐例核实过「用例体+其调用的夹具辅助函数」都不出现
 //                   git commit / git push（init/add/config/fetch/update-ref/hash-object
 //                   /merge --no-commit/ls-files/status 等只读或非提交形态允许）。
-//   git-mutating —— 夹具内部会执行真实 git commit / git push（含 RemoteRig::Prepare）。
-//                   按 AGENTS.md 约束只能由用户运行；本程序绝不代跑。
-//   unclassified —— 新出现、尚未登记进下表的文件。保守归法：等同 git-mutating，
-//                   只允许全量运行，任何分组选择都不含它，并给出明确警告，
+//   git-commit   —— 会在用例自有的隔离临时仓库里执行真实 git commit，但逐例核实不出现
+//                   git push。本轮授权允许 AI 会话跑这一组（隔离仓库、不联网、不动真实仓库）。
+//   git-push     —— 会执行 git push（直接写 push、调 GitFixture::Push、用 RemoteRig，
+//                   或把 push 形态的方案参数原样交给真实 Git）。按 AGENTS.md 与本轮授权
+//                   一律禁止自动运行：没有使用者本人放行就跑不起来，见 support/push_guard.h。
+//   unclassified —— 新出现、尚未登记进下表的文件。保守归法：等同 git-push，
+//                   任何分组选择与默认运行都不含它，并给出明确警告，
 //                   防止「新文件被误当纯逻辑自跑」。
+//
+// 默认（不写 --group）= 上面前四组，即「安全集」；git-push 与 unclassified 一律不跑，
+// 并在汇总里报明被排除的数量——不再有「一次全量把提交和推送混在一起」这个入口。
 //
 // 维护规则（运行器会强制）：
 //   1) 新增测试文件必须登记进 kPureFiles / kWindowsFiles / kFixtureFiles 之一，
 //      否则落入 unclassified 并在每次运行时报明；
-//   2) kVerifiedReadOnlyCases 里的每个名字必须恰好命中一个注册用例，
+//   2) kVerifiedReadOnlyCases 与 kVerifiedCommitCases 里的每个名字必须恰好命中一个注册用例，
 //      用例改名/删除时必须同步本表，否则启动即失败（防「白名单腐烂」把
-//      含提交的用例错放进可自跑组）；
-//   3) 判定「只读」的标准是逐行核实用例体与其调用到的文件内辅助函数，
-//      注释不可作数；拿不准就留在 git-mutating。
+//      含推送的用例错放进可自跑组）；两张表不得有同名条目；
+//   3) 判定「只读」「只提交」的标准是逐行核实用例体与其调用到的文件内辅助函数，
+//      注释不可作数；拿不准就留在 git-push（禁止自动运行那一侧）。
+//   4) 表只是选择依据，不是安全边界：真正的边界是夹具与命令窗口里的 push 闸门。
+//      归类错了会在执行时被拦下并记成「拒绝 push」，运行以退出码 4 结束，不会当成通过。
 // ---------------------------------------------------------------------------
 
-enum class CaseGroup { pure, windows, gitReadonly, gitMutating, unclassified };
+enum class CaseGroup { pure, windows, gitReadonly, gitCommit, gitPush, unclassified };
 
 std::string_view GroupLabel(CaseGroup group) {
   switch (group) {
@@ -48,12 +62,20 @@ std::string_view GroupLabel(CaseGroup group) {
       return "windows";
     case CaseGroup::gitReadonly:
       return "git-readonly";
-    case CaseGroup::gitMutating:
-      return "git-mutating";
+    case CaseGroup::gitCommit:
+      return "git-commit";
+    case CaseGroup::gitPush:
+      return "git-push";
     case CaseGroup::unclassified:
       return "unclassified";
   }
   return "unclassified";
+}
+
+// 可自动运行（AI 会话与默认入口都只碰这些组）。
+bool AutoRunnable(CaseGroup group) {
+  return group == CaseGroup::pure || group == CaseGroup::windows ||
+         group == CaseGroup::gitReadonly || group == CaseGroup::gitCommit;
 }
 
 bool ParseGroup(std::string_view text, CaseGroup& out) {
@@ -69,8 +91,12 @@ bool ParseGroup(std::string_view text, CaseGroup& out) {
     out = CaseGroup::gitReadonly;
     return true;
   }
-  if (text == "git-mutating") {
-    out = CaseGroup::gitMutating;
+  if (text == "git-commit") {
+    out = CaseGroup::gitCommit;
+    return true;
+  }
+  if (text == "git-push") {
+    out = CaseGroup::gitPush;
     return true;
   }
   if (text == "unclassified") {
@@ -111,6 +137,7 @@ constexpr const char* kPureFiles[] = {
     "operation_history_tests.cpp",
     "persistent_state_tests.cpp",
     "pull_plan_tests.cpp",
+    "push_guard_tests.cpp",  // push 闸门自身的判据（纯逻辑，两个平台都编）。
     "push_plan_tests.cpp",
     "repository_tests.cpp",
     "restore_plan_tests.cpp",
@@ -140,7 +167,8 @@ constexpr const char* kWindowsFiles[] = {
     "commit_form_time_tests.cpp",  // 真实窗口上的提交表单时间控件：联动取的是看得见的那一半。不起子进程、不碰文件系统。
 };
 
-// 引用 GitFixture/RemoteRig 的文件；未列入下方只读名单的用例默认含提交/推送。
+// 引用 GitFixture/RemoteRig 的文件；未列入下方两张名单的用例默认含提交/推送，
+// 其中「含推送」是禁止自动运行那一侧。
 constexpr const char* kFixtureFiles[] = {
     "author_config_fixture_tests.cpp",
     "commit_changes_fixture_tests.cpp",
@@ -274,10 +302,125 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     "commit_detail_distinguishes_no_description_from_unreadable_object",
     // conflict_fixture_tests.cpp —— 只有 init、只读查询与在临时目录里造物（建目录/写痕迹档案/
     // 写工作区文件但不 add）：不建提交、不推送、不动索引、不改任何配置（逐行核实于 2026-10-08
-    // 「冲突处理入口」任务；文件里其余用例都要提交图，归 git-mutating 由维护者运行）。
+    // 「冲突处理入口」任务；文件里其余用例都要提交图，按是否写远端归进 git-commit 或 git-push）。
     "conflict_probe_fixture_accepts_the_query_shapes_on_a_fresh_repository",
     "conflict_probe_fixture_separates_unreadable_git_dir_from_no_markers",
 };
+
+// 逐例核实过「在自有隔离临时仓库里执行真实 git commit，但不执行 git push」的夹具用例
+// （2026-10-17 本轮按当次授权新增：允许测提交，不允许任何推送）。
+//
+// 判据：用例体与它调用到的文件内辅助函数里，既没有 RemoteRig（其 Prepare 会 push -u）、
+// 也没有 GitFixture::Push、更没有把 push 形态的方案参数交给真实 Git；
+// 出现在 push_fixture_tests.cpp / first_push_fixture_tests.cpp 这类推送域文件里的用例，
+// 只要碰到 BuildPushPlan/BuildFirstPushPlan 的产物参数就一律不进本表。
+// 拿不准的留在 git-push（禁止自动运行那一侧）。本表与上表不得有同名条目，运行器会查。
+constexpr const char* kVerifiedCommitCases[] = {
+    "author_config_query_does_not_touch_the_repository",
+    "batch_fixture_add_all_reaches_every_change_but_ignored_paths",
+    "batch_fixture_unstage_all_in_unborn_repo_uses_only_index_reset",
+    "batch_fixture_unstage_all_refuses_while_a_conflict_is_still_pending",
+    "batch_fixture_unstage_all_returns_index_to_head_and_keeps_worktree",
+    "command_window_early_close_never_stays_running",
+    "command_window_reports_real_success_exit_code",
+    "commit_changes_real_empty_commit_lists_nothing_but_succeeds",
+    "commit_changes_real_file_diff_plan_does_not_over_match",
+    "commit_changes_real_lists_modified_added_deleted_and_rename",
+    "commit_changes_real_merge_commit_reports_first_parent_changes",
+    "commit_changes_real_missing_object_is_a_read_failure",
+    "commit_changes_real_rejects_untrusted_object_id_before_running",
+    "commit_history_fixture_capped_at_display_limit",
+    "commit_history_fixture_detached_head_still_readable",
+    "commit_history_fixture_empty_repository_skips_log",
+    "commit_history_fixture_merge_commit_recognized",
+    "commit_history_fixture_orders_and_fields_match_real_git",
+    "commit_history_fixture_refresh_picks_up_new_commits",
+    "commit_history_fixture_show_plan_resolves_in_real_repo",
+    "commit_identity_fixture_voids_confirmed_plan_after_a_merge_starts",
+    "commit_identity_fixture_voids_confirmed_plan_on_branch_switch_at_same_head",
+    "commit_identity_fixture_voids_confirmed_plan_when_staged_content_swaps",
+    "commit_plan_fixture_hook_rejection_creates_no_commit",
+    "commit_plan_fixture_real_commit_records_identities_times_and_scope",
+    "commit_plan_fixture_refuses_real_unresolved_merge_conflict",
+    "commit_timestamps_are_deterministic",
+    "conflict_continue_fixture_creates_a_merge_commit_and_clears_markers",
+    "conflict_continue_fixture_keeps_the_scene_when_a_hook_refuses",
+    "conflict_state_fixture_reads_a_real_merge_conflict",
+    "conflict_state_fixture_reads_a_real_rebase_with_companion_markers",
+    "conflict_state_fixture_separates_rebase_apply_from_git_am",
+    "detect_detached_head",
+    "detect_inside_git_directory",
+    "detect_linked_worktree",
+    "detect_plain_repository_reports_branch_and_no_upstream",
+    "detect_submodule_working_tree",
+    "detect_walks_up_from_subdirectory",
+    "diff_view_real_conflicted_item_yields_combined_diff",
+    "diff_view_real_deleted_added_and_rename",
+    "diff_view_real_literal_pathspec_does_not_over_match",
+    "diff_view_real_preview_leaves_repository_untouched",
+    "diff_view_real_submodule_shows_pointer_only",
+    "diff_view_real_two_sides_show_different_content",
+    "diff_view_real_untracked_content_and_binary_notice",
+    "executed_plan_is_rejected_when_the_branch_moved_after_confirmation",
+    "executing_normal_undo_creates_branch_reflog_even_when_logging_is_off",
+    "executing_normal_undo_keeps_index_bytes_and_staged_changes_together",
+    "executing_root_commit_undo_leaves_unborn_branch_with_contents_staged",
+    "fetch_blocked_without_any_remote_and_leaves_no_config",
+    "first_push_config_write_steps_stay_in_local_config_with_worktree_config",
+    "first_push_targets_fixture_lists_configured_remotes",
+    "fixture_hides_user_git_configuration",
+    "fixture_temp_root_is_created_and_cleaned_up",
+    "git_env_identity_commit_landing_uses_form_and_config_only",
+    "index_lock_failure_is_named_and_the_lock_file_is_left_alone",
+    "initial_commit_creates_real_objects",
+    "late_result_from_previous_repository_is_discarded",
+    "merge_commit_undo_targets_first_parent_and_forces_confirmation",
+    "operation_refresh_after_nonzero_exit_still_reads_the_repository",
+    "pull_preflight_blocked_without_upstream_and_writes_nothing",
+    "read_failure_lands_as_failure_and_recovers_on_next_refresh",
+    "real_conflict_and_detached_head_are_refused",
+    "refresh_picks_up_changes_made_outside_the_program",
+    "remote_bare_origin_marks_commit_as_known_published",
+    "restore_symref_update_ref_does_not_follow",
+    "restore_update_ref_fixture_moves_branch_back_and_rejects_stale_old",
+    "second_commit_links_to_first_as_parent",
+    "shallow_clone_depth_one_is_refused_and_keeps_the_branch",
+    "shallow_clone_depth_two_undoes_with_force_and_keeps_the_index",
+    "staging_fixture_conflicted_path_is_marked_resolved",
+    "staging_fixture_many_files_in_one_command",
+    "staging_fixture_missing_path_fails_without_partial_stage",
+    "staging_fixture_old_git_inline_mode_reaches_same_index",
+    "staging_fixture_re_add_updates_index_to_latest_worktree",
+    "staging_fixture_selected_only_leaves_unselected_changes_untouched",
+    "staging_fixture_special_paths_stay_literal",
+    "staging_fixture_submodule_records_pointer_only",
+    "staging_fixture_worktree_rename_requires_both_entries",
+    "submodule_entry_probe_fixture_allows_real_submodule_and_flags_its_state",
+    "submodule_entry_probe_fixture_refuses_uninitialized_clone",
+    "submodule_entry_probe_fixture_separates_moved_from_uninitialized",
+    "submodule_navigation_probes_do_not_touch_the_repositories",
+    "submodule_pointer_states_fixture_from_a_real_submodule",
+    "undo_binds_the_confirmed_branch_ref_not_the_mutable_head",
+    "undo_probe_reports_real_branch_head_parents_and_summary",
+    "unstage_fixture_head_repo_returns_index_to_head_and_keeps_worktree",
+    "unstage_fixture_many_selected_paths_in_one_command",
+    "unstage_fixture_old_git_inline_mode_reaches_same_index",
+    "unstage_fixture_rename_restores_both_paths_at_once",
+    "unstage_fixture_rename_single_path_would_leave_half_state",
+    "unstage_fixture_reset_form_reaches_the_same_index_when_head_exists",
+    "unstage_fixture_special_paths_stay_literal",
+    "unstage_fixture_submodule_pointer_returns_to_head",
+    "unstage_fixture_vanished_path_fails_without_partial_unstage",
+    "working_tree_distinguishes_unstaged_staged_and_untracked",
+    "workspace_status_classifies_modified_deleted_added_and_untracked",
+    "workspace_status_clean_repository_loads_empty_lists",
+    "workspace_status_partially_staged_file_shows_on_both_sides",
+    "workspace_status_rename_keeps_both_paths_verbatim",
+    "workspace_status_rm_cached_keeps_file_untracked_on_other_side",
+    "workspace_status_submodule_pointer_and_internal_states",
+    "workspace_status_unmerged_is_conflict_not_plain_delete",
+};
+
 
 bool InTable(const char* const* table, size_t count, std::string_view value) {
   return std::any_of(table, table + count,
@@ -318,37 +461,67 @@ CaseGroup GroupOf(const RegisteredCase& item) {
   if (InTable(kWindowsFiles, std::size(kWindowsFiles), base)) {
     return CaseGroup::windows;
   }
-  const bool readOnly = InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), item.name);
-  if (readOnly) {
+  if (InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), item.name)) {
     return CaseGroup::gitReadonly;
   }
+  if (InTable(kVerifiedCommitCases, std::size(kVerifiedCommitCases), item.name)) {
+    return CaseGroup::gitCommit;
+  }
+  // 夹具文件里没进上面两张名单的用例，以及没登记的新文件，一律落到「禁止自动运行」那一侧。
   if (InTable(kFixtureFiles, std::size(kFixtureFiles), base)) {
-    return CaseGroup::gitMutating;
+    return CaseGroup::gitPush;
   }
   return CaseGroup::unclassified;
 }
 
-// 分组表自审：白名单每条必须恰好命中一个注册用例；命中夹具文件之外的白名单同样按漂移处理
-// （只读名单的意义就是「从夹具文件里逐例核实过的例外」）。返回 0 表示表与注册集一致。
-int ValidateGroupTables() {
+// 校验一张用例名名单：每条必须恰好命中一个注册用例，且该用例来自夹具文件
+// （名单的意义就是「从夹具文件里逐例核实过的例外」）。只有真的编译了夹具用例的平台才用得上。
+#ifdef _WIN32
+int ValidateNameTable(const char* const* table, size_t count, const char* tableName) {
   int problems = 0;
-  for (const char* readOnlyName : kVerifiedReadOnlyCases) {
+  for (size_t i = 0; i < count; ++i) {
+    const char* caseName = table[i];
     int hits = 0;
     bool inFixtureFile = false;
     for (const RegisteredCase& item : Cases()) {
-      if (item.name == readOnlyName) {
+      if (item.name == caseName) {
         ++hits;
         inFixtureFile = InTable(kFixtureFiles, std::size(kFixtureFiles), BaseName(item.file));
       }
     }
     if (hits != 1 || !inFixtureFile) {
       std::fprintf(stderr,
-                   "分组表漂移：只读名单 \"%s\" 命中 %d 个注册用例（要求恰好 1 个且来自夹具文件）。"
-                   "用例改名/删除/搬移时必须同步 test_main.cpp 的 kVerifiedReadOnlyCases。\n",
-                   readOnlyName, hits);
+                   "分组表漂移：%s 里的 \"%s\" 命中 %d 个注册用例（要求恰好 1 个且来自夹具文件）。"
+                   "用例改名/删除/搬移时必须同步 test_main.cpp 的这张表。\n",
+                   tableName, caseName, hits);
       ++problems;
     }
   }
+  return problems;
+}
+
+#endif  // _WIN32（ValidateNameTable）
+
+// 分组表自审。返回 0 表示表与注册集一致。
+int ValidateGroupTables() {
+  int problems = 0;
+#ifdef _WIN32
+  problems += ValidateNameTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases),
+                                "kVerifiedReadOnlyCases");
+  problems += ValidateNameTable(kVerifiedCommitCases, std::size(kVerifiedCommitCases),
+                                "kVerifiedCommitCases");
+  for (const char* commitName : kVerifiedCommitCases) {
+    if (InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), commitName)) {
+      std::fprintf(stderr, "分组表漂移：\"%s\" 同时出现在只读名单与提交名单里。\n", commitName);
+      ++problems;
+    }
+  }
+#else
+  // 非 Windows 目标根本没编译夹具用例（见 tests/CMakeLists.txt 的清单拆分），
+  // 拿两张名单去比对必然全命中 0 个。这里如实说明「不适用」，不算通过也不算失败。
+  std::fprintf(stderr,
+               "说明：本平台未编译 Git 夹具用例，只读/提交名单的自审随之跳过（不适用，非通过）。\n");
+#endif
   std::vector<std::string> unclassifiedFiles;
   for (const RegisteredCase& item : Cases()) {
     if (GroupOf(item) == CaseGroup::unclassified &&
@@ -359,7 +532,7 @@ int ValidateGroupTables() {
   }
   for (const std::string& file : unclassifiedFiles) {
     std::fprintf(stderr,
-                 "分组表缺口：文件 %s 有用例未登记（暂按 git-mutating 对待）。"
+                 "分组表缺口：文件 %s 有用例未登记（暂按 git-push 对待，任何自动入口都不跑它）。"
                  "新测试文件必须归入 test_main.cpp 的分组表之一。\n",
                  file.c_str());
   }
@@ -370,8 +543,13 @@ struct GroupCounts {
   int pure = 0;
   int windows = 0;
   int gitReadonly = 0;
-  int gitMutating = 0;
+  int gitCommit = 0;
+  int gitPush = 0;
   int unclassified = 0;
+
+  int Total() const { return pure + windows + gitReadonly + gitCommit + gitPush + unclassified; }
+  // 可自动运行那一侧（默认入口与 --group safe 的范围）。
+  int AutoRunnable() const { return pure + windows + gitReadonly + gitCommit; }
 };
 
 GroupCounts CountGroups() {
@@ -387,8 +565,11 @@ GroupCounts CountGroups() {
       case CaseGroup::gitReadonly:
         ++counts.gitReadonly;
         break;
-      case CaseGroup::gitMutating:
-        ++counts.gitMutating;
+      case CaseGroup::gitCommit:
+        ++counts.gitCommit;
+        break;
+      case CaseGroup::gitPush:
+        ++counts.gitPush;
         break;
       case CaseGroup::unclassified:
         ++counts.unclassified;
@@ -401,9 +582,80 @@ GroupCounts CountGroups() {
 void PrintGroupStatsLine(std::string_view prefix) {
   const GroupCounts counts = CountGroups();
   std::fprintf(stdout,
-               "%s注册总数 %zu：pure %d / windows %d / git-readonly %d / git-mutating %d / unclassified %d\n",
-               prefix.data(), Cases().size(), counts.pure, counts.windows, counts.gitReadonly,
-               counts.gitMutating, counts.unclassified);
+               "%s注册总数 %d：pure %d / windows %d / git-readonly %d / git-commit %d / "
+               "git-push %d / unclassified %d\n",
+               prefix.data(), static_cast<int>(Cases().size()), counts.pure, counts.windows,
+               counts.gitReadonly, counts.gitCommit, counts.gitPush, counts.unclassified);
+}
+
+// 一次运行的分组选择结果：跑哪些、被排除多少、要不要放行 push。
+enum class SelectMode { safe, single, everything };
+
+struct RunSelection {
+  SelectMode mode = SelectMode::safe;
+  CaseGroup requested = CaseGroup::pure;
+};
+
+bool Selected(const RunSelection& selection, CaseGroup group) {
+  switch (selection.mode) {
+    case SelectMode::safe:
+      return AutoRunnable(group);
+    case SelectMode::everything:
+      return true;
+    case SelectMode::single:
+      break;
+  }
+  return group == selection.requested;
+}
+
+// 禁止自动运行那一侧的组要点名放行：既要 --group 指到它，也要环境里带 GC_ALLOW_PUSH=1。
+// 只满足一半就当没放行——少一道确认就少一次误跑。返回 false 时 exitCode 已写好原因。
+bool PushRunAuthorized(const char* what, int& exitCode) {
+  const char* grant = std::getenv("GC_ALLOW_PUSH");
+  if (grant != nullptr && std::string_view(grant) == "1") {
+    return true;
+  }
+  const GroupCounts counts = CountGroups();
+  std::fprintf(stderr,
+               "拒绝运行 %s：这些用例会在隔离夹具里执行真实 git push。\n"
+               "  本轮授权允许测 commit、不允许任何 push；推送一律由使用者本人在自己终端里跑。\n"
+               "  数量：git-push %d 个、unclassified %d 个（未登记的按禁止侧对待）。\n"
+               "  确实要由使用者本人执行时：设 GC_ALLOW_PUSH=1 再点名这一组。\n",
+               what, counts.gitPush, counts.unclassified);
+  exitCode = 4;
+  return false;
+}
+
+// 把 --group 文本翻成选择，并据此设定 push 闸门。
+// 返回 false 表示应当拒绝启动（未知分组，或点了禁止组却没带放行凭据）。
+bool ResolveSelection(std::string_view groupFilter, RunSelection& out, int& exitCode) {
+  if (groupFilter.empty() || groupFilter == "safe") {
+    out.mode = SelectMode::safe;
+    return true;
+  }
+  if (groupFilter == "all") {
+    if (!PushRunAuthorized("\"全部用例\"（含会推送远端的一组）", exitCode)) {
+      return false;
+    }
+    out.mode = SelectMode::everything;
+    return true;
+  }
+  CaseGroup group = CaseGroup::pure;
+  if (!ParseGroup(groupFilter, group)) {
+    std::fprintf(stderr,
+                 "未知分组 \"%s\"。可用：pure / windows / git-readonly / git-commit / "
+                 "git-push / unclassified / safe / all。\n",
+                 std::string(groupFilter).c_str());
+    exitCode = 3;
+    return false;
+  }
+  if (!AutoRunnable(group) && !PushRunAuthorized(("分组 \"" + std::string(groupFilter) + "\"").c_str(),
+                                                 exitCode)) {
+    return false;
+  }
+  out.mode = SelectMode::single;
+  out.requested = group;
+  return true;
 }
 
 }  // namespace
@@ -425,14 +677,27 @@ Registrar::Registrar(const char* name, CaseBody body, const char* file) {
 }
 
 int ListCases(std::string_view nameFilter, std::string_view groupFilter) {
-  CaseGroup requested = CaseGroup::unclassified;
-  const bool byGroup = !groupFilter.empty() && groupFilter != "all" && ParseGroup(groupFilter, requested);
+  // 列名单不碰 Git、不改环境，所以禁止组也允许列出来看——「能看清被禁的是哪些」正是核对清单的手段。
+  RunSelection selection;
+  if (groupFilter.empty() || groupFilter == "safe") {
+    selection.mode = SelectMode::safe;
+  } else if (groupFilter == "all") {
+    selection.mode = SelectMode::everything;
+  } else if (ParseGroup(groupFilter, selection.requested)) {
+    selection.mode = SelectMode::single;
+  } else {
+    std::fprintf(stderr,
+                 "未知分组 \"%s\"。可用：pure / windows / git-readonly / git-commit / "
+                 "git-push / unclassified / safe / all。\n",
+                 std::string(groupFilter).c_str());
+    return -1;
+  }
   int listed = 0;
   for (const RegisteredCase& item : Cases()) {
     if (!nameFilter.empty() && item.name.find(nameFilter) == std::string::npos) {
       continue;
     }
-    if (byGroup && GroupOf(item) != requested) {
+    if (!Selected(selection, GroupOf(item))) {
       continue;
     }
     std::fprintf(stdout, "%s\t%s\n", GroupLabel(GroupOf(item)).data(), item.name.c_str());
@@ -441,32 +706,55 @@ int ListCases(std::string_view nameFilter, std::string_view groupFilter) {
   return listed;
 }
 
+int PrintGroups() {
+  const GroupCounts counts = CountGroups();
+  struct Row {
+    CaseGroup group;
+    int GroupCounts::*count;
+    const char* authorization;
+  };
+  const Row rows[] = {
+      {CaseGroup::pure, &GroupCounts::pure, "可自动运行（纯逻辑，不起子进程）"},
+      {CaseGroup::windows, &GroupCounts::windows, "可自动运行（真实 Win32，但不启动 Git）"},
+      {CaseGroup::gitReadonly, &GroupCounts::gitReadonly, "可自动运行（真实 Git，逐例核实无提交无推送）"},
+      {CaseGroup::gitCommit, &GroupCounts::gitCommit, "可自动运行（隔离临时仓库里真实提交，不推送）"},
+      {CaseGroup::gitPush, &GroupCounts::gitPush, "禁止自动运行（会 git push，须使用者本人放行）"},
+      {CaseGroup::unclassified, &GroupCounts::unclassified, "禁止自动运行（未登记，按禁止侧对待）"},
+  };
+  std::fprintf(stdout, "分组账目（本平台已编译的注册用例）：\n");
+  for (const Row& row : rows) {
+    std::fprintf(stdout, "  %-14s %4d 个  %s\n", GroupLabel(row.group).data(), counts.*(row.count),
+                 row.authorization);
+  }
+  PrintGroupStatsLine("  ");
+  std::fprintf(stdout, "  可自动运行合计 %d 个 / 禁止自动运行 %d 个\n", counts.AutoRunnable(),
+               counts.Total() - counts.AutoRunnable());
+  return 0;
+}
+
 int RunAll(std::string_view nameFilter, std::string_view groupFilter) {
   if (const int drift = ValidateGroupTables(); drift != 0) {
     std::fprintf(stdout, "\n分组表校验未通过（%d 处漂移），拒绝在名单与注册集不一致时运行。\n", drift);
     return 3;
   }
-  // groupFilter：空或 "all" 表示不分组；其余必须能解析，解析失败同样拒绝运行。
-  bool matchGroup = false;
-  CaseGroup requested = CaseGroup::pure;
-  if (!groupFilter.empty() && groupFilter != "all") {
-    if (!ParseGroup(groupFilter, requested)) {
-      std::fprintf(stderr,
-                   "未知分组 \"%s\"。可用：pure / windows / git-readonly / git-mutating / unclassified / all。\n",
-                   std::string(groupFilter).c_str());
-      return 3;
-    }
-    matchGroup = true;
+  RunSelection selection;
+  int refusalExitCode = 0;
+  if (!ResolveSelection(groupFilter, selection, refusalExitCode)) {
+    return refusalExitCode;
   }
+  // push 闸门：只有点名放行过的那两种模式才打开，安全集与单个可自跑组一律关着。
+  SetGitPushAllowed(selection.mode == SelectMode::everything ||
+                    (selection.mode == SelectMode::single && !AutoRunnable(selection.requested)));
 
   int matched = 0;
   int failedCases = 0;
   int prerequisiteFailures = 0;
+  int pushRefusals = 0;
   for (const RegisteredCase& item : Cases()) {
     if (!nameFilter.empty() && item.name.find(nameFilter) == std::string::npos) {
       continue;
     }
-    if (matchGroup && GroupOf(item) != requested) {
+    if (!Selected(selection, GroupOf(item))) {
       continue;
     }
     // 命中 0 绝不报「全通过」：过滤器写错、用例改名、分组表漂移都会在这里现形。
@@ -475,8 +763,13 @@ int RunAll(std::string_view nameFilter, std::string_view groupFilter) {
     std::fprintf(stdout, "[ 运行 ] %s（%s）\n", item.name.c_str(),
                  GroupLabel(GroupOf(item)).data());
     std::string abortReason;
+    bool refused = false;
     try {
       item.body();
+    } catch (const GitPushForbidden& failure) {
+      // 归类错了或被禁止的组被强行选中：闸门拦下，单独计数，不混进断言失败。
+      refused = true;
+      abortReason = failure.what();
     } catch (const PrerequisiteFailure& failure) {
       // 夹具自身的析构（清理临时目录）在栈展开中照常执行。
       abortReason = failure.what();
@@ -484,6 +777,11 @@ int RunAll(std::string_view nameFilter, std::string_view groupFilter) {
       abortReason = std::string("用例抛出未预期异常: ") + failure.what();
     } catch (...) {
       abortReason = "用例抛出未知异常";
+    }
+    if (refused) {
+      ++pushRefusals;
+      std::fprintf(stdout, "[ 拒绝 push ] %s：%s\n", item.name.c_str(), abortReason.c_str());
+      continue;
     }
     if (!abortReason.empty()) {
       ++prerequisiteFailures;
@@ -502,7 +800,7 @@ int RunAll(std::string_view nameFilter, std::string_view groupFilter) {
     std::fprintf(stdout,
                  "\n过滤器命中 0 个用例（nameFilter=\"%s\" group=\"%s\"）：没有运行任何东西，不算通过。\n",
                  std::string(nameFilter).c_str(),
-                 groupFilter.empty() ? "all" : std::string(groupFilter).c_str());
+                 groupFilter.empty() ? "safe" : std::string(groupFilter).c_str());
     return 2;
   }
   if (prerequisiteFailures != 0) {
@@ -511,16 +809,29 @@ int RunAll(std::string_view nameFilter, std::string_view groupFilter) {
                  "不是断言失败，但同样必须解决后才能视为测试通过。\n",
                  prerequisiteFailures);
   }
+  if (pushRefusals != 0) {
+    std::fprintf(stdout,
+                 "\n注意：有 %d 个用例被 push 闸门拦下（它们要执行 git push）。"
+                 "要么分组归类需要修正，要么这一组本来就该由使用者本人跑。\n",
+                 pushRefusals);
+  }
   PrintGroupStatsLine("\n");
+  const GroupCounts counts = CountGroups();
   std::fprintf(stdout,
-               "本次执行 %d 个（组外未执行 %zu 个）：失败 %d 个、前置失败 %d 个、断言失败 %d 处。\n",
-               matched, Cases().size() - static_cast<size_t>(matched), failedCases,
-               prerequisiteFailures, Failures());
-  if (const GroupCounts counts = CountGroups(); counts.unclassified != 0) {
+               "本次执行 %d 个（未执行 %d 个，其中禁止自动运行 %d 个）："
+               "失败 %d 个、前置失败 %d 个、拒绝 push %d 个、断言失败 %d 处。\n",
+               matched, static_cast<int>(Cases().size()) - matched,
+               counts.gitPush + counts.unclassified, failedCases, prerequisiteFailures,
+               pushRefusals, Failures());
+  if (counts.unclassified != 0) {
     std::fprintf(stdout, "警告：存在 %d 个未登记用例（unclassified），请把新文件归入 test_main.cpp 分组表。\n",
                  counts.unclassified);
   }
-  return failedCases == 0 ? 0 : 1;
+  if (failedCases != 0) {
+    return 1;
+  }
+  // 断言全过但有用例被拦下：不能算通过，单独一个退出码把「归类要修」这件事顶到眼前。
+  return pushRefusals == 0 ? 0 : 4;
 }
 
 }  // namespace gc::test
@@ -530,20 +841,28 @@ namespace {
 void PrintUsage() {
   std::fprintf(
       stderr,
-      "用法：gc_tests.exe [--group pure|windows|git-readonly|git-mutating|all] [姓名片段]\n"
-      "      gc_tests.exe --list [--group G] [姓名片段]\n"
-      "分组含义与运行授权见 docs/testing.md；git-mutating 组含真实 git commit/push，只由用户运行。\n");
+      "用法：gc_tests [--group pure|windows|git-readonly|git-commit|git-push|unclassified|safe|all]"
+      " [姓名片段]\n"
+      "      gc_tests --list [--group G] [姓名片段]     输出「组名<TAB>用例名」名单\n"
+      "      gc_tests --groups                          打印各组账目与运行授权\n"
+      "不写 --group 时只跑「安全集」= pure + windows + git-readonly + git-commit；\n"
+      "git-push 与未登记用例一律不跑（本轮授权允许隔离仓库里测 commit，不允许任何 push）。\n"
+      "要点名跑 git-push/all 必须同时设 GC_ALLOW_PUSH=1，由使用者本人执行。\n"
+      "退出码：0 全通过 / 1 有失败 / 2 命中 0 个 / 3 分组表漂移或未知分组 / 4 被禁止的 push。\n"
+      "分组含义与夹具隔离规则见 docs/testing.md。\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
   // 命令窗口执行器启动的是「当前可执行文件」的辅助模式：测试二进制同样要认这个入口，
   // 集成用例才会走与正式程序完全相同的那条执行链路（新控制台、说明书、CreateProcessW）。
   int helperExitCode = 0;
   if (gc::platform::RunCommandWindowHelperIfRequested(&helperExitCode)) {
     return helperExitCode;
   }
+#endif
   // 行缓冲：重定向到文件时也能即时看到进度，不会把最后几行憋在块缓冲区里。
   // MSVC 调试版 CRT 要求显式给出缓冲区大小（0 会触发断言对话框）。
   std::setvbuf(stdout, nullptr, _IOLBF, 512);
@@ -556,6 +875,9 @@ int main(int argc, char** argv) {
     if (argument == "--list") {
       listMode = true;
       continue;
+    }
+    if (argument == "--groups") {
+      return gc::test::PrintGroups();
     }
     if (argument == "--group") {
       if (i + 1 >= argc) {
@@ -580,6 +902,9 @@ int main(int argc, char** argv) {
 
   if (listMode) {
     const int listed = gc::test::ListCases(nameFilter, groupFilter);
+    if (listed < 0) {
+      return 3;  // 未知分组：与 RunAll 同一个退出码，脚本不必分两种写法
+    }
     if (listed == 0) {
       std::fprintf(stderr, "--list 命中 0 个用例：过滤器或分组写错了，空名单不算结果。\n");
       return 2;

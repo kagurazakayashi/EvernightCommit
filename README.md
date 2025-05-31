@@ -3,9 +3,14 @@
 # EvernightCommit —— Git 提交图形工具（当前交付 Windows）
 
 EvernightCommit 是一款 Git 图形界面工具。业务逻辑（Git 机器输出解析、操作方案与确认判定）
-与平台能力已经分成两层，界面则按统一的 wxWidgets 收敛；**当前能构建、能运行的仍然只有
-Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现，不依赖跨平台 GUI 框架。
-窗口标题为“Git 提交工具”。跨平台拆分进度与还差的环节见
+与平台能力已经分成两层，界面则按统一的 wxWidgets 收敛；**当前能给用户用的仍然只有
+Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现。
+窗口标题为“Git 提交工具”。
+
+Linux 侧已经有可用的**开发入口**（配置、构建、安全测试、调试、wxWidgets 依赖与最小启动
+检查窗口都实测过），但还没有 Linux 版程序：平台实现与界面尚未迁移，Linux 上构建不到
+主程序。范围与未迁移清单见 [docs/building.md](docs/building.md) 与
+[docs/testing.md](docs/testing.md)。跨平台拆分进度与还差的环节见
 [docs/architecture.md](docs/architecture.md) 的「过渡期的 Win32 界面」和「已知待办差异」。
 
 它的设计取向是**看得见、不越权**：你主动触发的每一次 Git 操作（暂存、取消暂存、提交、
@@ -18,10 +23,11 @@ Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现
 
 ## 支持平台与前提
 
-- **操作系统**：仅支持 Windows x64（Windows 10 及以上）。其他平台或非 x64 架构在构建
-  配置阶段就会直接报错，程序也不提供 ARM64 版本。共用业务逻辑层已经不再依赖 Windows 头，
-  可以在 Linux 上单独做编译核对（命令见 [docs/building.md](docs/building.md)），
-  但那不等于 Linux 版可用——平台实现与界面还没迁移。
+- **操作系统（程序）**：仅支持 Windows x64（Windows 10 及以上）。非 x64 架构在构建配置
+  阶段就会直接报错，程序也不提供 ARM64 版本。
+- **操作系统（开发入口）**：Linux x86_64 可以配置、构建、跑安全测试与调试，也能起一个
+  wxWidgets 启动检查窗口；这条路径验的是共用业务逻辑层，**不等于 Linux 版可用**——
+  平台实现与界面还没迁移，Linux 上构建不出主程序。其他平台或非 x86_64 架构配置期直接拒绝。
 - **Git 命令行工具**：必须外部安装（推荐 [Git for Windows](https://git-scm.com/download/win)），
   本程序不携带、不安装 Git。启动时会自动在 PATH 里寻找 `git.exe` 并后台验证；也可以手动
   粘贴路径或用“浏览…”指定。机器上装着好几个 `git.exe` 时，下拉列表按来源排档：
@@ -43,15 +49,28 @@ Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现
 当前版本**只以源代码形式提供**：没有发布地址，也没有安装器和自动更新渠道。获得程序的
 方式是构建后直接运行产物：
 
+Windows（PowerShell，仓库根目录）：
+
 ```powershell
 cmake --preset vs2026-x64
 cmake --build --preset vs2026-debug
 .\build\vs2026-x64\bin\Debug\EvernightCommit.exe
 ```
 
+也可以直接用根目录入口：`\.\build.ps1`、`.\run.ps1`、`.\test.ps1`、`.\clean.ps1`。
 只有 Visual Studio 2022 时改用 `vs2022-x64` / `vs2022-debug` 预设；Ninja 与其他构建
 开关见 [docs/building.md](docs/building.md)。产物是单个 `EvernightCommit.exe`，双击
 即可启动（GUI 程序，无需命令行参数）。
+
+Linux（bash，仓库根目录；只到开发入口为止，没有主程序）：
+
+```sh
+bash ./configure.sh   # 默认 Debug 预设；--config Release 换配置
+bash ./build.sh       # 核心层 + 测试 + gc_wx_bootstrap
+bash ./test.sh        # 安全测试入口（ctest，只跑可自动运行的分组）
+bash ./run.sh --check # 核对 wxWidgets 依赖与链接形态
+bash ./debug.sh       # 带符号构建并交给 gdb/lldb
+```
 
 ## 快速上手：第一次提交
 
@@ -548,9 +567,10 @@ agent/交互提示（都在命令窗口里原生发生），界面与结论中�
 
 - [docs/building.md](docs/building.md) —— 环境要求、工具链、构建预设、VC 运行库部署、
   代码页与用户名兼容性矩阵。
-- [docs/testing.md](docs/testing.md) —— 测试入口与分组（其中 `git-mutating` 组在隔离
-  夹具里执行真实 `git commit`/`git push`，按本项目的开发约束只由维护者本人运行）、
-  夹具隔离规则、边界环境矩阵。
+- [docs/testing.md](docs/testing.md) —— 测试入口与六个分组：可自动运行的
+  `pure`/`windows`/`git-readonly`/`git-commit`（后一组会在**用例自有的隔离临时仓库**里跑真实
+  `git commit`），以及禁止自动运行的 `git-push`/`unclassified`（会执行真实 `git push`，
+  只由项目所有者本人显式放行后运行）；还有夹具隔离规则、边界环境矩阵与 Linux 未迁移清单。
 - [docs/git-behavior.md](docs/git-behavior.md) —— 逐操作的详细行为规格（确认框、拒绝
   条件、命令形态与其实测依据）。
 - [docs/architecture.md](docs/architecture.md) —— 代码结构与模块职责。

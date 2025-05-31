@@ -3,6 +3,7 @@
 // （参数形态由 commit_detail_fixture_tests.cpp 交给真实 Git 核验）。
 #include "support/tiny_test.h"
 
+#include <algorithm>  // std::find：此前只靠标准库的间接包含侥幸编过，GCC 下直接报找不到
 #include <string>
 #include <vector>
 

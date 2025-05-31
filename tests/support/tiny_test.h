@@ -25,18 +25,32 @@ struct PrerequisiteFailure : std::runtime_error {
   explicit PrerequisiteFailure(const std::string& reason) : std::runtime_error(reason) {}
 };
 
+// 用例想执行 git push，而本次运行没有放行（见 support/push_guard.h）。
+// 运行器把它单独记成「拒绝 push」，既不算通过，也不混进断言失败——
+// 它说明的是分组归类需要修正，或者这个用例本来就该由使用者本人跑。
+struct GitPushForbidden : std::runtime_error {
+  explicit GitPushForbidden(const std::string& reason) : std::runtime_error(reason) {}
+};
+
 struct Registrar {
   Registrar(const char* name, CaseBody body, const char* file);
 };
 
-// 运行全部用例；nameFilter 非空时只运行用例名包含该片段的用例。
-// groupFilter 非空时按验收分组（pure/windows/git-readonly/git-mutating/all）再筛一道；
-// 解析与统计都在 RunAll 内部完成（见 test_main.cpp 的分组表）。
-// 过滤器命中 0 个用例时返回 2，绝不把「一个都没跑」报成通过。
+// 运行用例；nameFilter 非空时只运行用例名包含该片段的用例。
+// groupFilter 语义（分组表与授权见 test_main.cpp 顶部注释、docs/testing.md）：
+//   空或 "safe" —— 只跑可自动运行的四组（pure/windows/git-readonly/git-commit），这是默认；
+//   组名        —— 只跑那一组；点到 git-push / unclassified 必须另有 GC_ALLOW_PUSH=1；
+//   "all"       —— 连禁止组一起跑，同样要 GC_ALLOW_PUSH=1。
+// 退出码：0 全通过；1 有断言/前置失败；2 过滤器命中 0 个（没跑任何东西，不算结果）；
+// 3 分组表漂移或未知分组；4 有用例被 push 闸门拦下（归类要修，或本来就该人工跑）。
 int RunAll(std::string_view nameFilter = {}, std::string_view groupFilter = {});
 
 // 按分打印全部注册用例（group<TAB>name），供 --list 与外部工具生成名单；同样接受过滤。
+// 返回命中数量，未知分组返回 -1。
 int ListCases(std::string_view nameFilter = {}, std::string_view groupFilter = {});
+
+// 打印各组账目与运行授权（--groups）。
+int PrintGroups();
 
 }  // namespace gc::test
 

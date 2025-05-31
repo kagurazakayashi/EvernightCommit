@@ -258,8 +258,10 @@ g::RestoreRecheckScene HealthyScene(const g::GitQueryResult& branchValue) {
 }  // namespace
 
 GC_TEST(restore_plan_recheck_mismatch) {
-  GC_CHECK(g::DescribeRestoreRecheckMismatch(HealthyScene(Answered(kOidC)), kOidC, kB).empty(),
-           "复核仍一致 → 空串放行");
+  // 带说明的断言必须用 GC_CHECK_MESSAGE：GC_CHECK 只收一个实参，
+  // MSVC 对多出来的实参只给 C4002 警告（那句说明从来没生效过），GCC 直接编译失败。
+  GC_CHECK_MESSAGE(g::DescribeRestoreRecheckMismatch(HealthyScene(Answered(kOidC)), kOidC, kB).empty(),
+                   "复核仍一致 → 空串放行");
   GC_CHECK(g::DescribeRestoreRecheckMismatch(HealthyScene(Answered(kOidD)), kOidC, kB).find(L"又被挪走") !=
            std::wstring::npos);
   GC_CHECK(g::DescribeRestoreRecheckMismatch(HealthyScene(NoResult()), kOidC, kB).find(L"已经不存在") !=

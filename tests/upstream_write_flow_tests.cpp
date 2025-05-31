@@ -64,7 +64,7 @@ GC_TEST(upstream_write_flow_delivers_reviewed_arguments_to_host) {
   // 界面此刻在另一个仓库：绑定值必须压过它。
   OperationContext ctx = MakeContext(L"P:\\界面切到的\\other");
 
-  GC_CHECK(flow.Begin(host, ctx, MakePlan(steps)), "第一条应当场发出");
+  GC_CHECK_MESSAGE(flow.Begin(host, ctx, MakePlan(steps)), "第一条应当场发出");
   GC_REQUIRE(host.launches.size() == 1, "Begin 之后恰好发出一条");
   const CommandWindowOperation first = host.launches[0].operation;  // 取副本：后面还会往同一个 vector 里追加
   GC_CHECK(ArgumentsEqual(first.arguments, steps[0].arguments));
@@ -81,7 +81,7 @@ GC_TEST(upstream_write_flow_delivers_reviewed_arguments_to_host) {
 
   // 第一条成功 → 才发第二条；参数、ID、仓库、序号都要是第二条自己的。
   ctx.detection.root = std::wstring(kBoundRoot);  // 回到绑定的那个仓库
-  GC_CHECK(flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "第二条发出后仍在等终态");
+  GC_CHECK_MESSAGE(flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "第二条发出后仍在等终态");
   GC_REQUIRE(host.launches.size() == 2, "第一条成功后才发第二条");
   const CommandWindowOperation second = host.launches[1].operation;
   GC_CHECK(ArgumentsEqual(second.arguments, steps[1].arguments));
@@ -98,7 +98,7 @@ GC_TEST(upstream_write_flow_delivers_reviewed_arguments_to_host) {
                                                     L"refs/heads/main"}));
 
   // 第二条成功 → 总结把「推送」与「两条配置」分开列，且这一段不再活跃。
-  GC_CHECK(!flow.OnStepSettled(host, ctx, 2, true, L"退出码 0"), "两条都写成后应结案");
+  GC_CHECK_MESSAGE(!flow.OnStepSettled(host, ctx, 2, true, L"退出码 0"), "两条都写成后应结案");
   GC_CHECK(!flow.Active());
   const std::wstring summary = gc::test::LastStatus(host);
   GC_CHECK(summary.find(L"推送那一步的结论") != std::wstring::npos);
@@ -116,7 +116,7 @@ GC_TEST(upstream_write_flow_first_failure_never_launches_second) {
   OperationContext ctx = MakeContext(std::wstring(kBoundRoot));
 
   GC_CHECK(flow.Begin(host, ctx, MakePlan(steps)));
-  GC_CHECK(!flow.OnStepSettled(host, ctx, 1, false, L"退出码 1"), "第一条失败即结案");
+  GC_CHECK_MESSAGE(!flow.OnStepSettled(host, ctx, 1, false, L"退出码 1"), "第一条失败即结案");
   GC_REQUIRE(host.launches.size() == 1, "第一条失败后第二条一次都不发");
   GC_CHECK(!flow.Active());
   GC_REQUIRE(host.warnings.size() == 1, "失败要当面说，不能只挤在状态栏");
@@ -136,7 +136,7 @@ GC_TEST(upstream_write_flow_stops_when_repository_switched) {
 
   // 确认之后界面切到了另一个仓库：剩下的配置命令绝不能发给那个仓库。
   ctx.detection.root = L"P:\\已经切走的\\other-repo";
-  GC_CHECK(!flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "换仓库后应结案");
+  GC_CHECK_MESSAGE(!flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "换仓库后应结案");
   GC_REQUIRE(host.launches.size() == 1, "换仓库后不再发第二条");
   const std::wstring status = gc::test::LastStatus(host);
   GC_CHECK(status.find(L"界面上的仓库已经换掉") != std::wstring::npos);
@@ -151,8 +151,8 @@ GC_TEST(upstream_write_flow_refuses_argument_less_step) {
   steps[0].arguments.clear();  // 模拟「方案生成了参数，装配时漏传」的那一类接线缺陷
   OperationContext ctx = MakeContext(std::wstring(kBoundRoot));
 
-  GC_CHECK(!flow.Begin(host, ctx, MakePlan(steps)), "参数表为空时一条都不发");
-  GC_CHECK(host.launches.empty(), "绝不能把裸 git 发出去");
+  GC_CHECK_MESSAGE(!flow.Begin(host, ctx, MakePlan(steps)), "参数表为空时一条都不发");
+  GC_CHECK_MESSAGE(host.launches.empty(), "绝不能把裸 git 发出去");
   const std::wstring status = gc::test::LastStatus(host);
   GC_CHECK(status.find(L"参数表是空的") != std::wstring::npos);
   GC_CHECK(!flow.Active());
@@ -164,7 +164,7 @@ GC_TEST(upstream_write_flow_launch_failure_settles_without_retry) {
   UpstreamWriteFlow flow;
   OperationContext ctx = MakeContext(std::wstring(kBoundRoot));
 
-  GC_CHECK(!flow.Begin(host, ctx, MakePlan(NormalSteps())), "第一步就没启动成功");
+  GC_CHECK_MESSAGE(!flow.Begin(host, ctx, MakePlan(NormalSteps())), "第一步就没启动成功");
   GC_REQUIRE(host.launches.size() == 1, "启动失败不重试：只尝试过一次");
   GC_CHECK(!flow.Active());
   const std::wstring status = gc::test::LastStatus(host);
@@ -185,11 +185,11 @@ GC_TEST(upstream_write_flow_ignores_out_of_order_and_late_terminals) {
   GC_CHECK(!flow.OnStepSettled(host, ctx, 2, true, L"退出码 0"));
   GC_REQUIRE(host.launches.size() == 1, "错序终态不得触发第二条");
   // 第 1 条真正的终态：成功 → 发第 2 条（仍在等），此时错序的那份终态已经不会再重复推进。
-  GC_CHECK(flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "第一条成功后应接着等第二条");
+  GC_CHECK_MESSAGE(flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "第一条成功后应接着等第二条");
   GC_REQUIRE(host.launches.size() == 2, "错序终态没有抢先发第二条，这次才发");
-  GC_CHECK(!flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "重复投递的第 1 条终态被丢弃");
+  GC_CHECK_MESSAGE(!flow.OnStepSettled(host, ctx, 1, true, L"退出码 0"), "重复投递的第 1 条终态被丢弃");
   GC_REQUIRE(host.launches.size() == 2, "重复终态不得再多发一条");
-  GC_CHECK(!flow.OnStepSettled(host, ctx, 2, true, L"退出码 0"), "第 2 条成功后整段结案");
+  GC_CHECK_MESSAGE(!flow.OnStepSettled(host, ctx, 2, true, L"退出码 0"), "第 2 条成功后整段结案");
   GC_CHECK(!flow.Active());
   GC_REQUIRE(host.launches.size() == 2, "结案之后不再发任何命令");
 }

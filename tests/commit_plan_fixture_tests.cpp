@@ -214,12 +214,12 @@ GC_TEST(commit_plan_fixture_real_commit_records_identities_times_and_scope) {
   // 2) 提交者时间被单独设成另一个瞬间；提交者身份没有覆盖，仍是夹具环境里的配置身份。
   GC_CHECK_MESSAGE(Contains(commitObject, L"committer Evernight Test <test@example.invalid> 1700003600 -0700"),
                    "committer 行不符");
-  GC_CHECK(!Contains(commitObject, L"committer 张三"), "提交者身份不该被表单作者顶替");
+  GC_CHECK_MESSAGE(!Contains(commitObject, L"committer 张三"), "提交者身份不该被表单作者顶替");
   // 3) 信息一字不改：中文、以 # 开头的一行、行尾空格、正文中间连续空行、缩进都保留。
   GC_CHECK(Contains(commitObject, L"修复简繁混排与中文路径"));
   GC_CHECK(Contains(commitObject, L"# 这一行不是注释，是正文"));
-  GC_CHECK(Contains(commitObject, L"第一段结尾留了两个空格  \n"), "行尾空格被收拾掉了");
-  GC_CHECK(Contains(commitObject, L"两个空格  \n\n\n# 这一行不是注释"),
+  GC_CHECK_MESSAGE(Contains(commitObject, L"第一段结尾留了两个空格  \n"), "行尾空格被收拾掉了");
+  GC_CHECK_MESSAGE(Contains(commitObject, L"两个空格  \n\n\n# 这一行不是注释"),
            "正文中间的连续空行被收拢了");
   GC_CHECK(Contains(commitObject, L"    缩进也算正文"));
   // 4) 合作者 trailer 一条、排在最末。
@@ -227,23 +227,23 @@ GC_TEST(commit_plan_fixture_real_commit_records_identities_times_and_scope) {
   GC_CHECK(!Contains(commitObject, L"Co-authored-by: 张三"));
 
   // 5) 提交范围只限索引里那一份。
-  GC_CHECK(fixture.HeadSha() != beforeSha, "HEAD 应当前进到新提交");
-  GC_CHECK(fixture.CommitCount() == beforeCount + 1, "只该多出一个提交");
+  GC_CHECK_MESSAGE(fixture.HeadSha() != beforeSha, "HEAD 应当前进到新提交");
+  GC_CHECK_MESSAGE(fixture.CommitCount() == beforeCount + 1, "只该多出一个提交");
   // 这一条是本步骤的核心证据：提交对象里的树，与确认框上那个「索引内容标识」是同一个对象。
   // 换句话说，用户点头时看到的那份索引内容，就是 Git 真正写进仓库的那一份。
   GC_CHECK_MESSAGE(fixture.RevParseVerified(L"HEAD^{tree}") == plan.identity.indexTreeOid,
                    "实际落地的树与确认时绑定的索引内容标识不是同一份");
-  GC_CHECK(fixture.ShowFileAtHead(L"staged.txt") == "已暂存的新内容\n第二行\n",
+  GC_CHECK_MESSAGE(fixture.ShowFileAtHead(L"staged.txt") == "已暂存的新内容\n第二行\n",
            "已暂存的修改应进这次提交");
-  GC_CHECK(fixture.ShowFileAtHead(L"docs/说明 与 [标记].md") == "标题改过了\n",
+  GC_CHECK_MESSAGE(fixture.ShowFileAtHead(L"docs/说明 与 [标记].md") == "标题改过了\n",
            "中文名带方括号的路径应同样进入");
-  GC_CHECK(fixture.ShowFileAtHead(L"unstaged.txt") == "baseline\n",
+  GC_CHECK_MESSAGE(fixture.ShowFileAtHead(L"unstaged.txt") == "baseline\n",
            "未暂存的改动绝不能被顺带提交");
   const WorkspaceModel after = LoadModel(fixture);
   GC_CHECK_MESSAGE(after.unstaged.size() == 2,
                    "提交后未暂存一侧应留下「unstaged.txt 的改动 + 未跟踪文件」，实际 " +
                        std::to_string(after.unstaged.size()));
-  GC_CHECK(after.staged.empty(), "已提交的内容应当从索引侧清空");
+  GC_CHECK_MESSAGE(after.staged.empty(), "已提交的内容应当从索引侧清空");
   // 工作区里的未暂存文件内容分毫未动（不是被提交后又改回去的）。
   // PathInRoot 相对的是夹具临时根，仓库在根下的 repo\ 目录里（InitRepository 的默认名）。
   {
@@ -258,7 +258,7 @@ GC_TEST(commit_plan_fixture_real_commit_records_identities_times_and_scope) {
     GC_CHECK(content == "这行改动不该进这次提交\n");
   }
   // 父提交仍指向原来那一条：这次是普通提交，没有多出第二个父。
-  GC_CHECK(fixture.ParentShaOfHead() == beforeSha, "普通提交只应有一个父");
+  GC_CHECK_MESSAGE(fixture.ParentShaOfHead() == beforeSha, "普通提交只应有一个父");
 }
 
 GC_TEST(commit_plan_fixture_hook_rejection_creates_no_commit) {
@@ -281,7 +281,7 @@ GC_TEST(commit_plan_fixture_hook_rejection_creates_no_commit) {
   for (const std::wstring& argument : plan.arguments) {
     joined += argument + L' ';
   }
-  GC_CHECK(!Contains(joined, L"--no-verify"), "命令里绝不出现 --no-verify：hooks 必须照常生效");
+  GC_CHECK_MESSAGE(!Contains(joined, L"--no-verify"), "命令里绝不出现 --no-verify：hooks 必须照常生效");
 
   const std::wstring beforeSha = fixture.HeadSha();
   const std::vector<std::wstring> stagedBefore = fixture.StatusPorcelain();
@@ -289,16 +289,16 @@ GC_TEST(commit_plan_fixture_hook_rejection_creates_no_commit) {
   gc::platform::RemoveCommitMessageFile(messageFile);
 
   GC_CHECK_MESSAGE(!run.Success(), "hook 拒绝时 Git 必须给出非 0 退出码");
-  GC_CHECK(run.exitCode != 0, "退出码应非 0");
-  GC_CHECK(Contains(run.err, L"hook refuses") || Contains(run.err, L"pre-commit"),
+  GC_CHECK_MESSAGE(run.exitCode != 0, "退出码应非 0");
+  GC_CHECK_MESSAGE(Contains(run.err, L"hook refuses") || Contains(run.err, L"pre-commit"),
            "Git 的原始报错应留在输出里：" + ToUtf8(run.err));
-  GC_CHECK(fixture.HeadSha() == beforeSha, "hook 拒绝后 HEAD 不该前进");
-  GC_CHECK(fixture.HeadSubject() == L"baseline", "最近一次提交应还是原来那一条");
+  GC_CHECK_MESSAGE(fixture.HeadSha() == beforeSha, "hook 拒绝后 HEAD 不该前进");
+  GC_CHECK_MESSAGE(fixture.HeadSubject() == L"baseline", "最近一次提交应还是原来那一条");
   // 索引现场完整保留：用户可以直接改好表单再点一次（界面那侧「表单保留」依赖的正是这个）。
-  GC_CHECK(fixture.StatusPorcelain() == stagedBefore, "暂存内容必须分毫未动");
+  GC_CHECK_MESSAGE(fixture.StatusPorcelain() == stagedBefore, "暂存内容必须分毫未动");
   {
     const WorkspaceModel after = LoadModel(fixture);
-    GC_CHECK(after.staged.size() == 2, "提交失败后索引里仍是原来那两条");
+    GC_CHECK_MESSAGE(after.staged.size() == 2, "提交失败后索引里仍是原来那两条");
   }
 }
 
@@ -370,7 +370,7 @@ GC_TEST(commit_plan_fixture_index_lock_is_detected) {
   auto probe = [&detection]() {
     return gc::platform::ProbeRepositoryWorkflowState(detection.absoluteGitDir);
   };
-  GC_CHECK(!probe().indexLocked, "干净仓库不该报 index.lock");
+  GC_CHECK_MESSAGE(!probe().indexLocked, "干净仓库不该报 index.lock");
   GC_CHECK(!probe().HasSpecialFlowInProgress());
 
   const std::wstring lockPath = gc::platform::ToAbsolutePath(detection.absoluteGitDir + L"\\index.lock");
@@ -378,9 +378,9 @@ GC_TEST(commit_plan_fixture_index_lock_is_detected) {
     std::ofstream stream(std::filesystem::path(lockPath), std::ios::binary);
     GC_REQUIRE(stream.is_open(), "测试无法创建 index.lock");
   }
-  GC_CHECK(probe().indexLocked, "存在的 index.lock 应被探测到");
+  GC_CHECK_MESSAGE(probe().indexLocked, "存在的 index.lock 应被探测到");
   // 探测本身是只读的：不许把别人的锁删掉（锁归 Git 自己管）。
-  GC_CHECK(std::filesystem::exists(std::filesystem::path(lockPath)), "探测不得删除仓库里的文件");
+  GC_CHECK_MESSAGE(std::filesystem::exists(std::filesystem::path(lockPath)), "探测不得删除仓库里的文件");
   std::error_code ec;
   std::filesystem::remove(std::filesystem::path(lockPath), ec);
   GC_CHECK(!probe().indexLocked);
@@ -606,11 +606,11 @@ GC_TEST(message_file_fixture_writes_utf8_and_is_removed_afterwards) {
     GC_REQUIRE(stream.is_open(), "信息文件写出来了却读不回来");
     bytes.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
   }  // 先关流再删文件：删不掉的不是实现，而是这个用例自己还占着句柄。
-  GC_CHECK(bytes == ToUtf8(message), "正文必须一字不差：不改行尾、不修剪、不多补换行");
-  GC_CHECK(first.payloadBytes == bytes.size(), "回报的字节数应就是实际写出的长度");
+  GC_CHECK_MESSAGE(bytes == ToUtf8(message), "正文必须一字不差：不改行尾、不修剪、不多补换行");
+  GC_CHECK_MESSAGE(first.payloadBytes == bytes.size(), "回报的字节数应就是实际写出的长度");
   // UTF-8 形态单独核对（不借实现里的同一条转换当预期）：中文三字节、emoji 四字节。
-  GC_CHECK(bytes.find("\xE4\xB8\xAD\xE6\x96\x87") != std::string::npos, "中文应按 UTF-8 落盘");
-  GC_CHECK(bytes.find("\xF0\x9F\x98\x80") != std::string::npos, "增补平面字符（emoji）应按四字节 UTF-8 落盘");
+  GC_CHECK_MESSAGE(bytes.find("\xE4\xB8\xAD\xE6\x96\x87") != std::string::npos, "中文应按 UTF-8 落盘");
+  GC_CHECK_MESSAGE(bytes.find("\xF0\x9F\x98\x80") != std::string::npos, "增补平面字符（emoji）应按四字节 UTF-8 落盘");
 
   // 结尾没有换行的正文：补且只补一个换行，让它是一份正常文本。
   const gc::platform::CommitMessageFileWrite appended =
@@ -622,11 +622,11 @@ GC_TEST(message_file_fixture_writes_utf8_and_is_removed_afterwards) {
     GC_REQUIRE(stream.is_open(), "读不回补换行的信息文件");
     appendedBytes.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
   }
-  GC_CHECK(appendedBytes == ToUtf8(L"末尾没有换行") + "\n", "应只补一个结尾换行");
+  GC_CHECK_MESSAGE(appendedBytes == ToUtf8(L"末尾没有换行") + "\n", "应只补一个结尾换行");
 
   // 第二次写出绝不覆盖第一份：Git 可能还在读它，两份必须各自独立。
-  GC_CHECK(appended.path != first.path, "两份信息文件不能同名");
-  GC_CHECK(std::filesystem::exists(std::filesystem::path(first.path)), "第一份不该被覆盖掉");
+  GC_CHECK_MESSAGE(appended.path != first.path, "两份信息文件不能同名");
+  GC_CHECK_MESSAGE(std::filesystem::exists(std::filesystem::path(first.path)), "第一份不该被覆盖掉");
 
   // 空信息一律拒绝写出：没有正文的可执行命令不该被发出去。
   const gc::platform::CommitMessageFileWrite empty = gc::platform::WriteCommitMessageFile(L"");
@@ -636,7 +636,7 @@ GC_TEST(message_file_fixture_writes_utf8_and_is_removed_afterwards) {
 
   gc::platform::RemoveCommitMessageFile(first.path);
   gc::platform::RemoveCommitMessageFile(appended.path);
-  GC_CHECK(!std::filesystem::exists(std::filesystem::path(first.path)), "用完要删掉");
+  GC_CHECK_MESSAGE(!std::filesystem::exists(std::filesystem::path(first.path)), "用完要删掉");
   GC_CHECK(!std::filesystem::exists(std::filesystem::path(appended.path)));
   // 空路径与不存在的删除都必须是「什么都不发生」，不抛也不报错。
   gc::platform::RemoveCommitMessageFile(L"");

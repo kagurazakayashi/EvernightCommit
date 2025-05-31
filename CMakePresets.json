@@ -16,11 +16,24 @@
       }
     },
     {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "Windows",
+        "rhs": "${hostSystemName}"
+      },
+      "cacheVariables": {
+        "GC_BUILD_WIN32_UI": "ON"
+      }
+    },
+    {
       "name": "vs2026-x64",
       "displayName": "Visual Studio 2026 x64（多配置，无需开发者命令提示符）",
-      "inherits": "base",
+      "inherits": "windows-base",
       "generator": "Visual Studio 18 2026",
-      "description": "需要 CMake 4.2 及以上：'Visual Studio 18 2026' 生成器自 CMake 4.2 提供（本机 VS 2026 自带 4.3.1-msvc1 实测可用）。旧版 CMake 与不含 Visual Studio 生成器的构建（例如 MSYS2 的 cmake）会在配置阶段直接报“未知生成器”。",
+      "description": "需要 CMake 4.2 及以上：'Visual Studio 18 2026' 生成器自 CMake 4.2 提供（本机 VS 2026 自带 4.3.1-msvc1 实测可用）。旧版 CMake 与不含 Windows 生成器的构建（例如 MSYS2 的 cmake）会在配置阶段直接报“未知生成器”。",
       "architecture": {
         "value": "x64",
         "strategy": "set"
@@ -29,7 +42,7 @@
     {
       "name": "vs2022-x64",
       "displayName": "Visual Studio 2022 x64（多配置，无需开发者命令提示符）",
-      "inherits": "base",
+      "inherits": "windows-base",
       "generator": "Visual Studio 17 2022",
       "description": "需要 CMake 3.28 及以上（与工程最低版本一致）：'Visual Studio 17 2022' 生成器自 CMake 3.21 提供。",
       "architecture": {
@@ -40,9 +53,45 @@
     {
       "name": "ninja-x64",
       "displayName": "Ninja Multi-Config x64（需在“Developer Command Prompt for VS”中运行）",
-      "inherits": "base",
+      "inherits": "windows-base",
       "generator": "Ninja Multi-Config",
       "description": "需要 cl.exe 与 rc.exe 已在 PATH 中（例如先运行 vcvars64.bat）；x64 由该环境决定。"
+    },
+    {
+      "name": "linux-x64-debug",
+      "displayName": "Linux x86_64 Debug（Ninja 单配置，带调试符号）",
+      "inherits": "base",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "Linux",
+        "rhs": "${hostSystemName}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "GC_BUILD_WIN32_UI": "OFF",
+        "GC_WITH_WX": "ON",
+        "BUILD_TESTING": "ON"
+      },
+      "description": "本轮 Linux 构建范围：共用业务逻辑 + 契约层 + 测试 + wxWidgets 启动目标。需要 GCC/Clang、CMake 3.28+、Ninja 与 wxWidgets 3.2+（见 docs/building.md）。"
+    },
+    {
+      "name": "linux-x64-release",
+      "displayName": "Linux x86_64 Release（Ninja 单配置）",
+      "inherits": "base",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "Linux",
+        "rhs": "${hostSystemName}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "GC_BUILD_WIN32_UI": "OFF",
+        "GC_WITH_WX": "ON",
+        "BUILD_TESTING": "ON"
+      },
+      "description": "与 Debug 预设同一套构建范围，只是优化级别与符号不同；产物目录独立（build/linux-x64-release）。"
     }
   ],
   "buildPresets": [
@@ -81,6 +130,16 @@
       "configurePreset": "ninja-x64",
       "configuration": "Release",
       "jobs": 8
+    },
+    {
+      "name": "linux-x64-debug",
+      "configurePreset": "linux-x64-debug",
+      "displayName": "linux-x64-debug"
+    },
+    {
+      "name": "linux-x64-release",
+      "configurePreset": "linux-x64-release",
+      "displayName": "linux-x64-release"
     }
   ],
   "testPresets": [
@@ -104,6 +163,20 @@
       "name": "ninja-debug",
       "configurePreset": "ninja-x64",
       "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-debug",
+      "configurePreset": "linux-x64-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-release",
+      "configurePreset": "linux-x64-release",
       "output": {
         "outputOnFailure": true
       }
