@@ -70,15 +70,25 @@ struct GitEnvironmentPlan {
 [[nodiscard]] GitEnvironmentPlan MakeGitEnvironmentPlan(GitRunPurpose purpose,
                                                         const std::vector<EnvironmentOverride>& operationOverrides);
 
+// 名字比较规则属于平台语义：Windows 环境变量名大小写不敏感，POSIX 完全区分大小写。
+// 默认值保持 Windows 行为，Linux 实现显式传 posixCaseSensitive，不能照搬 Windows 规则。
+enum class EnvironmentNameComparison {
+  windowsCaseInsensitive,
+  posixCaseSensitive,
+};
+
 // 名字是否属于"数字后缀配置注入项"：GIT_CONFIG_KEY_<数字> 或 GIT_CONFIG_VALUE_<数字>
-// （大小写不敏感，数字不允许负号、不允许前导空白）。这类项的名字随注入条数变化，
-// 无法预先枚举，由平台层对继承环境的每一项问这个问题。
-[[nodiscard]] bool IsNumberedConfigInjectionName(std::wstring_view name);
+// （Windows 大小写不敏感；POSIX 精确匹配大写规范写法，数字不允许负号、不允许前导空白）。
+// 这类项的名字随注入条数变化，无法预先枚举，由平台层对继承环境的每一项问这个问题。
+[[nodiscard]] bool IsNumberedConfigInjectionName(
+    std::wstring_view name,
+    EnvironmentNameComparison comparison = EnvironmentNameComparison::windowsCaseInsensitive);
 
 // 在继承环境项（"NAME=VALUE" 形态）里找出策略重定向名单中实际存在过的变量名。
 // 返回的是名单里的规范写法（去重、保持名单顺序），绝不返回继承项原文——原文含值。
-[[nodiscard]] std::vector<std::wstring> FindInheritedRedirects(const std::vector<std::wstring>& baseEntries,
-                                                               const std::vector<std::wstring>& redirectNames);
+[[nodiscard]] std::vector<std::wstring> FindInheritedRedirects(
+    const std::vector<std::wstring>& baseEntries, const std::vector<std::wstring>& redirectNames,
+    EnvironmentNameComparison comparison = EnvironmentNameComparison::windowsCaseInsensitive);
 
 // 把 FindInheritedRedirects 的结果拼成给用户看的一句告知（只含变量名，超上限折叠为"等"）。
 // 名单为空返回空串——没有移除过任何东西就不该唠叨。

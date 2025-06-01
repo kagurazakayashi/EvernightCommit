@@ -38,6 +38,7 @@ set(GC_TEST_SOURCES_PORTABLE
   submodule_journey_tests.cpp
   submodule_navigation_tests.cpp
   task_coordinator_tests.cpp
+  text_encoding_tests.cpp
   undo_commit_plan_tests.cpp)
 
 # ---- 仍依赖 Windows 的用例（本轮未迁移，只在 Windows 目标里编译） ----
@@ -93,14 +94,24 @@ set(GC_TEST_SOURCES_WINDOWS_ONLY
   undo_probe_fixture_tests.cpp
   workspace_status_fixture_tests.cpp)
 
-# ---- 完整性审计：任何 *_tests.cpp 没进上面两张表，配置直接失败 ----
-# 用 GLOB 只做核对、不做构建输入（构建输入始终是上面两张显式清单）。
+# ---- Linux 平台基础服务的真实集成（只在 Linux 目标里编译） ----
+# 这些用例会碰真实文件系统/时区规则/环境变量，但绝不启动 Git、不联网、不涉及 push。
+set(GC_TEST_SOURCES_LINUX_ONLY
+  linux_environment_tests.cpp
+  linux_git_toolchain_tests.cpp
+  linux_local_time_tests.cpp
+  linux_path_probe_tests.cpp
+  linux_scratch_file_tests.cpp)
+
+# ---- 完整性审计：任何 *_tests.cpp 没进上面三张表，配置直接失败 ----
+# 用 GLOB 只做核对、不做构建输入（构建输入始终是上面三张显式清单）。
 file(GLOB GC_TEST_SOURCES_ON_DISK RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
      "${CMAKE_CURRENT_SOURCE_DIR}/*_tests.cpp")
 set(_gc_unclassified "")
 foreach(source ${GC_TEST_SOURCES_ON_DISK})
   if(NOT source IN_LIST GC_TEST_SOURCES_PORTABLE AND
-     NOT source IN_LIST GC_TEST_SOURCES_WINDOWS_ONLY)
+     NOT source IN_LIST GC_TEST_SOURCES_WINDOWS_ONLY AND
+     NOT source IN_LIST GC_TEST_SOURCES_LINUX_ONLY)
     list(APPEND _gc_unclassified ${source})
   endif()
 endforeach()
@@ -114,7 +125,7 @@ endif()
 
 # 反向核对：清单里写了但磁盘上没有的文件同样报错（改名/删除时不会留幽灵条目）。
 set(_gc_missing "")
-foreach(source ${GC_TEST_SOURCES_PORTABLE} ${GC_TEST_SOURCES_WINDOWS_ONLY})
+foreach(source ${GC_TEST_SOURCES_PORTABLE} ${GC_TEST_SOURCES_WINDOWS_ONLY} ${GC_TEST_SOURCES_LINUX_ONLY})
   if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
     list(APPEND _gc_missing ${source})
   endif()
@@ -127,6 +138,8 @@ endif()
 set(gc_test_sources support/test_main.cpp ${GC_TEST_SOURCES_PORTABLE})
 if(WIN32)
   list(APPEND gc_test_sources support/git_fixture.cpp ${GC_TEST_SOURCES_WINDOWS_ONLY})
+else()
+  list(APPEND gc_test_sources ${GC_TEST_SOURCES_LINUX_ONLY})
 endif()
 
 add_executable(gc_tests ${gc_test_sources})
@@ -136,6 +149,8 @@ if(WIN32)
   # Windows 目标继续链完整的界面与平台实现：夹具要用的子进程执行器、环境块、
   # 命令窗口辅助入口都在那两层里。
   target_link_libraries(gc_tests PRIVATE gc_platform gc_ui)
+else()
+  target_link_libraries(gc_tests PRIVATE gc_platform_linux)
 endif()
 set_target_properties(gc_tests PROPERTIES WIN32_EXECUTABLE FALSE OUTPUT_NAME "gc_tests")
 
@@ -179,6 +194,8 @@ if(WIN32)
   message(STATUS "[测试] 已注册分组：pure / windows / git-readonly / git-commit"
                  "（git-push 与 unclassified 不注册，禁止自动运行）")
 else()
-  message(STATUS "[测试] 本平台只注册 pure 分组与 push 闸门拒绝用例："
-                 "windows/git-readonly/git-commit 的源码尚未脱离 Win32，见上方清单")
+  gc_add_group_test(linux)
+  message(STATUS "[测试] 已注册分组：pure / linux"
+                 "（windows/git-readonly/git-commit 的源码尚未脱离 Win32；"
+                 "git-push 与 unclassified 不注册，禁止自动运行）")
 endif()

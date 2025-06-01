@@ -42,6 +42,11 @@ void AppendRemovals(std::vector<EnvironmentOverride>& overrides,
   }
 }
 
+std::wstring NormalizeName(std::wstring_view name, EnvironmentNameComparison comparison) {
+  return comparison == EnvironmentNameComparison::windowsCaseInsensitive ? ToUpperAscii(name)
+                                                                         : std::wstring(name);
+}
+
 }  // namespace
 
 GitEnvironmentPlan MakeGitEnvironmentPlan(GitRunPurpose purpose,
@@ -81,18 +86,18 @@ GitEnvironmentPlan MakeGitEnvironmentPlan(GitRunPurpose purpose,
   return plan;
 }
 
-bool IsNumberedConfigInjectionName(std::wstring_view name) {
+bool IsNumberedConfigInjectionName(std::wstring_view name, EnvironmentNameComparison comparison) {
   static constexpr std::wstring_view kPrefixes[] = {L"GIT_CONFIG_KEY_", L"GIT_CONFIG_VALUE_"};
-  const std::wstring upper = ToUpperAscii(name);
+  const std::wstring normalized = NormalizeName(name, comparison);
   for (const std::wstring_view prefix : kPrefixes) {
-    if (upper.size() <= prefix.size() || upper.compare(0, prefix.size(), prefix) != 0) {
+    if (normalized.size() <= prefix.size() || normalized.compare(0, prefix.size(), prefix) != 0) {
       continue;
     }
     // 前缀之后必须全是不含符号与前导空白的十进制数字，否则不算这一族的名字
     //（比如用户真的有一个叫 GIT_CONFIG_KEY_NAME 的自定义变量时不该被误删）。
     bool digitsOnly = true;
-    for (size_t index = prefix.size(); index < upper.size(); ++index) {
-      if (upper[index] < L'0' || upper[index] > L'9') {
+    for (size_t index = prefix.size(); index < normalized.size(); ++index) {
+      if (normalized[index] < L'0' || normalized[index] > L'9') {
         digitsOnly = false;
         break;
       }
@@ -105,10 +110,11 @@ bool IsNumberedConfigInjectionName(std::wstring_view name) {
 }
 
 std::vector<std::wstring> FindInheritedRedirects(const std::vector<std::wstring>& baseEntries,
-                                                 const std::vector<std::wstring>& redirectNames) {
+                                                 const std::vector<std::wstring>& redirectNames,
+                                                 EnvironmentNameComparison comparison) {
   std::vector<std::wstring> found;
   for (const std::wstring& wanted : redirectNames) {
-    const std::wstring wantedUpper = ToUpperAscii(wanted);
+    const std::wstring wantedNormalized = NormalizeName(wanted, comparison);
     for (const std::wstring& entry : baseEntries) {
       // 盘符联动项（“=C:=…”）与没有 '=' 的畸形项都不参与匹配。
       if (entry.empty() || entry.front() == L'=') {
@@ -118,7 +124,7 @@ std::vector<std::wstring> FindInheritedRedirects(const std::vector<std::wstring>
       if (equals == std::wstring::npos) {
         continue;
       }
-      if (ToUpperAscii(std::wstring_view(entry).substr(0, equals)) == wantedUpper) {
+      if (NormalizeName(std::wstring_view(entry).substr(0, equals), comparison) == wantedNormalized) {
         if (std::find(found.begin(), found.end(), wanted) == found.end()) {
           found.push_back(wanted);
         }

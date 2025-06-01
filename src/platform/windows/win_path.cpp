@@ -3,12 +3,62 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
 #include "platform/windows/raii.h"
 
 namespace gc::platform {
 namespace {
+
+std::wstring FormatWin32Error(unsigned long errorCode) {
+  return L"Windows 错误码 " + std::to_wstring(errorCode);
+}
+
+PathEntryKind KindFromAttributes(unsigned long attributes) {
+  // 先认重解析点：目录符号链接/联接的条目本身仍是“链接”，与 Linux 的 lstat 语义一致。
+  if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return PathEntryKind::symbolicLink;
+  }
+  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+    return PathEntryKind::directory;
+  }
+  return PathEntryKind::regularFile;
+}
+
+// 打开发起身份查询。followFinalSymlink=false 时打开重解析点本身（不跟随）。
+UniqueHandle OpenForIdentity(const std::wstring& path, bool followFinalSymlink) {
+  DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+  if (!followFinalSymlink) {
+    flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+  }
+  return UniqueHandle(::CreateFileW(path.c_str(), 0,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, flags, nullptr));
+}
+
+void FillIdentity(const UniqueHandle& handle, unsigned long long* device, unsigned long long* inode) {
+  BY_HANDLE_FILE_INFORMATION info{};
+  if (handle && ::GetFileInformationByHandle(handle.get(), &info) != 0) {
+    *device = info.dwVolumeSerialNumber;
+    *inode = (static_cast<unsigned long long>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+  }
+}
+
+bool HasExecutableExtension(std::wstring_view path) {
+  const size_t dot = path.find_last_of(L'.');
+  if (dot == std::wstring_view::npos) {
+    return false;
+  }
+  std::wstring extension(path.substr(dot));
+  for (wchar_t& c : extension) {
+    if (c >= L'A' && c <= L'Z') {
+      c = static_cast<wchar_t>(c - L'A' + L'a');
+    }
+  }
+  // 只认 CreateProcessW 能直接启动的映像；.bat/.cmd 需要 cmd.exe 解释，不能在这里宣称可执行。
+  return extension == L".exe" || extension == L".com";
+}
 
 std::wstring CollapseWithFullPathName(std::wstring_view path) {
   if (path.empty()) {
@@ -47,6 +97,88 @@ bool IsExistingDirectory(std::wstring_view path) {
   const std::wstring value(path);
   const DWORD attributes = ::GetFileAttributesW(value.c_str());
   return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+PathFacts ProbePath(std::wstring_view path, bool followFinalSymlink) {
+  PathFacts facts;
+  if (path.empty()) {
+    facts.status = PathProbeStatus::failed;
+    facts.failureReason = L"路径为空。";
+    return facts;
+  }
+  const std::wstring value(path);
+  const DWORD attributes = ::GetFileAttributesW(value.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+      facts.status = PathProbeStatus::missing;
+      facts.existence = PathExistence::missing;
+      facts.kind = PathEntryKind::missing;
+      facts.failureReason = FormatWin32Error(error) + L"：路径不存在。";
+      return facts;
+    }
+    if (error == ERROR_ACCESS_DENIED) {
+      facts.status = PathProbeStatus::inaccessible;
+      facts.existence = PathExistence::unknown;
+      facts.failureReason = FormatWin32Error(error) + L"：权限不足，无法确认路径是否存在。";
+      return facts;
+    }
+    facts.status = PathProbeStatus::failed;
+    facts.failureReason = FormatWin32Error(error) + L"：读取路径属性失败。";
+    return facts;
+  }
+
+  facts.status = PathProbeStatus::ok;
+  facts.existence = PathExistence::present;
+  facts.kind = KindFromAttributes(attributes);
+  facts.isSymlink = (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+  facts.permissions = 0;  // Windows 没有 POSIX 权限位。
+  FillIdentity(OpenForIdentity(value, false), &facts.device, &facts.inode);
+
+  if (facts.isSymlink) {
+    if (followFinalSymlink) {
+      // 跟随最终链接后再取目标属性与身份；GetFileAttributesW 对重解析点不保证给出目标。
+      UniqueHandle target = OpenForIdentity(value, true);
+      BY_HANDLE_FILE_INFORMATION info{};
+      if (target && ::GetFileInformationByHandle(target.get(), &info) != 0) {
+        facts.targetExists = true;
+        facts.targetExistence = PathExistence::present;
+        facts.targetKind = KindFromAttributes(info.dwFileAttributes);
+        facts.targetDevice = info.dwVolumeSerialNumber;
+        facts.targetInode = (static_cast<unsigned long long>(info.nFileIndexHigh) << 32) |
+                            info.nFileIndexLow;
+      } else {
+        facts.targetKind = PathEntryKind::missing;
+        facts.targetExistence = ::GetLastError() == ERROR_ACCESS_DENIED ? PathExistence::unknown
+                                                                        : PathExistence::missing;
+      }
+    } else {
+      facts.targetKind = PathEntryKind::symbolicLink;
+      facts.targetExists = true;
+      facts.targetExistence = PathExistence::present;
+    }
+  } else {
+    facts.targetKind = facts.kind;
+    facts.targetExists = true;
+    facts.targetExistence = PathExistence::present;
+    facts.targetDevice = facts.device;
+    facts.targetInode = facts.inode;
+  }
+
+  // 能否读：普通文件用 GENERIC_READ 打开；目录用 FILE_FLAG_BACKUP_SEMANTICS。
+  UniqueHandle readable(::CreateFileW(value.c_str(), GENERIC_READ,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  facts.readable = static_cast<bool>(readable);
+  facts.executable = facts.targetKind == PathEntryKind::regularFile && HasExecutableExtension(path);
+  // 句柄本身不携带所有者信息；Windows ACL 不映射成 POSIX 的 owner 概念。
+  facts.ownerIsCurrentUser = false;
+  return facts;
+}
+
+bool IsExecutableRegularFile(std::wstring_view path) {
+  const PathFacts facts = ProbePath(path);
+  return facts.status == PathProbeStatus::ok && facts.executable;
 }
 
 std::wstring ToAbsolutePath(std::wstring_view path) {

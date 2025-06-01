@@ -20,6 +20,20 @@ git::FsProbe MakeFsProbe() {
   };
 }
 
+bool LooksLikeBareName(std::wstring_view input) {
+  size_t begin = 0;
+  size_t end = input.size();
+  while (begin < end && (input[begin] == L' ' || input[begin] == L'\t')) {
+    ++begin;
+  }
+  while (end > begin && (input[end - 1] == L' ' || input[end - 1] == L'\t')) {
+    --end;
+  }
+  const std::wstring_view trimmed = input.substr(begin, end - begin);
+  return !trimmed.empty() && trimmed.find(L'\\') == std::wstring_view::npos &&
+         trimmed.find(L'/') == std::wstring_view::npos;
+}
+
 }  // namespace
 
 std::vector<std::wstring> DiscoverGitCandidates() {
@@ -32,6 +46,35 @@ std::vector<std::wstring> DiscoverGitCandidates() {
 
 std::wstring NormalizeGitExeInput(std::wstring_view input) {
   return git::ResolveExecutableInput(input, GetPathVariable(), MakeFsProbe());
+}
+
+GitExecutableResolution ResolveGitExeInput(std::wstring_view input) {
+  GitExecutableResolution result;
+  const bool bareName = LooksLikeBareName(input);
+  result.path = NormalizeGitExeInput(input);
+  if (result.path.empty()) {
+    result.failureReason = L"没有填写 Git 程序路径。";
+    return result;
+  }
+  if (bareName && !IsAbsolutePath(result.path)) {
+    // PATH 没命中时 NormalizeGitExeInput 会原样返回裸名；不能拿它去探测当前目录，
+    // 否则“PATH 查找失败”会悄悄变成“执行工作目录里的同名文件”。
+    result.failureReason = L"PATH 中没有找到名为 " + result.path + L" 的可执行文件。";
+    return result;
+  }
+  result.exists = IsExistingRegularFile(result.path);
+  if (!result.exists) {
+    result.failureReason = L"这个路径不是存在的普通文件：" + result.path;
+    return result;
+  }
+  // Windows 没有 POSIX 执行位；本工程要求能由 CreateProcessW 直接启动的可执行文件。
+  result.executable = IsExecutableRegularFile(result.path);
+  if (!result.executable) {
+    result.failureReason = L"这个文件没有可执行扩展名（.exe/.com）：" + result.path;
+    return result;
+  }
+  result.resolved = true;
+  return result;
 }
 
 GitExeVerification VerifyGitExe(std::wstring_view exePath, unsigned long timeoutMilliseconds) {

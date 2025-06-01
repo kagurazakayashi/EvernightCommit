@@ -136,3 +136,63 @@ GC_TEST(search_path_still_reports_raw_path_order) {
                                                      L"git.exe", probe);
   GC_CHECK(found.size() == 2 && found.front() == L"C:\\tools\\msys64\\usr\\bin\\git.exe");
 }
+
+// ---------- POSIX PATH 语义 ----------
+// 同一份纯逻辑必须显式选择平台flavor：Linux 用 ':'、只有 '/' 是分隔符、大小写敏感、
+// 裸名不补 .exe；这些用例不碰真实文件系统。
+
+GC_TEST(locator_posix_uses_colon_and_preserves_path_order) {
+  const auto probe = MakeFakeFs({L"/opt/git/bin/git", L"/usr/bin/git"});
+  const auto found = gc::git::SearchPathForExecutable(L"/opt/git/bin::/usr/bin:/opt/git/bin", L"git", probe,
+                                                       gc::git::PathFlavor::posix);
+  const std::vector<std::wstring> expected{L"/opt/git/bin/git", L"/usr/bin/git"};
+  GC_CHECK(found == expected);
+}
+
+GC_TEST(locator_posix_keeps_case_distinct_paths) {
+  const auto probe = MakeFakeFs({L"/opt/Git/git", L"/opt/git/git"});
+  const auto found = gc::git::SearchPathForExecutable(L"/opt/Git:/opt/git", L"git", probe,
+                                                       gc::git::PathFlavor::posix);
+  GC_CHECK(found.size() == 2);
+  GC_CHECK(found[0] == L"/opt/Git/git");
+  GC_CHECK(found[1] == L"/opt/git/git");
+}
+
+GC_TEST(locator_posix_does_not_treat_backslash_as_separator) {
+  // POSIX 上反斜杠是合法文件名字符：裸名 "dir\git" 仍按 PATH 搜索，而不是按路径展开。
+  const auto probe = MakeFakeFs({L"/tools/dir\\git"});
+  const std::wstring resolved = gc::git::ResolveExecutableInput(L"dir\\git", L"/tools", probe,
+                                                                gc::git::PathFlavor::posix);
+  GC_CHECK(resolved == L"/tools/dir\\git");
+}
+
+GC_TEST(locator_posix_bare_name_does_not_append_exe_and_keeps_path_order) {
+  const auto probe = MakeFakeFs({L"/usr/local/bin/git", L"/usr/bin/git"});
+  const std::wstring resolved =
+      gc::git::ResolveExecutableInput(L"git", L"/usr/local/bin:/usr/bin", probe, gc::git::PathFlavor::posix);
+  GC_CHECK_MESSAGE(resolved == L"/usr/local/bin/git", "POSIX 不应把 PATH 顺序重排成 Windows 档位");
+  GC_CHECK(gc::git::ResolveExecutableInput(L"git.exe", L"/usr/bin", probe, gc::git::PathFlavor::posix) ==
+           L"git.exe");
+}
+
+GC_TEST(locator_posix_filters_candidates_without_execute_permission) {
+  auto files = std::make_shared<std::vector<std::wstring>>(
+      std::initializer_list<std::wstring>{L"/one/git", L"/two/git"});
+  gc::git::FsProbe probe;
+  probe.fileExists = [files](const std::wstring& path) {
+    return std::find(files->begin(), files->end(), path) != files->end();
+  };
+  probe.toAbsolute = [](const std::wstring& path) { return path; };
+  probe.isExecutable = [](const std::wstring& path) { return path == L"/two/git"; };
+  const auto found =
+      gc::git::SearchPathForExecutable(L"/one:/two", L"git", probe, gc::git::PathFlavor::posix);
+  GC_CHECK(found.size() == 1);
+  GC_CHECK(!found.empty() && found.front() == L"/two/git");
+}
+
+GC_TEST(locator_posix_sort_is_stable_path_order) {
+  std::vector<std::wstring> candidates{L"/opt/msys64/usr/bin/git", L"/usr/bin/git", L"/opt/git/cmd/git"};
+  gc::git::SortGitCandidatesByPreference(candidates, gc::git::PathFlavor::posix);
+  const std::vector<std::wstring> expected{L"/opt/msys64/usr/bin/git", L"/usr/bin/git", L"/opt/git/cmd/git"};
+  GC_CHECK(candidates == expected);
+}

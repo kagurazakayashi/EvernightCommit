@@ -7,7 +7,7 @@ namespace gc::git {
 namespace {
 
 // Windows 文件系统路径大小写不敏感（对 ASCII 而言）；纯逻辑层只做 ASCII 折叠，
-// 避免依赖平台排序函数，测试环境结果可复现。
+// 避免依赖平台排序函数，测试环境结果可复现。POSIX 路径按字节区分大小写，不做折叠。
 wchar_t FoldAscii(wchar_t c) noexcept {
   if (c >= L'A' && c <= L'Z') {
     return static_cast<wchar_t>(c - L'A' + L'a');
@@ -27,12 +27,16 @@ bool EqualsFolded(const std::wstring& a, const std::wstring& b) noexcept {
   return true;
 }
 
-void AppendUnique(std::vector<std::wstring>& out, std::wstring candidate) {
+bool SamePath(const std::wstring& a, const std::wstring& b, PathFlavor flavor) noexcept {
+  return flavor == PathFlavor::windows ? EqualsFolded(a, b) : a == b;
+}
+
+void AppendUnique(std::vector<std::wstring>& out, std::wstring candidate, PathFlavor flavor) {
   if (candidate.empty()) {
     return;
   }
-  if (std::none_of(out.begin(), out.end(), [&candidate](const std::wstring& existing) {
-        return EqualsFolded(existing, candidate);
+  if (std::none_of(out.begin(), out.end(), [&candidate, flavor](const std::wstring& existing) {
+        return SamePath(existing, candidate, flavor);
       })) {
     out.push_back(std::move(candidate));
   }
@@ -50,8 +54,12 @@ std::wstring TrimWide(std::wstring_view text) {
   return std::wstring(text.substr(begin, end - begin));
 }
 
-bool HasSeparator(std::wstring_view path) noexcept {
-  return path.find(L'\\') != std::wstring_view::npos || path.find(L'/') != std::wstring_view::npos;
+bool HasSeparator(std::wstring_view path, PathFlavor flavor) noexcept {
+  if (path.find(L'/') != std::wstring_view::npos) {
+    return true;
+  }
+  // 反斜杠只在 Windows 上是分隔符；POSIX 上它是合法文件名字符。
+  return flavor == PathFlavor::windows && path.find(L'\\') != std::wstring_view::npos;
 }
 
 // 按目录分隔符切成段，丢掉空段（连续分隔符、结尾分隔符）；不区分大小写由调用方折叠完成。
@@ -81,10 +89,13 @@ std::wstring FoldSegment(std::wstring_view segment) {
   return folded;
 }
 
-std::wstring CombineDirAndFile(std::wstring_view dir, std::wstring_view file) {
+std::wstring CombineDirAndFile(std::wstring_view dir, std::wstring_view file, PathFlavor flavor) {
+  const wchar_t separator = flavor == PathFlavor::windows ? L'\\' : L'/';
   std::wstring result(dir);
-  if (!result.empty() && result.back() != L'\\' && result.back() != L'/') {
-    result.push_back(L'\\');
+  const bool endsWithSeparator =
+      !result.empty() && (result.back() == L'/' || (flavor == PathFlavor::windows && result.back() == L'\\'));
+  if (!result.empty() && !endsWithSeparator) {
+    result.push_back(separator);
   }
   result.append(file);
   return result;
@@ -93,11 +104,12 @@ std::wstring CombineDirAndFile(std::wstring_view dir, std::wstring_view file) {
 }  // namespace
 
 std::vector<std::wstring> SearchPathForExecutable(std::wstring_view pathEnv, std::wstring_view exeName,
-                                                  const FsProbe& fs) {
+                                                  const FsProbe& fs, PathFlavor flavor) {
+  const wchar_t separatorChar = flavor == PathFlavor::windows ? L';' : L':';
   std::vector<std::wstring> found;
   size_t cursor = 0;
   while (cursor <= pathEnv.size()) {
-    const size_t separator = pathEnv.find(L';', cursor);
+    const size_t separator = pathEnv.find(separatorChar, cursor);
     const std::wstring_view entry =
         pathEnv.substr(cursor, separator == std::wstring_view::npos ? std::wstring_view::npos : separator - cursor);
     cursor = (separator == std::wstring_view::npos) ? pathEnv.size() + 1 : separator + 1;
@@ -107,10 +119,15 @@ std::vector<std::wstring> SearchPathForExecutable(std::wstring_view pathEnv, std
     if (dir.empty()) {
       continue;
     }
-    AppendUnique(found, fs.toAbsolute(CombineDirAndFile(dir, exeName)));
+    AppendUnique(found, fs.toAbsolute(CombineDirAndFile(dir, exeName, flavor)), flavor);
   }
-  // 只保留真实存在的文件；过滤放在收集后，使 toAbsolute 的失败回退（空串）也一并剔除。
-  std::erase_if(found, [&fs](const std::wstring& candidate) { return candidate.empty() || !fs.fileExists(candidate); });
+  // 只保留真实存在（且具备执行条件）的文件；过滤放在收集后，使 toAbsolute 的失败回退（空串）也一并剔除。
+  std::erase_if(found, [&fs](const std::wstring& candidate) {
+    if (candidate.empty() || !fs.fileExists(candidate)) {
+      return true;
+    }
+    return fs.isExecutable && !fs.isExecutable(candidate);
+  });
   return found;
 }
 
@@ -139,27 +156,33 @@ GitCandidateFamily ClassifyGitCandidate(std::wstring_view path) {
   return GitCandidateFamily::other;
 }
 
-void SortGitCandidatesByPreference(std::vector<std::wstring>& candidates) {
+void SortGitCandidatesByPreference(std::vector<std::wstring>& candidates, PathFlavor flavor) {
+  if (flavor != PathFlavor::windows) {
+    return;  // POSIX 没有 cmd/msys 档位，PATH 顺序本身就是界面顺序。
+  }
   std::stable_sort(candidates.begin(), candidates.end(),
                    [](const std::wstring& left, const std::wstring& right) {
                      return ClassifyGitCandidate(left) < ClassifyGitCandidate(right);
                    });
 }
 
-std::wstring ResolveExecutableInput(std::wstring_view input, std::wstring_view pathEnv, const FsProbe& fs) {
+std::wstring ResolveExecutableInput(std::wstring_view input, std::wstring_view pathEnv, const FsProbe& fs,
+                                    PathFlavor flavor) {
   const std::wstring trimmed = TrimWide(input);
   if (trimmed.empty()) {
     return {};
   }
-  if (!HasSeparator(trimmed)) {
-    // 裸名字（"git"）补上 .exe 后按 PATH 解析；找不到就原样返回，由后续验证步骤报告具体原因。
+  if (!HasSeparator(trimmed, flavor)) {
+    // 裸名字（"git"）：Windows 补 .exe 后按 PATH 解析，POSIX 按原名解析。
+    // 找不到就原样返回，由后续验证步骤报告具体原因。
     std::wstring name = trimmed;
-    if (name.find(L'.') == std::wstring::npos) {
+    if (flavor == PathFlavor::windows && name.find(L'.') == std::wstring::npos) {
       name += L".exe";
     }
-    auto candidates = SearchPathForExecutable(pathEnv, name, fs);
-    // 用户只输了名字时没有表达过偏好，那就按档位挑：cmd 入口优先，msys 那套垫后。
-    SortGitCandidatesByPreference(candidates);
+    auto candidates = SearchPathForExecutable(pathEnv, name, fs, flavor);
+    // 用户只输了名字时没有表达过偏好，那就按档位挑：Windows 上 cmd 入口优先、msys 垫后；
+    // POSIX 保持 PATH 顺序。
+    SortGitCandidatesByPreference(candidates, flavor);
     return candidates.empty() ? trimmed : candidates.front();
   }
   const std::wstring absolute = fs.toAbsolute(trimmed);

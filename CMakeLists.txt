@@ -176,7 +176,8 @@ add_library(gc_core STATIC
   src/git/submodule_navigation.cpp
   src/git/undo_commit_plan.cpp
   src/git/workspace_model.cpp
-  src/git/workspace_status.cpp)
+  src/git/workspace_status.cpp
+  src/platform/text_encoding.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
 # 后台任务（task_coordinator、GitTaskWorker）用 std::thread：
@@ -299,9 +300,18 @@ endif()
 
   message(STATUS "[范围] Windows：核心层 + Win32 平台实现 + 过渡界面 + 主程序 + 测试")
 else()
-  message(STATUS "[范围] Linux：核心层 + 契约层 + 测试"
-                 "（本轮没有 src/platform/linux/ 实现，"
-                 "不构建 gc_platform/gc_ui/EvernightCommit.exe）")
+  # Linux 平台基础服务：路径/文件探测、Git 候选发现、环境、时区、临时文件。
+  # 这里没有界面主程序，也刻意没有子进程执行器与持久化实现——那些属于后续步骤。
+  add_library(gc_platform_linux STATIC
+    src/platform/linux/environment.cpp
+    src/platform/linux/git_toolchain.cpp
+    src/platform/linux/local_time.cpp
+    src/platform/linux/path.cpp
+    src/platform/linux/scratch_files.cpp)
+  target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
+  message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"
+                 "（尚无界面主程序、子进程执行器与持久化实现）")
 endif()
 
 # ---------- wxWidgets 启动目标 ----------

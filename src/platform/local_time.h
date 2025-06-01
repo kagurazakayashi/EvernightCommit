@@ -22,9 +22,15 @@ namespace gc::platform {
 // 一个本机墙上时间换算出来的瞬间。
 struct LocalInstant {
   bool valid = false;
+  // 墙上时间在夏令时“回拨”的那一小时里出现两次时为 true：utcEpochSeconds/offsetMinutes
+  // 是确定选中的那一个（Linux 实现固定选较早的瞬间），alternate* 是另一个。
+  // 墙上时间落在夏令时“跳过”的空洞里时 valid=false（不猜一个不存在的时刻）。
+  bool ambiguous = false;
   git::CivilTime wall{};         // 用户看到并挑选的墙上时间
   long long utcEpochSeconds = 0; // 这一刻真正的 UTC 秒数（交给 Git 的值用它）
   int offsetMinutes = 0;         // 这一刻实际生效的 UTC 偏移（含夏令时）
+  long long alternateUtcEpochSeconds = 0;  // ambiguous 时的另一个瞬间
+  int alternateOffsetMinutes = 0;          // ambiguous 时的另一个偏移
   std::wstring failureReason;    // valid 为 false 时面向用户的说明
 };
 

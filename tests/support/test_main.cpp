@@ -25,6 +25,7 @@ namespace {
 // 目的是给「AI 会话可自跑」与「必须使用者亲跑」划一条可执行的界线：
 //   pure         —— 纯逻辑：不启动任何子进程、不碰真实 Git/文件系统副作用。
 //   windows      —— 真实 Win32 集成：启动 cmd.exe/建真实目录与句柄，但绝不启动 Git。
+//   linux        —— 真实 Linux 平台基础服务：文件系统/时区/环境变量，但绝不启动 Git。
 //   git-readonly —— 真实 Git 集成，但逐例核实过「用例体+其调用的夹具辅助函数」都不出现
 //                   git commit / git push（init/add/config/fetch/update-ref/hash-object
 //                   /merge --no-commit/ls-files/status 等只读或非提交形态允许）。
@@ -37,11 +38,11 @@ namespace {
 //                   任何分组选择与默认运行都不含它，并给出明确警告，
 //                   防止「新文件被误当纯逻辑自跑」。
 //
-// 默认（不写 --group）= 上面前四组，即「安全集」；git-push 与 unclassified 一律不跑，
+// 默认（不写 --group）= 上面前五组，即「安全集」；git-push 与 unclassified 一律不跑，
 // 并在汇总里报明被排除的数量——不再有「一次全量把提交和推送混在一起」这个入口。
 //
 // 维护规则（运行器会强制）：
-//   1) 新增测试文件必须登记进 kPureFiles / kWindowsFiles / kFixtureFiles 之一，
+//   1) 新增测试文件必须登记进 kPureFiles / kWindowsFiles / kLinuxFiles / kFixtureFiles 之一，
 //      否则落入 unclassified 并在每次运行时报明；
 //   2) kVerifiedReadOnlyCases 与 kVerifiedCommitCases 里的每个名字必须恰好命中一个注册用例，
 //      用例改名/删除时必须同步本表，否则启动即失败（防「白名单腐烂」把
@@ -52,7 +53,7 @@ namespace {
 //      归类错了会在执行时被拦下并记成「拒绝 push」，运行以退出码 4 结束，不会当成通过。
 // ---------------------------------------------------------------------------
 
-enum class CaseGroup { pure, windows, gitReadonly, gitCommit, gitPush, unclassified };
+enum class CaseGroup { pure, windows, linux, gitReadonly, gitCommit, gitPush, unclassified };
 
 std::string_view GroupLabel(CaseGroup group) {
   switch (group) {
@@ -60,6 +61,8 @@ std::string_view GroupLabel(CaseGroup group) {
       return "pure";
     case CaseGroup::windows:
       return "windows";
+    case CaseGroup::linux:
+      return "linux";
     case CaseGroup::gitReadonly:
       return "git-readonly";
     case CaseGroup::gitCommit:
@@ -74,7 +77,7 @@ std::string_view GroupLabel(CaseGroup group) {
 
 // 可自动运行（AI 会话与默认入口都只碰这些组）。
 bool AutoRunnable(CaseGroup group) {
-  return group == CaseGroup::pure || group == CaseGroup::windows ||
+  return group == CaseGroup::pure || group == CaseGroup::windows || group == CaseGroup::linux ||
          group == CaseGroup::gitReadonly || group == CaseGroup::gitCommit;
 }
 
@@ -85,6 +88,10 @@ bool ParseGroup(std::string_view text, CaseGroup& out) {
   }
   if (text == "windows") {
     out = CaseGroup::windows;
+    return true;
+  }
+  if (text == "linux") {
+    out = CaseGroup::linux;
     return true;
   }
   if (text == "git-readonly") {
@@ -148,6 +155,7 @@ constexpr const char* kPureFiles[] = {
     "subprocess_capture_tests.cpp",
     "subprocess_command_line_tests.cpp",
     "task_coordinator_tests.cpp",
+    "text_encoding_tests.cpp",
     "ui_metrics_tests.cpp",
     "undo_commit_plan_tests.cpp",
     "utf_text_tests.cpp",
@@ -165,6 +173,16 @@ constexpr const char* kWindowsFiles[] = {
     "win_path_probe_tests.cpp",  // 真实文件系统上的预览预检（存在性/可读性/二进位），只用测试自己的临时目录；不启动 Git。
     "list_redraw_tests.cpp",  // 真实窗口上的消息级断言：重绘暂停必须恢复、布局与文本设置不重复发消息。不起子进程、不碰文件系统。
     "commit_form_time_tests.cpp",  // 真实窗口上的提交表单时间控件：联动取的是看得见的那一半。不起子进程、不碰文件系统。
+};
+
+// 真实 Linux 平台基础服务：只在 Linux 目标里编译。碰真实文件系统/时区/环境变量，
+// 但绝不启动任何子进程（包括 git），也不联网、不涉及 push。
+constexpr const char* kLinuxFiles[] = {
+    "linux_environment_tests.cpp",
+    "linux_git_toolchain_tests.cpp",
+    "linux_local_time_tests.cpp",
+    "linux_path_probe_tests.cpp",
+    "linux_scratch_file_tests.cpp",
 };
 
 // 引用 GitFixture/RemoteRig 的文件；未列入下方两张名单的用例默认含提交/推送，
@@ -461,6 +479,9 @@ CaseGroup GroupOf(const RegisteredCase& item) {
   if (InTable(kWindowsFiles, std::size(kWindowsFiles), base)) {
     return CaseGroup::windows;
   }
+  if (InTable(kLinuxFiles, std::size(kLinuxFiles), base)) {
+    return CaseGroup::linux;
+  }
   if (InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), item.name)) {
     return CaseGroup::gitReadonly;
   }
@@ -542,14 +563,17 @@ int ValidateGroupTables() {
 struct GroupCounts {
   int pure = 0;
   int windows = 0;
+  int linux = 0;
   int gitReadonly = 0;
   int gitCommit = 0;
   int gitPush = 0;
   int unclassified = 0;
 
-  int Total() const { return pure + windows + gitReadonly + gitCommit + gitPush + unclassified; }
+  int Total() const {
+    return pure + windows + linux + gitReadonly + gitCommit + gitPush + unclassified;
+  }
   // 可自动运行那一侧（默认入口与 --group safe 的范围）。
-  int AutoRunnable() const { return pure + windows + gitReadonly + gitCommit; }
+  int AutoRunnable() const { return pure + windows + linux + gitReadonly + gitCommit; }
 };
 
 GroupCounts CountGroups() {
@@ -561,6 +585,9 @@ GroupCounts CountGroups() {
         break;
       case CaseGroup::windows:
         ++counts.windows;
+        break;
+      case CaseGroup::linux:
+        ++counts.linux;
         break;
       case CaseGroup::gitReadonly:
         ++counts.gitReadonly;
@@ -582,10 +609,11 @@ GroupCounts CountGroups() {
 void PrintGroupStatsLine(std::string_view prefix) {
   const GroupCounts counts = CountGroups();
   std::fprintf(stdout,
-               "%s注册总数 %d：pure %d / windows %d / git-readonly %d / git-commit %d / "
+               "%s注册总数 %d：pure %d / windows %d / linux %d / git-readonly %d / git-commit %d / "
                "git-push %d / unclassified %d\n",
                prefix.data(), static_cast<int>(Cases().size()), counts.pure, counts.windows,
-               counts.gitReadonly, counts.gitCommit, counts.gitPush, counts.unclassified);
+               counts.linux, counts.gitReadonly, counts.gitCommit, counts.gitPush,
+               counts.unclassified);
 }
 
 // 一次运行的分组选择结果：跑哪些、被排除多少、要不要放行 push。
@@ -643,7 +671,7 @@ bool ResolveSelection(std::string_view groupFilter, RunSelection& out, int& exit
   CaseGroup group = CaseGroup::pure;
   if (!ParseGroup(groupFilter, group)) {
     std::fprintf(stderr,
-                 "未知分组 \"%s\"。可用：pure / windows / git-readonly / git-commit / "
+                 "未知分组 \"%s\"。可用：pure / windows / linux / git-readonly / git-commit / "
                  "git-push / unclassified / safe / all。\n",
                  std::string(groupFilter).c_str());
     exitCode = 3;
@@ -687,7 +715,7 @@ int ListCases(std::string_view nameFilter, std::string_view groupFilter) {
     selection.mode = SelectMode::single;
   } else {
     std::fprintf(stderr,
-                 "未知分组 \"%s\"。可用：pure / windows / git-readonly / git-commit / "
+                 "未知分组 \"%s\"。可用：pure / windows / linux / git-readonly / git-commit / "
                  "git-push / unclassified / safe / all。\n",
                  std::string(groupFilter).c_str());
     return -1;
@@ -716,6 +744,7 @@ int PrintGroups() {
   const Row rows[] = {
       {CaseGroup::pure, &GroupCounts::pure, "可自动运行（纯逻辑，不起子进程）"},
       {CaseGroup::windows, &GroupCounts::windows, "可自动运行（真实 Win32，但不启动 Git）"},
+      {CaseGroup::linux, &GroupCounts::linux, "可自动运行（真实 Linux 基础服务，但不启动 Git）"},
       {CaseGroup::gitReadonly, &GroupCounts::gitReadonly, "可自动运行（真实 Git，逐例核实无提交无推送）"},
       {CaseGroup::gitCommit, &GroupCounts::gitCommit, "可自动运行（隔离临时仓库里真实提交，不推送）"},
       {CaseGroup::gitPush, &GroupCounts::gitPush, "禁止自动运行（会 git push，须使用者本人放行）"},
@@ -841,11 +870,11 @@ namespace {
 void PrintUsage() {
   std::fprintf(
       stderr,
-      "用法：gc_tests [--group pure|windows|git-readonly|git-commit|git-push|unclassified|safe|all]"
+      "用法：gc_tests [--group pure|windows|linux|git-readonly|git-commit|git-push|unclassified|safe|all]"
       " [姓名片段]\n"
       "      gc_tests --list [--group G] [姓名片段]     输出「组名<TAB>用例名」名单\n"
       "      gc_tests --groups                          打印各组账目与运行授权\n"
-      "不写 --group 时只跑「安全集」= pure + windows + git-readonly + git-commit；\n"
+      "不写 --group 时只跑「安全集」= pure + windows + linux + git-readonly + git-commit；\n"
       "git-push 与未登记用例一律不跑（本轮授权允许隔离仓库里测 commit，不允许任何 push）。\n"
       "要点名跑 git-push/all 必须同时设 GC_ALLOW_PUSH=1，由使用者本人执行。\n"
       "退出码：0 全通过 / 1 有失败 / 2 命中 0 个 / 3 分组表漂移或未知分组 / 4 被禁止的 push。\n"

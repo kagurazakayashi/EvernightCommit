@@ -8,7 +8,8 @@ Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现
 窗口标题为“Git 提交工具”。
 
 Linux 侧已经有可用的**开发入口**（配置、构建、安全测试、调试、wxWidgets 依赖与最小启动
-检查窗口都实测过），但还没有 Linux 版程序：平台实现与界面尚未迁移，Linux 上构建不到
+检查窗口都实测过），并已落地路径/文件探测、Git 候选发现、POSIX 环境、时区与安全临时文件
+这些平台基础服务；但还没有 Linux 版程序：子进程执行、终端与界面尚未迁移，Linux 上构建不到
 主程序。范围与未迁移清单见 [docs/building.md](docs/building.md) 与
 [docs/testing.md](docs/testing.md)。跨平台拆分进度与还差的环节见
 [docs/architecture.md](docs/architecture.md) 的「过渡期的 Win32 界面」和「已知待办差异」。
