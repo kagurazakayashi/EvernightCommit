@@ -29,7 +29,7 @@
 
 #include "git/pull_plan.h"
 #include "git/repository.h"
-#include "platform/windows/pull_probe.h"
+#include "platform/pull_probe.h"
 #include "platform/windows/utf_text.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

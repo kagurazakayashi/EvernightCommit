@@ -320,22 +320,6 @@ private:
 
 }  // namespace
 
-std::wstring_view StreamCapture::StateLabel() const noexcept {
-  switch (state) {
-    case StreamCaptureState::complete:
-      return L"完整";
-    case StreamCaptureState::truncated:
-      return L"超过上限被截断";
-    case StreamCaptureState::readFailed:
-      return L"读取失败";
-    case StreamCaptureState::abandoned:
-      return L"未能读到结尾";
-    case StreamCaptureState::notStarted:
-      return L"未读取";
-  }
-  return L"未读取";
-}
-
 std::wstring QuoteArgument(std::wstring_view value) {
   std::wstring segment;
   AppendArgument(segment, value, /*alwaysQuote=*/true);
@@ -353,13 +337,13 @@ std::wstring BuildCommandLine(std::wstring_view program, const std::vector<std::
   return commandLine;
 }
 
-SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
-                                      const std::vector<std::wstring>& arguments,
-                                      std::wstring_view workingDirectory,
-                                      unsigned long timeoutMilliseconds, const wchar_t* environmentBlock,
-                                      size_t maxCaptureBytesPerStream,
-                                      unsigned long drainAfterExitMilliseconds) {
-  SubprocessRunResult result;
+ProcessRunResult RunHiddenCaptured(std::wstring_view program,
+                                   const std::vector<std::wstring>& arguments,
+                                   std::wstring_view workingDirectory,
+                                   unsigned long timeoutMilliseconds, const wchar_t* environmentBlock,
+                                   size_t maxCaptureBytesPerStream,
+                                   unsigned long drainAfterExitMilliseconds, StopFlag cancel) {
+  ProcessRunResult result;
   result.stdoutCapture.maxBytes = maxCaptureBytesPerStream;
   result.stderrCapture.maxBytes = maxCaptureBytesPerStream;
   result.commandLine = BuildCommandLine(program, arguments);
@@ -399,6 +383,20 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
   startup.StartupInfo.hStdError = stderrWrite.get();
   startup.lpAttributeList = attributeList.Get();
 
+  // 用 Job Object 把「这一条后台查询」的子孙也圈进来：超时/取消时能连同孙子一起结束，
+  // 正常退出后关闭 job（KILL_ON_JOB_CLOSE）也能清掉仍占着管道的后代。
+  // 若当前进程本身受限（已在不可嵌套的 job 里），Assign 会失败，此时退回只终止直接子进程。
+  UniqueHandle jobHandle(::CreateJobObjectW(nullptr, nullptr));
+  bool processInJob = false;
+  if (jobHandle) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (::SetInformationJobObject(jobHandle.get(), JobObjectExtendedLimitInformation, &limits,
+                                  sizeof(limits)) == 0) {
+      jobHandle.Reset();
+    }
+  }
+
   PROCESS_INFORMATION processInformation{};
   std::wstring mutableCommand = result.commandLine;  // CreateProcessW 要求可写缓冲。
   const std::wstring programString(program);
@@ -409,7 +407,8 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
   const BOOL created =
       ::CreateProcessW(programString.c_str(), mutableCommand.data(), nullptr, nullptr,
                        /*bInheritHandles=*/TRUE,
-                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT |
+                           CREATE_SUSPENDED,
                        environment, workDir.empty() ? nullptr : workDir.c_str(),
                        reinterpret_cast<LPSTARTUPINFOW>(&startup), &processInformation);
   // 父进程一侧的写端立即关闭：否则管道永远不会 EOF，读取线程无法结束。
@@ -423,6 +422,25 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
   result.started = true;
   UniqueHandle processHandle(processInformation.hProcess);
   UniqueHandle threadHandle(processInformation.hThread);
+  if (jobHandle) {
+    processInJob =
+        ::AssignProcessToJobObject(jobHandle.get(), processHandle.get()) != 0;
+  }
+  // 先挂进 job 再让子进程真正跑起来，避免它在 Assign 之前就派生后代逃出管辖。
+  if (::ResumeThread(threadHandle.get()) == static_cast<DWORD>(-1)) {
+    result.termination = ProcessTermination::unknown;
+    result.launchError = ::GetLastError();
+    result.launchErrorText = L"进程已创建但无法恢复执行：" + FormatErrorText(result.launchError);
+    if (processInJob) {
+      ::TerminateJobObject(jobHandle.get(), 0xFFFF);
+    } else {
+      ::TerminateProcess(processHandle.get(), 0xFFFF);
+    }
+    static_cast<void>(::WaitForSingleObject(processHandle.get(), kKillGraceMs));
+    result.exited = true;
+    result.reaped = true;
+    return result;
+  }
 
   // 两条流各用独立线程抽取：单线程轮读会在其中一条写满时死锁。
   StreamReader stdoutReader(std::move(stdoutRead));
@@ -430,13 +448,61 @@ SubprocessRunResult RunHiddenCaptured(std::wstring_view program,
   stdoutReader.Start(maxCaptureBytesPerStream);
   stderrReader.Start(maxCaptureBytesPerStream);
 
-  const DWORD waited = ::WaitForSingleObject(processHandle.get(), timeoutMilliseconds);
-  if (waited == WAIT_TIMEOUT) {
-    result.timedOut = true;
-    ::TerminateProcess(processHandle.get(), 0xFFFF);
-    result.terminated = ::WaitForSingleObject(processHandle.get(), kKillGraceMs) == WAIT_OBJECT_0;
+  // 有界等待：超时与后台停止信号都只终止本次进程。这里刻意不复用命令窗口的
+  // 「保留终端、不杀进程」语义——后台查询没有可见窗口，留一个孤儿进程只会泄漏。
+  const ULONGLONG startTick = ::GetTickCount64();
+  const bool hasTimeout = timeoutMilliseconds != 0;
+  for (;;) {
+    DWORD slice = 100;
+    if (hasTimeout) {
+      const ULONGLONG elapsed = ::GetTickCount64() - startTick;
+      const ULONGLONG remaining = elapsed < timeoutMilliseconds ? timeoutMilliseconds - elapsed : 0;
+      slice = static_cast<DWORD>(std::min<ULONGLONG>(remaining, 100));
+    }
+    const DWORD waited = ::WaitForSingleObject(processHandle.get(), slice);
+    if (waited == WAIT_OBJECT_0) {
+      result.exited = true;
+      break;
+    }
+    if (waited == WAIT_FAILED) {
+      break;
+    }
+    const auto terminateThisTask = [&] {
+      if (processInJob) {
+        ::TerminateJobObject(jobHandle.get(), 0xFFFF);
+      } else {
+        ::TerminateProcess(processHandle.get(), 0xFFFF);
+      }
+      return ::WaitForSingleObject(processHandle.get(), kKillGraceMs) == WAIT_OBJECT_0;
+    };
+    if (StopRequested(cancel)) {
+      result.canceled = true;
+      result.timedOut = false;
+      result.terminated = true;
+      result.exited = terminateThisTask();
+      break;
+    }
+    if (hasTimeout && ::GetTickCount64() - startTick >= timeoutMilliseconds) {
+      result.timedOut = true;
+      result.terminated = true;
+      result.exited = terminateThisTask();
+      break;
+    }
+  }
+  if (result.canceled) {
+    result.termination = ProcessTermination::canceled;
+  } else if (result.timedOut) {
+    result.termination = ProcessTermination::timedOut;
+  } else if (result.exited) {
+    result.termination = ProcessTermination::exited;
   } else {
-    result.exited = waited == WAIT_OBJECT_0;
+    result.termination = ProcessTermination::unknown;
+  }
+  result.reaped = result.exited;
+  // 直接子进程已结束（或被终止）后关闭 job：仍占着写端的子孙会被一并结束，管道才能 EOF。
+  // 进程状态未知时不关（那等于替一个可能还活着的任务做决定），让读取线程按期限放弃收尾。
+  if (result.exited && processInJob) {
+    jobHandle.Reset();
   }
 
   // 排空排在进程落账之后：进程已经不会再写，剩下的只是管道里已缓冲的字节与 EOF。

@@ -8,16 +8,21 @@
 //
 //   g++ -std=c++20 -fsyntax-only -Isrc tests/portable_boundary_check.cpp
 //
-// 注意它管不到「include 了 platform/windows 目录里的头」这件事：控制器目前仍然直接
-// 使用 platform/windows/*_probe.h 的请求与结果类型，那些头本身已经不含任何 Windows 类型，
-// 什么时候该把契约提上来见 docs/architecture.md「已知待办差异」第 3 条。
+// 查询/预检的请求、结果与依赖注入已从 platform/windows/ 提到 src/platform/：
+// repo_detect、workspace_status、author_config、commit_detail/changes 与各 *_probe
+// 头都不含 Windows 类型；只有 conflict_probe 仍因真实目录读取留在 Windows 侧。
 //
 // 通过与否都不代表 Linux 版可用：这里的 std::wstring 在两侧宽度不同，
 // 行为回归仍然只能在 Windows 上按 docs/testing.md 的分组执行。详见 docs/building.md 第 5 节。
 #include "platform/dialogs.h"
+#include "platform/git_query.h"
 #include "platform/git_task_worker.h"
 #include "platform/local_time.h"
+#include "platform/main_thread_dispatch.h"
 #include "platform/notification.h"
+#include "platform/process.h"
+#include "platform/repo_detect.h"
+#include "platform/workspace_status.h"
 
 #include "ui/commit_flow.h"
 #include "ui/conflict_flow.h"

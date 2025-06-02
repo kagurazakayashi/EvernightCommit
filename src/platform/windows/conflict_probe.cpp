@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "git/pull_plan.h"
-#include "platform/windows/git_query_result.h"
+#include "platform/git_query.h"
 #include "platform/windows/raii.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
@@ -307,12 +307,12 @@ git::ConflictStateFacts CollectConflictState(const ConflictProbeRequest& request
   return git::InterpretConflictState(markers, listing, symbolicRef, headObject);
 }
 
-ConflictProbeDeps MakeConflictProbeDeps(unsigned long timeoutMilliseconds) {
+ConflictProbeDeps MakeConflictProbeDeps(unsigned long timeoutMilliseconds, StopFlag cancel) {
   ConflictProbeDeps deps;
-  deps.runner = [timeoutMilliseconds](const std::wstring& exePath, const std::wstring& directory,
+  deps.runner = [timeoutMilliseconds, cancel](const std::wstring& exePath, const std::wstring& directory,
                                       const std::vector<std::wstring>& arguments) {
     // 未合并清单带 -z（路径里有 NUL 分隔），按字节取回才能原样用。
-    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds);
+    return RunGitBackgroundQuery(exePath, arguments, directory, timeoutMilliseconds, cancel);
   };
   deps.markers = [](const std::wstring& absoluteGitDir) {
     return ProbeConflictMarkers(absoluteGitDir);
@@ -325,7 +325,7 @@ ConflictProbeOutcome RunConflictProbeLoad(const ConflictProbeRequest& request) {
   outcome.repositoryDirectory = request.repositoryDirectory;  // 原样回显：判别在界面线程。
   const unsigned long timeout = request.timeoutMilliseconds != 0 ? request.timeoutMilliseconds
                                                                  : kConflictQueryTimeoutFallbackMs;
-  const ConflictProbeDeps deps = MakeConflictProbeDeps(timeout);
+  const ConflictProbeDeps deps = MakeConflictProbeDeps(timeout, request.stopFlag);
   outcome.state = CollectConflictState(request, deps);
   return outcome;
 }

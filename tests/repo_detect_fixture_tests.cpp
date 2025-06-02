@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "git/repository.h"
-#include "platform/windows/repo_detect.h"
+#include "platform/repo_detect.h"
 #include "platform/windows/utf_text.h"
 
 namespace {

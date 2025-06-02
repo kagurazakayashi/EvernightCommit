@@ -107,9 +107,11 @@ GC_TEST(git_environment_probe_plan_removes_all_redirects) {
   // 后台探测不许删凭据助手：那是用户自己的认证方式，看得见、也不挂在隐形输入上。
   GC_CHECK(FindLastOverride(plan.overrides, L"GIT_ASKPASS") == nullptr);
   GC_CHECK(FindLastOverride(plan.overrides, L"SSH_ASKPASS") == nullptr);
-  // 后台探测绝不能停在看不见的问题上。
+  // 后台探测绝不能停在看不见的问题上，也不能让分页器扣住输出。
   const EnvironmentOverride* prompt = FindLastOverride(plan.overrides, L"GIT_TERMINAL_PROMPT");
   GC_CHECK(prompt != nullptr && prompt->value.has_value() && *prompt->value == L"0");
+  const EnvironmentOverride* pager = FindLastOverride(plan.overrides, L"GIT_PAGER");
+  GC_CHECK(pager != nullptr && pager->value.has_value() && *pager->value == L"cat");
 }
 
 GC_TEST(git_environment_window_plan_keeps_in_window_interaction) {

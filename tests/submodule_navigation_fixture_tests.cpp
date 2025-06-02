@@ -29,10 +29,10 @@
 #include "git/repository.h"
 #include "git/submodule_navigation.h"
 #include "git/workspace_model.h"
-#include "platform/windows/submodule_probe.h"
+#include "platform/submodule_probe.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
-#include "platform/windows/workspace_status.h"
+#include "platform/workspace_status.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"
 

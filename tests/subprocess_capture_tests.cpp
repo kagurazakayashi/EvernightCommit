@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "platform/windows/git_query_result.h"
+#include "platform/git_query.h"
 #include "platform/windows/subprocess.h"
 #include "platform/windows/utf_text.h"
 
@@ -11,7 +11,7 @@ namespace {
 
 using gc::platform::StreamCapture;
 using gc::platform::StreamCaptureState;
-using gc::platform::SubprocessRunResult;
+using gc::platform::ProcessRunResult;
 
 // 造一条「平台层已经收工」的捕获结果，只填判定要看的字段。
 StreamCapture Capture(StreamCaptureState state, std::string bytes, std::wstring note = {},
@@ -25,8 +25,8 @@ StreamCapture Capture(StreamCaptureState state, std::string bytes, std::wstring 
   return capture;
 }
 
-SubprocessRunResult Finished(StreamCapture stdoutCapture, StreamCapture stderrCapture) {
-  SubprocessRunResult run;
+ProcessRunResult Finished(StreamCapture stdoutCapture, StreamCapture stderrCapture) {
+  ProcessRunResult run;
   run.started = true;
   run.exited = true;
   run.stdoutCapture = std::move(stdoutCapture);
@@ -69,7 +69,7 @@ GC_TEST(capture_states_are_named_apart) {
 }
 
 GC_TEST(capture_all_streams_complete_needs_both_streams) {
-  SubprocessRunResult run = Finished(Capture(StreamCaptureState::complete, "out"),
+  ProcessRunResult run = Finished(Capture(StreamCaptureState::complete, "out"),
                                      Capture(StreamCaptureState::complete, ""));
   GC_CHECK(run.AllStreamsComplete());
   run.stderrCapture = Capture(StreamCaptureState::truncated, "err", L"超过上限", 4, 9);
@@ -79,7 +79,7 @@ GC_TEST(capture_all_streams_complete_needs_both_streams) {
 // ---- 平台层 → git 层的转换器：完整度与原因都在这里落地 ----
 
 GC_TEST(capture_bridge_accepts_complete_stdout) {
-  const SubprocessRunResult run = Finished(Capture(StreamCaptureState::complete, "git version 2.53.0"),
+  const ProcessRunResult run = Finished(Capture(StreamCaptureState::complete, "git version 2.53.0"),
                                            Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
   GC_CHECK(result.started);
@@ -91,7 +91,7 @@ GC_TEST(capture_bridge_accepts_complete_stdout) {
 }
 
 GC_TEST(capture_bridge_marks_truncated_stdout_incomplete) {
-  const SubprocessRunResult run =
+  const ProcessRunResult run =
       Finished(Capture(StreamCaptureState::truncated, "1 .M N... 100644 100644 100", L"超过上限", 30, 5000),
                Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
@@ -101,7 +101,7 @@ GC_TEST(capture_bridge_marks_truncated_stdout_incomplete) {
 }
 
 GC_TEST(capture_bridge_marks_abandoned_stdout_incomplete) {
-  const SubprocessRunResult run =
+  const ProcessRunResult run =
       Finished(Capture(StreamCaptureState::abandoned, "refs/heads/ma", L"管道没有结束"),
                Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
@@ -111,7 +111,7 @@ GC_TEST(capture_bridge_marks_abandoned_stdout_incomplete) {
 }
 
 GC_TEST(capture_bridge_marks_read_failure_incomplete) {
-  const SubprocessRunResult run =
+  const ProcessRunResult run =
       Finished(Capture(StreamCaptureState::readFailed, "", L"读取管道失败：数据错误"),
                Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
@@ -123,7 +123,7 @@ GC_TEST(capture_bridge_refuses_invalid_utf8_tail) {
   // 三个字节起步的多字节字符只剩两个字节（记录被切断）：宽松解码会造出一个替代字符，
   // 那就等于用另一个路径去做判断，必须判为不完整。
   std::string broken = "name \xE4\xB8";  // 「上」的前两字节
-  const SubprocessRunResult run = Finished(Capture(StreamCaptureState::complete, broken),
+  const ProcessRunResult run = Finished(Capture(StreamCaptureState::complete, broken),
                                            Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
   GC_CHECK_MESSAGE(!result.outputComplete, "残缺的 UTF-8 序列不得解码成另一个值");
@@ -134,7 +134,7 @@ GC_TEST(capture_bridge_multibyte_content_is_decoded_whole) {
   // 多字节字符在读取时跨块无所谓：字节先攒完整，再整段解码，因此结果与分块方式无关。
   const std::wstring expected = L"上.txt 中 文件 emoji 🌙 end";
   std::string bytes = gc::platform::Utf16ToUtf8(expected);
-  const SubprocessRunResult run = Finished(Capture(StreamCaptureState::complete, bytes),
+  const ProcessRunResult run = Finished(Capture(StreamCaptureState::complete, bytes),
                                            Capture(StreamCaptureState::complete, ""));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
   GC_CHECK(result.outputComplete);
@@ -143,7 +143,7 @@ GC_TEST(capture_bridge_multibyte_content_is_decoded_whole) {
 
 GC_TEST(capture_bridge_records_stderr_incompleteness_separately) {
   // 标准错误只影响诊断文字：它读不全时标准输出照样可用，但必须记录在案。
-  const SubprocessRunResult run = Finished(Capture(StreamCaptureState::complete, "ok"),
+  const ProcessRunResult run = Finished(Capture(StreamCaptureState::complete, "ok"),
                                            Capture(StreamCaptureState::abandoned, "fatal: ind", L"超时"));
   const gc::git::GitQueryResult result = gc::platform::MakeGitQueryResult(run);
   GC_CHECK(result.outputComplete);
@@ -153,7 +153,7 @@ GC_TEST(capture_bridge_records_stderr_incompleteness_separately) {
 }
 
 GC_TEST(capture_bridge_carries_launch_failure_text) {
-  gc::platform::SubprocessRunResult run;
+  gc::platform::ProcessRunResult run;
   run.started = false;
   run.launchError = 2;
   run.launchErrorText = L"系统找不到指定的文件。";

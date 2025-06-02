@@ -20,7 +20,7 @@
 #include "app/operation_conclusions.h"
 #include "platform/windows/clipboard.h"
 #include "platform/windows/commit_message_file.h"
-#include "platform/windows/git_toolchain.h"
+#include "platform/git_toolchain.h"
 #include "platform/windows/identity_prompt.h"
 #include "platform/windows/local_time.h"
 #include "platform/windows/locale_text.h"

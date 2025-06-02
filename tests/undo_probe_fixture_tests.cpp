@@ -23,7 +23,7 @@
 
 #include "git/undo_commit_plan.h"
 #include "git/workspace_model.h"
-#include "platform/windows/undo_probe.h"
+#include "platform/undo_probe.h"
 #include "platform/windows/utf_text.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

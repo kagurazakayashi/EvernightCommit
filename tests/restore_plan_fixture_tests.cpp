@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#include "platform/windows/restore_probe.h"  // 生产的平台层预检：问哪三条、怎么带回答回来
+#include "platform/restore_probe.h"  // 生产的平台层预检：问哪三条、怎么带回答回来
 #include "platform/windows/utf_text.h"       // Utf16ToUtf8：仅用于失败诊断文本
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

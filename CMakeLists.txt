@@ -177,6 +177,23 @@ add_library(gc_core STATIC
   src/git/undo_commit_plan.cpp
   src/git/workspace_model.cpp
   src/git/workspace_status.cpp
+  # ---- 共用平台契约与查询/预检编排（不含任何原生句柄） ----
+  src/platform/process.cpp
+  src/platform/git_query.cpp
+  src/platform/git_toolchain.cpp
+  src/platform/main_thread_dispatch.cpp
+  src/platform/repo_detect.cpp
+  src/platform/workspace_status.cpp
+  src/platform/author_config.cpp
+  src/platform/commit_detail.cpp
+  src/platform/commit_changes.cpp
+  src/platform/commit_probe.cpp
+  src/platform/fetch_probe.cpp
+  src/platform/pull_probe.cpp
+  src/platform/push_probe.cpp
+  src/platform/restore_probe.cpp
+  src/platform/undo_probe.cpp
+  src/platform/submodule_probe.cpp
   src/platform/text_encoding.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
@@ -201,18 +218,13 @@ target_link_libraries(gc_platform_contract INTERFACE gc_build_settings gc_core)
 # 那份契约新写 gc_platform_linux，而不是把这些文件里的调用改成条件编译。
 if(GC_BUILD_WIN32_UI)
 add_library(gc_platform STATIC
-  src/platform/windows/author_config.cpp
   src/platform/windows/clipboard.cpp
-  src/platform/windows/commit_changes.cpp
-  src/platform/windows/commit_detail.cpp
   src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
   src/platform/windows/commit_message_file.cpp
-  src/platform/windows/commit_probe.cpp
   src/platform/windows/conflict_probe.cpp
   src/platform/windows/environment_block.cpp
-  src/platform/windows/fetch_probe.cpp
-  src/platform/windows/git_query_result.cpp
+  src/platform/windows/git_query.cpp
   src/platform/windows/git_toolchain.cpp
   src/platform/windows/identity_prompt.cpp
   src/platform/windows/local_time.cpp
@@ -223,17 +235,10 @@ add_library(gc_platform STATIC
   src/platform/windows/pathspec_file.cpp
   src/platform/windows/persistent_store.cpp
   src/platform/windows/platform_init.cpp
-  src/platform/windows/pull_probe.cpp
-  src/platform/windows/push_probe.cpp
   src/platform/windows/remote_choice_dialog.cpp
-  src/platform/windows/repo_detect.cpp
-  src/platform/windows/restore_probe.cpp
   src/platform/windows/subprocess.cpp
-  src/platform/windows/submodule_probe.cpp
-  src/platform/windows/undo_probe.cpp
   src/platform/windows/utf_text.cpp
-  src/platform/windows/win_path.cpp
-  src/platform/windows/workspace_status.cpp)
+  src/platform/windows/win_path.cpp)
 target_include_directories(gc_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # 平台层在 Win32 能力之上复用 git/ 的纯逻辑（PATH 搜索、版本输出判定），
 # 并实现 src/platform/ 里那份与操作系统无关的契约。
@@ -304,10 +309,13 @@ else()
   # 这里没有界面主程序，也刻意没有子进程执行器与持久化实现——那些属于后续步骤。
   add_library(gc_platform_linux STATIC
     src/platform/linux/environment.cpp
+    src/platform/linux/git_query.cpp
     src/platform/linux/git_toolchain.cpp
     src/platform/linux/local_time.cpp
+    src/platform/linux/notification.cpp
     src/platform/linux/path.cpp
-    src/platform/linux/scratch_files.cpp)
+    src/platform/linux/scratch_files.cpp
+    src/platform/linux/subprocess.cpp)
   target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
   message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"
@@ -320,7 +328,8 @@ endif()
 if(GC_WITH_WX)
   include("${CMAKE_CURRENT_LIST_DIR}/cmake/GcWxWidgets.cmake")
   add_executable(gc_wx_bootstrap src/ui/wx/bootstrap_main.cpp)
-  target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
+  target_include_directories(gc_wx_bootstrap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
   target_compile_definitions(gc_wx_bootstrap PRIVATE GC_VERSION_STRING="${PROJECT_VERSION}"
                                                      GC_WX_VERSION_STRING="${wxWidgets_VERSION_STRING}")
   set_target_properties(gc_wx_bootstrap PROPERTIES OUTPUT_NAME "gc_wx_bootstrap")

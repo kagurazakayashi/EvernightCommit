@@ -199,9 +199,17 @@ RepoError ClassifyGitFailure(const GitQueryResult& result, std::wstring& detail)
     }
     return RepoError::gitLaunchFailed;
   }
+  if (result.canceled) {
+    detail = L"Git 查询被后台停止信号终止";
+    return RepoError::gitCanceled;
+  }
   if (result.timedOut || !result.exited) {
     detail = L"Git 未在限定时间内返回";
     return RepoError::gitTimeout;
+  }
+  if (result.signal != 0) {
+    detail = L"Git 进程被信号终止（信号 " + std::to_wstring(result.signal) + L"）";
+    return RepoError::gitFailed;
   }
   // 完整度排在退出码之前：半份 stdout 既不能当成功答复，也不能拿来归类错误文案。
   if (!result.outputComplete) {
@@ -381,6 +389,8 @@ std::wstring_view RepoErrorLabel(RepoError error) noexcept {
       return L"仓库正被其他 Git 操作占用";
     case RepoError::gitTimeout:
       return L"Git 查询超时";
+    case RepoError::gitCanceled:
+      return L"后台查询已取消";
     case RepoError::gitLaunchFailed:
       return L"无法启动 Git";
     case RepoError::gitFailed:

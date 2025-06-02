@@ -9,7 +9,7 @@
 
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
-#include "platform/windows/utf_text.h"
+#include "platform/text_encoding.h"
 #include "support/tiny_test.h"
 
 namespace {
@@ -40,7 +40,7 @@ const ChangeItem* Find(const std::vector<ChangeItem>& items, std::wstring_view p
 }
 
 // 断言描述走 UTF-8（测试报告按窄字符输出）。
-std::string Narrow(std::wstring_view text) { return gc::platform::Utf16ToUtf8(std::wstring(text)); }
+std::string Narrow(std::wstring_view text) { return gc::platform::WideToUtf8(std::wstring(text)); }
 
 std::wstring Ordinary(std::wstring_view xy, std::wstring_view sub, std::wstring_view path) {
   return std::wstring(L"1 ") + std::wstring(xy) + L" " + std::wstring(sub) +
@@ -71,7 +71,7 @@ GC_TEST(parse_splits_index_and_worktree_columns_of_one_record) {
   const WorkspaceStatusParseResult result = gc::git::ParseWorkspacePorcelainV2(
       JoinRecords({Ordinary(L"MM", L"N...", L"both.txt"), Ordinary(L".D", L"N...", L"gone.txt"),
                    Ordinary(L"A.", L"N...", L"fresh.txt")}));
-  GC_CHECK_MESSAGE(result.error.empty(), "合法输出不应报错：" + gc::platform::Utf16ToUtf8(result.error));
+  GC_CHECK_MESSAGE(result.error.empty(), "合法输出不应报错：" + gc::platform::WideToUtf8(result.error));
   // 同一记录的两侧分别进入两个列表，同一路径允许同时出现在左右两侧。
   GC_CHECK(result.model.staged.size() == 2);
   GC_CHECK(result.model.unstaged.size() == 2);

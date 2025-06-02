@@ -17,8 +17,8 @@
 
 #include "git/fetch_plan.h"
 #include "git/undo_commit_plan.h"
-#include "platform/windows/fetch_probe.h"
-#include "platform/windows/undo_probe.h"
+#include "platform/fetch_probe.h"
+#include "platform/undo_probe.h"
 #include "platform/windows/utf_text.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

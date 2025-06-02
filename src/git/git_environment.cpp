@@ -68,6 +68,9 @@ GitEnvironmentPlan MakeGitEnvironmentPlan(GitRunPurpose purpose,
     // 凭据助手（askpass/GCM）保留——那是用户自己的认证方式，看得见、也不挂在隐形输入上。
     plan.overrides.push_back(
         EnvironmentOverride{L"GIT_TERMINAL_PROMPT", std::wstring(L"0")});
+    // 后台查询分页器必须直通：否则某些命令会在没有 tty 的环境里把输出扣住或改写。
+    // 交互式命令窗口仍按原策略设置 GIT_PAGER=cat，两条通道都能看到完整输出。
+    plan.overrides.push_back(EnvironmentOverride{L"GIT_PAGER", std::wstring(L"cat")});
   }
   plan.overrides.insert(plan.overrides.end(), operationOverrides.begin(), operationOverrides.end());
 

@@ -12,6 +12,9 @@
 #include <cstdio>
 #include <cstring>
 
+// 主线程完成通知边界的 wx 适配器：本目标不跑业务流程，只保证它与 wx 头文件一起能编译。
+#include "ui/wx/completion_pump.h"
+
 namespace {
 
 // 运行期真正链接到的那份 wx 库版本：只能在 wxApp 已经创建之后问

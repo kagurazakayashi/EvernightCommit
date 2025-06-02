@@ -25,7 +25,8 @@ namespace {
 // 目的是给「AI 会话可自跑」与「必须使用者亲跑」划一条可执行的界线：
 //   pure         —— 纯逻辑：不启动任何子进程、不碰真实 Git/文件系统副作用。
 //   windows      —— 真实 Win32 集成：启动 cmd.exe/建真实目录与句柄，但绝不启动 Git。
-//   linux        —— 真实 Linux 平台基础服务：文件系统/时区/环境变量，但绝不启动 Git。
+//   linux        —— 真实 Linux 平台基础服务：文件系统/时区/环境变量与后台执行器
+//                   （只启动测试自选的系统程序），但绝不启动 Git。
 //   git-readonly —— 真实 Git 集成，但逐例核实过「用例体+其调用的夹具辅助函数」都不出现
 //                   git commit / git push（init/add/config/fetch/update-ref/hash-object
 //                   /merge --no-commit/ls-files/status 等只读或非提交形态允许）。
@@ -137,6 +138,7 @@ constexpr const char* kPureFiles[] = {
     "git_probe_tests.cpp",
     "layout_tests.cpp",
     "list_view_memory_tests.cpp",
+    "main_thread_dispatch_tests.cpp",
     "local_time_tests.cpp",
     "machine_output_completeness_tests.cpp",
     "operation_conclusions_tests.cpp",
@@ -183,6 +185,7 @@ constexpr const char* kLinuxFiles[] = {
     "linux_local_time_tests.cpp",
     "linux_path_probe_tests.cpp",
     "linux_scratch_file_tests.cpp",
+    "linux_subprocess_tests.cpp",
 };
 
 // 引用 GitFixture/RemoteRig 的文件；未列入下方两张名单的用例默认含提交/推送，
@@ -201,6 +204,7 @@ constexpr const char* kFixtureFiles[] = {
     "first_push_fixture_tests.cpp",
     "git_environment_fixture_tests.cpp",
     "git_fixture_tests.cpp",
+    "linux_git_query_tests.cpp",
     "pull_probe_fixture_tests.cpp",
     "push_fixture_tests.cpp",
     "refresh_repository_tests.cpp",
@@ -323,6 +327,26 @@ constexpr const char* kVerifiedReadOnlyCases[] = {
     // 「冲突处理入口」任务；文件里其余用例都要提交图，按是否写远端归进 git-commit 或 git-push）。
     "conflict_probe_fixture_accepts_the_query_shapes_on_a_fresh_repository",
     "conflict_probe_fixture_separates_unreadable_git_dir_from_no_markers",
+};
+
+// Linux 真实 Git 集成：用例体逐行核实过「只 init/config/add/只读查询」，
+// 不执行 git commit / git push，也不联网（夹具环境 GIT_ALLOW_PROTOCOL=file 且无远端）。
+constexpr const char* kLinuxVerifiedReadOnlyCases[] = {
+    "linux_git_query_commit_probe_collects_real_facts",
+    "linux_git_query_environment_policy_disables_interaction_and_paging",
+    "linux_git_query_incomplete_commit_probe_is_not_approved",
+    "linux_git_query_incomplete_output_is_a_failure_not_empty_status",
+    "linux_git_query_launch_failure_is_classified",
+    "linux_git_query_switch_repository_discards_older_background_result",
+    "linux_git_query_timeout_is_classified_as_timeout",
+    "linux_git_query_worker_cancel_stops_inflight_child",
+};
+
+// Linux 真实 Git 集成：只在用例自有的 PosixTempDirectory 里执行真实 git commit，
+// 不执行 git push、不联网；提交身份与配置全部隔离在临时根内。
+constexpr const char* kLinuxVerifiedCommitCases[] = {
+    "linux_git_query_detects_repository_shapes",
+    "linux_git_query_reads_real_status_history_author_detail_and_changes",
 };
 
 // 逐例核实过「在自有隔离临时仓库里执行真实 git commit，但不执行 git push」的夹具用例
@@ -482,10 +506,12 @@ CaseGroup GroupOf(const RegisteredCase& item) {
   if (InTable(kLinuxFiles, std::size(kLinuxFiles), base)) {
     return CaseGroup::linux;
   }
-  if (InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), item.name)) {
+  if (InTable(kVerifiedReadOnlyCases, std::size(kVerifiedReadOnlyCases), item.name) ||
+      InTable(kLinuxVerifiedReadOnlyCases, std::size(kLinuxVerifiedReadOnlyCases), item.name)) {
     return CaseGroup::gitReadonly;
   }
-  if (InTable(kVerifiedCommitCases, std::size(kVerifiedCommitCases), item.name)) {
+  if (InTable(kVerifiedCommitCases, std::size(kVerifiedCommitCases), item.name) ||
+      InTable(kLinuxVerifiedCommitCases, std::size(kLinuxVerifiedCommitCases), item.name)) {
     return CaseGroup::gitCommit;
   }
   // 夹具文件里没进上面两张名单的用例，以及没登记的新文件，一律落到「禁止自动运行」那一侧。
@@ -497,7 +523,6 @@ CaseGroup GroupOf(const RegisteredCase& item) {
 
 // 校验一张用例名名单：每条必须恰好命中一个注册用例，且该用例来自夹具文件
 // （名单的意义就是「从夹具文件里逐例核实过的例外」）。只有真的编译了夹具用例的平台才用得上。
-#ifdef _WIN32
 int ValidateNameTable(const char* const* table, size_t count, const char* tableName) {
   int problems = 0;
   for (size_t i = 0; i < count; ++i) {
@@ -521,8 +546,6 @@ int ValidateNameTable(const char* const* table, size_t count, const char* tableN
   return problems;
 }
 
-#endif  // _WIN32（ValidateNameTable）
-
 // 分组表自审。返回 0 表示表与注册集一致。
 int ValidateGroupTables() {
   int problems = 0;
@@ -538,10 +561,17 @@ int ValidateGroupTables() {
     }
   }
 #else
-  // 非 Windows 目标根本没编译夹具用例（见 tests/CMakeLists.txt 的清单拆分），
-  // 拿两张名单去比对必然全命中 0 个。这里如实说明「不适用」，不算通过也不算失败。
-  std::fprintf(stderr,
-               "说明：本平台未编译 Git 夹具用例，只读/提交名单的自审随之跳过（不适用，非通过）。\n");
+  // Linux 目标现在编译了真实 Git 夹具（support/linux_git_fixture.cpp）。
+  problems += ValidateNameTable(kLinuxVerifiedReadOnlyCases, std::size(kLinuxVerifiedReadOnlyCases),
+                                "kLinuxVerifiedReadOnlyCases");
+  problems += ValidateNameTable(kLinuxVerifiedCommitCases, std::size(kLinuxVerifiedCommitCases),
+                                "kLinuxVerifiedCommitCases");
+  for (const char* commitName : kLinuxVerifiedCommitCases) {
+    if (InTable(kLinuxVerifiedReadOnlyCases, std::size(kLinuxVerifiedReadOnlyCases), commitName)) {
+      std::fprintf(stderr, "分组表漂移：\"%s\" 同时出现在只读名单与提交名单里。\n", commitName);
+      ++problems;
+    }
+  }
 #endif
   std::vector<std::string> unclassifiedFiles;
   for (const RegisteredCase& item : Cases()) {

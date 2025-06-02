@@ -14,7 +14,7 @@
 #include "git/commit_changes.h"
 #include "git/repository.h"
 #include "git/workspace_model.h"
-#include "platform/windows/commit_changes.h"
+#include "platform/commit_changes.h"
 #include "platform/windows/utf_text.h"
 
 namespace {

@@ -34,7 +34,7 @@ namespace gc::git {
 //   * `GIT_AUTHOR_DATE` 的取值形态見 git/commit_date（實測：不加 `@` 前綴時，
 //     不足 9 位數的秒數會被 Git 判為「invalid date format」並讓整條命令以 128 失敗）。
 //
-// 確認範圍的兩道核對（本模組負責判讀，發問在 platform/windows/commit_probe）：
+// 確認範圍的兩道核對（本模組負責判讀，發問在 platform/commit_probe）：
 //   1) 彈確認框之前：一組只讀身份查詢（見下方 CommitIdentityFacts）必須與界面剛讀回的現狀
 //      是同一個東西，兩邊對不上就不出確認框；
 //   2) 按下「確定」之後、啟動命令之前：同一組查詢原樣重發一遍逐條比對，任何一條對不上

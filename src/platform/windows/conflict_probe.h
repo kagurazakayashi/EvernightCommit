@@ -39,7 +39,7 @@ struct ConflictProbeDeps {
                                                            const ConflictProbeDeps& deps);
 
 // 用本工程的隐藏窗口子进程执行器与真实目录读取装配依赖。
-[[nodiscard]] ConflictProbeDeps MakeConflictProbeDeps(unsigned long timeoutMilliseconds);
+[[nodiscard]] ConflictProbeDeps MakeConflictProbeDeps(unsigned long timeoutMilliseconds, StopFlag cancel = {});
 
 // 工作线程任务体：装配依赖并执行现场读取，请求携带的目录原样带进结果。
 [[nodiscard]] ConflictProbeOutcome RunConflictProbeLoad(const ConflictProbeRequest& request);

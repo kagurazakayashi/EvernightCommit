@@ -10,7 +10,9 @@
 #include <thread>
 #include <utility>
 
+#include "platform/main_thread_dispatch.h"
 #include "platform/notification.h"
+#include "platform/process.h"
 
 namespace gc::platform {
 
@@ -21,15 +23,8 @@ namespace gc::platform {
 // 投递方式改为调用 platform::PostCompletionNotification，由当前平台的实现负责
 // （Windows 用 WM_APP，后续 wxWidgets 用自定义事件），业务语义一个字没变。
 
-// 后台任务的停止信号。程序退出时界面收尾要等工作线程收尾：线程在“下一条查询”
-// 之前看到这一位被置起，就把剩下的查询按“没有执行”收场，不再逐个启动子进程把各自的
-// 超时耗完。共享的是同一份标志：worker 持有并翻牌，请求携带引用，任务体逐条核对。
-// 空指针（测试夹具直接调用 Collect*/Load* 的场合）表示“无人喊停”，行为与从前一致。
-using StopFlag = std::shared_ptr<std::atomic<bool>>;
-
-[[nodiscard]] inline bool StopRequested(const StopFlag& flag) noexcept {
-  return flag != nullptr && flag->load(std::memory_order_relaxed);
-}
+// 后台任务的停止信号定义已移到 platform/process.h：worker 与执行器共享同一个类型，
+// 请求携带它时，当前后台子进程会被终止，后续查询不再发起；交互式 Git 不使用它。
 
 // 后台一次性任务控制器：任务在工作线程执行，界面线程不等待、不冻结。
 // 每次提交携带递增序号，只有仍属于“最新一次提交”的结果会被 FetchLatest 取回，
@@ -67,11 +62,20 @@ public:
     condition_.notify_all();
   }
 
+  // 把完成通知切到主线程调度器。sourceId 在同一界面生命周期内唯一，Drain 后据此找到本 worker。
+  // 未设置时保持原有 PostCompletionNotification 投递（Win32 过渡界面）。
+  void SetCompletionDispatcher(std::shared_ptr<MainThreadDispatcher> dispatcher, uint64_t sourceId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dispatcher_ = std::move(dispatcher);
+    dispatcherSourceId_ = sourceId;
+  }
+
   // 界面线程在收到通知后调用：仅当 completionSerial 仍是最新提交且结果未被消费时返回 true。
+  // 已经开始收尾（BeginStop）后不再交付任何结果：关闭期间完成的任务随窗口一起作废。
   bool FetchLatest(uint64_t completionSerial, TaskResult* out) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!hasResult_ || completionSerial != submittedSerial_ || completionSerial != completedSerial_ ||
-        consumed_) {
+    if (stopping_ || !hasResult_ || completionSerial != submittedSerial_ ||
+        completionSerial != completedSerial_ || consumed_) {
       return false;
     }
     if (out != nullptr) {
@@ -141,14 +145,24 @@ private:
       }
 
       TaskResult produced = body(request);
+      std::shared_ptr<MainThreadDispatcher> dispatcher;
+      uint64_t dispatcherSourceId = 0;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         result_ = std::move(produced);
         hasResult_ = true;
         completedSerial_ = serial;
         consumed_ = false;
+        dispatcher = dispatcher_;
+        dispatcherSourceId = dispatcherSourceId_;
       }
-      PostCompletionNotification(target, message, serial);
+      // 通知只携带整数编号；即使结果已完成时界面正在关闭，也不会调用任何已失效对象。
+      if (dispatcher) {
+        static_cast<void>(
+            dispatcher->Post(MainThreadDispatcher::Notice{dispatcherSourceId, serial}));
+      } else {
+        PostCompletionNotification(target, message, serial);
+      }
     }
   }
 
@@ -163,6 +177,8 @@ private:
   bool hasResult_ = false;
   bool consumed_ = true;
   bool stopping_ = false;
+  std::shared_ptr<MainThreadDispatcher> dispatcher_;
+  uint64_t dispatcherSourceId_ = 0;
   StopFlag stopFlag_ = std::make_shared<std::atomic<bool>>(false);
 };
 

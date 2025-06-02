@@ -34,7 +34,7 @@
 
 #include "git/push_plan.h"
 #include "git/repository.h"
-#include "platform/windows/push_probe.h"
+#include "platform/push_probe.h"
 #include "platform/windows/utf_text.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

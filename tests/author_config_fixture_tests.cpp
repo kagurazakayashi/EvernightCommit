@@ -14,7 +14,7 @@
 
 #include "git/author_config.h"
 #include "git/repository.h"
-#include "platform/windows/author_config.h"
+#include "platform/author_config.h"
 #include "platform/windows/utf_text.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"

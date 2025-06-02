@@ -5,7 +5,7 @@
 
 #include "app/task_coordinator.h"  // RepositoryBinding：这一步等的还是不是绑定时那个仓库
 #include "git/restore_plan.h"
-#include "platform/windows/restore_probe.h"
+#include "platform/restore_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

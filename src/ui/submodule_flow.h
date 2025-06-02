@@ -6,7 +6,7 @@
 #include "app/submodule_journey.h"
 #include "git/submodule_navigation.h"
 #include "git/workspace_model.h"
-#include "platform/windows/submodule_probe.h"
+#include "platform/submodule_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

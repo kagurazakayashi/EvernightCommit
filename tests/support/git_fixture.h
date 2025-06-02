@@ -7,10 +7,10 @@
 #include "git/command_window.h"
 #include "support/push_guard.h"
 #include "support/tiny_test.h"
-#include "platform/windows/author_config.h"
-#include "platform/windows/commit_probe.h"
-#include "platform/windows/repo_detect.h"
-#include "platform/windows/workspace_status.h"
+#include "platform/author_config.h"
+#include "platform/commit_probe.h"
+#include "platform/repo_detect.h"
+#include "platform/workspace_status.h"
 
 namespace gc::test {
 

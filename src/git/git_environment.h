@@ -38,7 +38,8 @@ namespace gc::git {
 //      命令窗口：GIT_TERMINAL_PROMPT=1（凭据必须在用户看得见的窗口里问）、
 //      GIT_PAGER=cat（分页器会扣住退出码）、删除 GIT_ASKPASS/SSH_ASKPASS
 //      （它们会把提问搬成弹窗，违背"原生交互留在窗口里"）。
-//      后台只读探测：GIT_TERMINAL_PROMPT=0（stdin 是空的，绝不能停在看不见的问题上）；
+//      后台只读探测：GIT_TERMINAL_PROMPT=0（stdin 是空的，绝不能停在看不见的问题上）、
+//      GIT_PAGER=cat（不允许分页器在无 tty 的后台通道里扣住输出）；
 //      GIT_ASKPASS 与凭据助手保留——凭据交互沿用用户既有方式，只是不许挂在隐形输入上。
 //   6) 普通系统与工具链变量（PATH、HOME、USERPROFILE、TMP/TEMP、SSH_AUTH_SOCK、
 //      GIT_SSH、GIT_SSH_COMMAND、GIT_EXEC_PATH、GIT_CONFIG_NOSYSTEM、LANG/LC_* 等）——

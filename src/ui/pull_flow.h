@@ -4,7 +4,7 @@
 #include <string>
 
 #include "git/pull_plan.h"
-#include "platform/windows/pull_probe.h"
+#include "platform/pull_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

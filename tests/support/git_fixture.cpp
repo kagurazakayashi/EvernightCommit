@@ -16,7 +16,7 @@
 #include "git/commit_history.h"  // LooksLikeFullObjectId：plumbing 造出来的对象 ID 也按同一形态校验
 #include "git/repository.h"
 #include "platform/windows/environment_block.h"
-#include "platform/windows/git_toolchain.h"
+#include "platform/git_toolchain.h"
 #include "platform/windows/subprocess.h"
 #include "platform/windows/utf_text.h"
 #include "platform/windows/win_path.h"
@@ -360,7 +360,7 @@ GitRun GitFixture::RunWithBlock(const std::wstring& program,
   // 所有夹具执行都过这一个口子（Run/RunInRepo/RunChecked/Commit/Push/RemoteRig 都在下面），
   // 所以「本轮不许推送」在这里兜底：分组表归错了也会被拦下，而不是悄悄推出去。
   GuardGitPushForTest(arguments, "夹具");
-  const platform::SubprocessRunResult raw = platform::RunHiddenCaptured(
+  const platform::ProcessRunResult raw = platform::RunHiddenCaptured(
       program, arguments, workingDirectory, kGitTimeoutMs, environmentBlock.c_str());
   GitRun run;
   run.started = raw.started;

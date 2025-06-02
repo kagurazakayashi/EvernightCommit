@@ -10,7 +10,7 @@
 #include "git/command_window.h"
 #include "git/diff_view.h"
 #include "git/workspace_model.h"
-#include "platform/windows/utf_text.h"
+#include "platform/text_encoding.h"
 #include "support/tiny_test.h"
 
 namespace {
@@ -22,7 +22,7 @@ using gc::git::DiffViewKind;
 using gc::git::DiffViewPlan;
 using gc::git::WorktreeFileFacts;
 
-std::string Narrow(std::wstring_view text) { return gc::platform::Utf16ToUtf8(std::wstring(text)); }
+std::string Narrow(std::wstring_view text) { return gc::platform::WideToUtf8(std::wstring(text)); }
 
 ChangeItem Make(ChangeKind kind, std::wstring_view path, std::wstring_view oldPath = {}) {
   ChangeItem item;

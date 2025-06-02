@@ -5,7 +5,7 @@
 
 #include "git/commit_plan.h"
 #include "git/undo_commit_plan.h"
-#include "platform/windows/undo_probe.h"
+#include "platform/undo_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

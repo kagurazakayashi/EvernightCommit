@@ -8,9 +8,10 @@ Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现
 窗口标题为“Git 提交工具”。
 
 Linux 侧已经有可用的**开发入口**（配置、构建、安全测试、调试、wxWidgets 依赖与最小启动
-检查窗口都实测过），并已落地路径/文件探测、Git 候选发现、POSIX 环境、时区与安全临时文件
-这些平台基础服务；但还没有 Linux 版程序：子进程执行、终端与界面尚未迁移，Linux 上构建不到
-主程序。范围与未迁移清单见 [docs/building.md](docs/building.md) 与
+检查窗口都实测过），并已落地路径/文件探测、Git 候选发现、POSIX 环境、时区、安全临时文件
+与后台进程执行器；仓库识别、状态、历史、身份、提交详情/变化与各操作预检已能在
+Windows/Linux 共用同一套编排，Linux 上也有隔离临时仓库的真实 Git 只读/提交测试。
+但还没有 Linux 版程序：交互式终端、持久化与界面尚未迁移，Linux 上构建不到主程序。范围与未迁移清单见 [docs/building.md](docs/building.md) 与
 [docs/testing.md](docs/testing.md)。跨平台拆分进度与还差的环节见
 [docs/architecture.md](docs/architecture.md) 的「过渡期的 Win32 界面」和「已知待办差异」。
 
@@ -568,10 +569,11 @@ agent/交互提示（都在命令窗口里原生发生），界面与结论中�
 
 - [docs/building.md](docs/building.md) —— 环境要求、工具链、构建预设、VC 运行库部署、
   代码页与用户名兼容性矩阵。
-- [docs/testing.md](docs/testing.md) —— 测试入口与六个分组：可自动运行的
-  `pure`/`windows`/`git-readonly`/`git-commit`（后一组会在**用例自有的隔离临时仓库**里跑真实
-  `git commit`），以及禁止自动运行的 `git-push`/`unclassified`（会执行真实 `git push`，
-  只由项目所有者本人显式放行后运行）；还有夹具隔离规则、边界环境矩阵与 Linux 未迁移清单。
+- [docs/testing.md](docs/testing.md) —— 测试入口与七个分组：可自动运行的
+  `pure`/`windows`/`linux`/`git-readonly`/`git-commit`（`git-commit` 会在**用例自有的隔离
+  临时仓库**里跑真实 `git commit`），以及禁止自动运行的 `git-push`/`unclassified`
+  （会执行真实 `git push`，只由项目所有者本人显式放行后运行）；还有夹具隔离规则、
+  边界环境矩阵与 Linux 未迁移清单。
 - [docs/git-behavior.md](docs/git-behavior.md) —— 逐操作的详细行为规格（确认框、拒绝
   条件、命令形态与其实测依据）。
 - [docs/architecture.md](docs/architecture.md) —— 代码结构与模块职责。

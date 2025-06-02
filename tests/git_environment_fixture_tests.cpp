@@ -26,8 +26,8 @@
 #include "git/repository.h"
 #include "git/workspace_status.h"
 #include "platform/windows/command_window_runner.h"
-#include "platform/windows/git_query_result.h"
-#include "platform/windows/repo_detect.h"
+#include "platform/git_query.h"
+#include "platform/repo_detect.h"
 #include "platform/windows/utf_text.h"
 
 namespace git = gc::git;

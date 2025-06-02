@@ -3,7 +3,7 @@
 #include <cstdint>
 
 #include "git/fetch_plan.h"
-#include "platform/windows/fetch_probe.h"
+#include "platform/fetch_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

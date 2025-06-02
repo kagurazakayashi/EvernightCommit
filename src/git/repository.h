@@ -24,8 +24,10 @@ namespace gc::git {
 struct GitQueryResult {
   bool started = false;      // 进程是否成功启动
   bool timedOut = false;     // 是否因超时被终止
+  bool canceled = false;     // 是否因后台停止信号被终止（只属于后台查询）
   bool exited = false;       // 是否在期限内退出
   int exitCode = 0;          // 退出码（约定以 0 表示成功）
+  int signal = 0;            // POSIX 信号号；Windows 为 0
   // 标准输出是否完整可信。手工构造的桩结果默认为 true（那份内容就是测试给定的全部事实），
   // 真实查询由平台层逐条判定。
   bool outputComplete = true;
@@ -70,6 +72,7 @@ enum class RepoError {
   accessDenied,       // 权限不足
   indexLocked,        // 索引等锁文件已存在：另一个 Git 进程正在改动该仓库
   gitTimeout,
+  gitCanceled,  // 后台停止信号终止了本次查询（不是仓库的事实）
   gitLaunchFailed,
   gitFailed,  // 其他非 0 退出
   badOutput,  // 输出无法按约定解析

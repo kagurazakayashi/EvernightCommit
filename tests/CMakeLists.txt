@@ -13,11 +13,13 @@ set(GC_TEST_SOURCES_PORTABLE
   commit_date_tests.cpp
   commit_detail_tests.cpp
   commit_form_session_tests.cpp
+  commit_history_tests.cpp
   commit_identity_tests.cpp
   commit_message_tests.cpp
   commit_plan_tests.cpp
   conflict_state_tests.cpp
   decimal_text_tests.cpp
+  diff_view_tests.cpp
   fetch_plan_tests.cpp
   fetch_scope_tests.cpp
   first_push_plan_tests.cpp
@@ -25,6 +27,8 @@ set(GC_TEST_SOURCES_PORTABLE
   git_locator_tests.cpp
   git_probe_tests.cpp
   list_view_memory_tests.cpp
+  machine_output_completeness_tests.cpp
+  main_thread_dispatch_tests.cpp
   operation_conclusions_tests.cpp
   operation_gate_tests.cpp
   operation_history_tests.cpp
@@ -32,6 +36,7 @@ set(GC_TEST_SOURCES_PORTABLE
   pull_plan_tests.cpp
   push_guard_tests.cpp
   push_plan_tests.cpp
+  repository_tests.cpp
   restore_plan_tests.cpp
   shell_text_tests.cpp
   staging_plan_tests.cpp
@@ -39,19 +44,11 @@ set(GC_TEST_SOURCES_PORTABLE
   submodule_navigation_tests.cpp
   task_coordinator_tests.cpp
   text_encoding_tests.cpp
-  undo_commit_plan_tests.cpp)
+  undo_commit_plan_tests.cpp
+  workspace_status_tests.cpp)
 
 # ---- 仍依赖 Windows 的用例（本轮未迁移，只在 Windows 目标里编译） ----
 set(GC_TEST_SOURCES_WINDOWS_ONLY
-  # 下面五个是纯逻辑用例，但链接了 src/platform/windows/ 里的实现
-  # （platform::DetectRepository / LoadWorkspaceStatus / Utf16ToUtf8）：
-  # 等这些「请求 + 结果 + 依赖注入」按 docs/architecture.md 待办第 3 条提到
-  # src/platform/ 之后就能搬进上面的可移植清单。
-  commit_history_tests.cpp
-  diff_view_tests.cpp
-  machine_output_completeness_tests.cpp
-  repository_tests.cpp
-  workspace_status_tests.cpp
   # 真实 Win32 集成：起 cmd.exe / 建真实目录与句柄 / 真窗口上的控件断言
   changes_pane_tests.cpp
   commit_form_time_tests.cpp
@@ -99,9 +96,11 @@ set(GC_TEST_SOURCES_WINDOWS_ONLY
 set(GC_TEST_SOURCES_LINUX_ONLY
   linux_environment_tests.cpp
   linux_git_toolchain_tests.cpp
+  linux_git_query_tests.cpp
   linux_local_time_tests.cpp
   linux_path_probe_tests.cpp
-  linux_scratch_file_tests.cpp)
+  linux_scratch_file_tests.cpp
+  linux_subprocess_tests.cpp)
 
 # ---- 完整性审计：任何 *_tests.cpp 没进上面三张表，配置直接失败 ----
 # 用 GLOB 只做核对、不做构建输入（构建输入始终是上面三张显式清单）。
@@ -139,7 +138,7 @@ set(gc_test_sources support/test_main.cpp ${GC_TEST_SOURCES_PORTABLE})
 if(WIN32)
   list(APPEND gc_test_sources support/git_fixture.cpp ${GC_TEST_SOURCES_WINDOWS_ONLY})
 else()
-  list(APPEND gc_test_sources ${GC_TEST_SOURCES_LINUX_ONLY})
+  list(APPEND gc_test_sources support/linux_git_fixture.cpp ${GC_TEST_SOURCES_LINUX_ONLY})
 endif()
 
 add_executable(gc_tests ${gc_test_sources})
@@ -195,7 +194,8 @@ if(WIN32)
                  "（git-push 与 unclassified 不注册，禁止自动运行）")
 else()
   gc_add_group_test(linux)
-  message(STATUS "[测试] 已注册分组：pure / linux"
-                 "（windows/git-readonly/git-commit 的源码尚未脱离 Win32；"
-                 "git-push 与 unclassified 不注册，禁止自动运行）")
+  gc_add_group_test(git-readonly)
+  gc_add_group_test(git-commit)
+  message(STATUS "[测试] 已注册分组：pure / linux / git-readonly / git-commit"
+                 "（windows 组源码尚未脱离 Win32；git-push 与 unclassified 不注册，禁止自动运行）")
 endif()

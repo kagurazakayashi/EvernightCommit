@@ -6,7 +6,7 @@
 
 #include "git/first_push_plan.h"
 #include "git/push_plan.h"
-#include "platform/windows/push_probe.h"
+#include "platform/push_probe.h"
 #include "ui/operation_host.h"
 #include "ui/upstream_write_flow.h"
 

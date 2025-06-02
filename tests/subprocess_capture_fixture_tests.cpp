@@ -14,7 +14,7 @@
 namespace {
 
 using gc::platform::StreamCaptureState;
-using gc::platform::SubprocessRunResult;
+using gc::platform::ProcessRunResult;
 using gc::test::PrerequisiteFailure;
 using gc::test::TempDirectory;
 
@@ -70,7 +70,7 @@ public:
     WriteData(name, std::string("@echo off\r\n") + std::string(body));
   }
 
-  [[nodiscard]] SubprocessRunResult Run(std::wstring_view name, size_t maxBytes = kDefaultCap,
+  [[nodiscard]] ProcessRunResult Run(std::wstring_view name, size_t maxBytes = kDefaultCap,
                                         unsigned long timeoutMs = kProcessTimeoutMs,
                                         unsigned long drainMs = kBigDrainMs) const {
     return gc::platform::RunHiddenCaptured(CmdPath(), {L"/d", L"/c", PathOf(name)}, dir_, timeoutMs,
@@ -87,7 +87,7 @@ std::string BytesOf(size_t count, char fill = 'x') { return std::string(count, f
 // 先用不设限的一次运行问出「这个脚本到底产出了多少字节」，再拿它当上限做边界用例，
 // 免得把 cmd 的换行习惯硬编进断言。
 size_t ProbeSize(const ScriptFixture& fixture, std::wstring_view script) {
-  const SubprocessRunResult run = fixture.Run(script);
+  const ProcessRunResult run = fixture.Run(script);
   if (!run.started || !run.exited || run.exitCode != 0 || !run.stdoutCapture.Complete()) {
     throw PrerequisiteFailure("用于探长度的脚本没有正常跑完：started=" +
                               std::to_string(run.started ? 1 : 0) +
@@ -110,7 +110,7 @@ GC_TEST(capture_pipe_output_exactly_at_cap_is_complete) {
   fixture.WriteScript(L"emit.cmd", "type payload.bin\r\n");
   const size_t produced = ProbeSize(fixture, L"emit.cmd");
 
-  const SubprocessRunResult run = fixture.Run(L"emit.cmd", produced);
+  const ProcessRunResult run = fixture.Run(L"emit.cmd", produced);
   GC_CHECK(run.started);
   GC_CHECK(run.exited);
   GC_CHECK(run.exitCode == 0);
@@ -128,7 +128,7 @@ GC_TEST(capture_pipe_output_over_cap_is_an_explicit_failure) {
   fixture.WriteScript(L"emit.cmd", "type payload.bin\r\n");
   const size_t produced = ProbeSize(fixture, L"emit.cmd");
 
-  const SubprocessRunResult run = fixture.Run(L"emit.cmd", produced - 1);
+  const ProcessRunResult run = fixture.Run(L"emit.cmd", produced - 1);
   GC_CHECK(run.started && run.exited);
   GC_CHECK_MESSAGE(run.stdoutCapture.state == StreamCaptureState::truncated,
                    "超过一个字节也要明确报告截断，而不是少一条就算完");
@@ -145,7 +145,7 @@ GC_TEST(capture_pipe_keeps_draining_after_the_cap) {
   ScriptFixture fixture(L"drain");
   fixture.WriteData(L"payload.bin", BytesOf(3u * 1024u * 1024u));
   fixture.WriteScript(L"emit.cmd", "type payload.bin\r\n");
-  const SubprocessRunResult run = fixture.Run(L"emit.cmd", 64u * 1024u);
+  const ProcessRunResult run = fixture.Run(L"emit.cmd", 64u * 1024u);
   GC_CHECK(run.started);
   GC_CHECK(run.exited);
   GC_CHECK(run.exitCode == 0);
@@ -157,7 +157,7 @@ GC_TEST(capture_pipe_keeps_draining_after_the_cap) {
 GC_TEST(capture_pipe_empty_output_is_a_complete_answer) {
   ScriptFixture fixture(L"empty");
   fixture.WriteScript(L"quiet.cmd", "rem no output on purpose\r\n");
-  const SubprocessRunResult run = fixture.Run(L"quiet.cmd");
+  const ProcessRunResult run = fixture.Run(L"quiet.cmd");
   GC_CHECK(run.started && run.exited && run.exitCode == 0);
   GC_CHECK(run.stdoutCapture.state == StreamCaptureState::complete);
   GC_CHECK(run.stderrCapture.state == StreamCaptureState::complete);
@@ -175,7 +175,7 @@ GC_TEST(capture_pipe_drains_buffered_bytes_after_fast_exit) {
   const size_t produced = ProbeSize(fixture, L"emit.cmd");
   GC_CHECK_MESSAGE(produced > 64u * 1024u, "写入量要超过管道缓冲，才谈得上「排空」");
 
-  const SubprocessRunResult run = fixture.Run(L"emit.cmd");
+  const ProcessRunResult run = fixture.Run(L"emit.cmd");
   GC_CHECK(run.exited);
   GC_CHECK_MESSAGE(run.stdoutCapture.state == StreamCaptureState::complete, "进程退出后仍要读到 EOF");
   GC_CHECK(run.stdoutCapture.bytes.size() == produced);
@@ -192,7 +192,7 @@ GC_TEST(capture_pipe_handles_both_streams_at_full_rate) {
   fixture.WriteScript(L"both.cmd",
                       "start /b cmd /d /c type out.bin\r\n"
                       "type err.bin 1>&2\r\n");
-  const SubprocessRunResult run = fixture.Run(L"both.cmd", 128u * 1024u);
+  const ProcessRunResult run = fixture.Run(L"both.cmd", 128u * 1024u);
   GC_CHECK(run.started);
   GC_CHECK(run.exited);
   GC_CHECK_MESSAGE(run.stdoutCapture.state == StreamCaptureState::truncated, "标准输出应读满并判截断");
@@ -216,7 +216,7 @@ GC_TEST(capture_pipe_reports_unfinished_pipe_when_descendant_holds_it) {
   fixture.WriteScript(L"main.cmd",
                       "echo marker\r\n"
                       "start /b cmd /d /c ping -n 4 127.0.0.1\r\n");
-  const SubprocessRunResult run = fixture.Run(L"main.cmd", kDefaultCap, kProcessTimeoutMs, 400);
+  const ProcessRunResult run = fixture.Run(L"main.cmd", kDefaultCap, kProcessTimeoutMs, 400);
   GC_CHECK(run.started);
   GC_CHECK_MESSAGE(run.exited, "父脚本本身要能判定为已退出");
   GC_CHECK_MESSAGE(run.stdoutCapture.state == StreamCaptureState::abandoned,
@@ -239,7 +239,7 @@ GC_TEST(capture_pipe_reaches_eof_once_descendant_holds_it_briefly) {
                       "echo marker\r\n"
                       "start /b cmd /d /c ping -n 2 127.0.0.1 \r\n");
   const ULONGLONG beginMs = ::GetTickCount64();
-  const SubprocessRunResult run = fixture.Run(L"main.cmd", kDefaultCap, kProcessTimeoutMs, 8000);
+  const ProcessRunResult run = fixture.Run(L"main.cmd", kDefaultCap, kProcessTimeoutMs, 8000);
   const ULONGLONG elapsedMs = ::GetTickCount64() - beginMs;
   GC_CHECK(run.started && run.exited);
   GC_CHECK_MESSAGE(run.stdoutCapture.state == StreamCaptureState::complete,
@@ -256,7 +256,7 @@ GC_TEST(capture_pipe_reaches_eof_once_descendant_holds_it_briefly) {
 GC_TEST(capture_pipe_launch_failure_is_not_an_exit_code) {
   ScriptFixture fixture(L"launch");
   const std::wstring missing = fixture.Directory() + L"\\no-such-program.exe";
-  const SubprocessRunResult run =
+  const ProcessRunResult run =
       gc::platform::RunHiddenCaptured(missing, {}, fixture.Directory(), kFastTimeoutMs);
   GC_CHECK_MESSAGE(!run.started, "程序不存在时不能报「已启动」");
   GC_CHECK(run.launchError != 0);
@@ -273,7 +273,7 @@ GC_TEST(capture_pipe_timeout_is_reported_as_timeout) {
   // cmd 把 ping 当子进程等：终止 cmd 之后 ping 还会写约 2 秒，收尾必须自己有界。
   fixture.WriteScript(L"slow.cmd", "ping -n 3 127.0.0.1\r\n");
   const ULONGLONG start = ::GetTickCount64();
-  const SubprocessRunResult run = fixture.Run(L"slow.cmd", kDefaultCap, 700, 300);
+  const ProcessRunResult run = fixture.Run(L"slow.cmd", kDefaultCap, 700, 300);
   const ULONGLONG elapsed = ::GetTickCount64() - start;
   GC_CHECK(run.started);
   GC_CHECK_MESSAGE(run.timedOut, "超时要点名报出来");
@@ -297,8 +297,8 @@ GC_TEST(capture_pipe_concurrent_launches_do_not_share_pipes) {
   fixture.WriteScript(L"quick.cmd", "echo quick-marker\r\n");
 
   for (int round = 0; round < 6; ++round) {
-    SubprocessRunResult slowResult;
-    SubprocessRunResult quickResult;
+    ProcessRunResult slowResult;
+    ProcessRunResult quickResult;
     std::thread slowThread([&]() { slowResult = fixture.Run(L"slow.cmd", kDefaultCap, kProcessTimeoutMs, 800); });
     std::thread quickThread([&]() { quickResult = fixture.Run(L"quick.cmd", kDefaultCap, kProcessTimeoutMs, 800); });
     slowThread.join();
@@ -323,7 +323,7 @@ GC_TEST(capture_pipe_repeated_large_output_runs_stay_correct) {
   fixture.WriteData(L"payload.bin", BytesOf(300u * 1024u));
   fixture.WriteScript(L"emit.cmd", "type payload.bin\r\n");
   for (int round = 0; round < 5; ++round) {
-    const SubprocessRunResult run = fixture.Run(L"emit.cmd", 100u * 1024u);
+    const ProcessRunResult run = fixture.Run(L"emit.cmd", 100u * 1024u);
     GC_CHECK(run.exited);
     GC_CHECK(run.stdoutCapture.state == StreamCaptureState::truncated);
     GC_CHECK(run.stdoutCapture.bytes.size() == 100u * 1024u);

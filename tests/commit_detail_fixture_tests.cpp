@@ -11,7 +11,7 @@
 
 #include "git/commit_detail.h"
 #include "git/repository.h"
-#include "platform/windows/commit_detail.h"
+#include "platform/commit_detail.h"
 #include "platform/windows/utf_text.h"
 
 namespace {

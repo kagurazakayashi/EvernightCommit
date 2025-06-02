@@ -1,5 +1,3 @@
-#include "platform/linux/git_toolchain.h"
-
 #include <cstdlib>
 #include <string>
 #include <string_view>

@@ -11,7 +11,7 @@
 #include "git/repository.h"
 #include "git/undo_commit_plan.h"
 #include "git/workspace_status.h"
-#include "platform/windows/utf_text.h"
+#include "platform/text_encoding.h"
 
 namespace {
 
@@ -81,7 +81,7 @@ std::wstring ConfigFields(std::wstring_view key, std::wstring_view value) {
 
 // 断言失败时把宽字符说明带进报告（tiny_test 的报告只收 std::string）。
 std::string Utf8Of(std::wstring_view text) {
-  return gc::platform::Utf16ToUtf8(text);
+  return gc::platform::WideToUtf8(text);
 }
 
 }  // namespace

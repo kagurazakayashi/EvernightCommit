@@ -13,7 +13,7 @@
 #include "git/commit_history.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
-#include "platform/windows/workspace_status.h"
+#include "platform/workspace_status.h"
 
 namespace {
 

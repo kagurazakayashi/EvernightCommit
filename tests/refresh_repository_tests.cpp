@@ -12,7 +12,7 @@
 #include "git/repository.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
-#include "platform/windows/workspace_status.h"
+#include "platform/workspace_status.h"
 #include "support/git_fixture.h"
 #include "support/tiny_test.h"
 

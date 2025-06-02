@@ -5,7 +5,7 @@
 
 #include "git/commit_plan.h"
 #include "git/commit_message.h"
-#include "platform/windows/commit_probe.h"
+#include "platform/commit_probe.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {

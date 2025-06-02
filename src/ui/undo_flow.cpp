@@ -5,7 +5,7 @@
 
 #include "git/commit_history.h"
 #include "git/repository.h"
-#include "platform/windows/undo_probe.h"
+#include "platform/undo_probe.h"
 #include "platform/windows/win_path.h"
 #include "ui/commands.h"
 
@@ -93,7 +93,8 @@ void UndoFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ctx,
   recheckWorker_.Request(ctx.notify, kUndoRecheckCompleted, std::move(request),
                          [](const platform::UndoProbeRequest& pending) {
                            return platform::CaptureUndoHeadSnapshot(
-                               pending.exePath, pending.repositoryDirectory, pending.timeoutMilliseconds);
+                               pending.exePath, pending.repositoryDirectory,
+                               pending.timeoutMilliseconds, pending.stopFlag);
                          });
   host.SetStatus(L"点头之后、发出命令之前，正在后台核对 HEAD 与分支还停在确认框上写的那一份…"
                  L"（只读查询，不弹命令窗口）…");

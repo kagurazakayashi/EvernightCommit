@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "git/repository.h"
-#include "platform/windows/repo_detect.h"
+#include "platform/repo_detect.h"
 
 namespace {
 
@@ -248,6 +248,17 @@ GC_TEST(git_failure_classification_is_ordered_and_specific) {
   GitQueryResult timeout = Ok(L"partial");
   timeout.timedOut = true;
   GC_CHECK(gc::git::ClassifyGitFailure(timeout, detail) == RepoError::gitTimeout);
+
+  GitQueryResult canceled = Ok(L"");
+  canceled.canceled = true;
+  canceled.timedOut = true;  // 取消优先于超时：两者都是本层终止，但原因不同。
+  GC_CHECK(gc::git::ClassifyGitFailure(canceled, detail) == RepoError::gitCanceled);
+
+  GitQueryResult signaled = Ok(L"");
+  signaled.signal = 15;
+  signaled.exitCode = 143;
+  GC_CHECK(gc::git::ClassifyGitFailure(signaled, detail) == RepoError::gitFailed);
+  GC_CHECK(detail.find(L"信号 15") != std::wstring::npos);
 
   GitQueryResult other = Fail(129, L"error: unknown option `--brand-new-flag'");
   GC_CHECK(gc::git::ClassifyGitFailure(other, detail) == RepoError::gitFailed);
