@@ -190,3 +190,27 @@ GC_TEST(shell_text_shows_control_characters_instead_of_letting_them_forge_the_la
   // 可见字符（含中文、% ! & 引号）不参与转义：显示形态不改数据本身。
   GC_CHECK(DescribeDataForDisplay(L"refs/heads/demo&calc&rem") == L"refs/heads/demo&calc&rem");
 }
+
+GC_TEST(shell_text_posix_quotes_every_token_and_preserves_empty_arguments) {
+  const ShellCommandText copy = FormatShellCommand(
+      L"git",
+      Args({L"-C", L"/tmp/仓库 目录", L"refs/heads/demo&calc&rem", L"it's",
+            L"$(touch pwned)", L""}),
+      ShellDialect::posixSh);
+  GC_REQUIRE(copy.expressible, "POSIX shell 只拒控制字符，这些数据应可表达");
+  GC_CHECK(Contains(copy.text, L"'/tmp/仓库 目录'"));
+  GC_CHECK(Contains(copy.text, L"'refs/heads/demo&calc&rem'"));
+  GC_CHECK(Contains(copy.text, L"'it'\\''s'"));  // 单引号按 POSIX 规则闭合再转义
+  GC_CHECK(Contains(copy.text, L"'$(touch pwned)'"));
+  GC_CHECK(Contains(copy.text, L" ''"));  // 空参数写成 ''，不会消失
+  GC_CHECK(copy.note.find(L"POSIX shell") != std::wstring::npos);
+  GC_CHECK(gc::git::ShellDialectLabel(ShellDialect::posixSh).find(L"POSIX") !=
+           std::wstring::npos);
+
+  const ShellCommandText control =
+      FormatShellCommand(L"git", Args({L"status", std::wstring(L"line\nbreak")}),
+                         ShellDialect::posixSh);
+  GC_CHECK(!control.expressible);
+  GC_CHECK(!control.refusal.empty());
+  GC_CHECK(control.text.empty());
+}

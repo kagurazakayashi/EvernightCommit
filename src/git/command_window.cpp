@@ -6,6 +6,9 @@
 #include <string_view>
 #include <vector>
 
+#include "platform/text_encoding.h"
+#include "git/shell_text.h"
+
 namespace gc::git {
 namespace {
 
@@ -130,6 +133,81 @@ void AppendSpecField(std::wstring& text, std::wstring_view name, std::wstring_vi
   text.append(kLineBreak);
 }
 
+// 环境覆盖在说明书里用十六进制表示：环境值可以含空格、中文、引号等任何非 NUL 字节，
+// 直接放进“字段<TAB>值”的行里会把行形态弄脏。十六进制只含 ASCII 字符，且没有歧义。
+std::wstring HexEncode(std::string_view bytes) {
+  static constexpr wchar_t kHexDigits[] = L"0123456789abcdef";
+  std::wstring text;
+  text.reserve(bytes.size() * 2);
+  for (const unsigned char byte : bytes) {
+    text.push_back(kHexDigits[byte >> 4u]);
+    text.push_back(kHexDigits[byte & 0x0Fu]);
+  }
+  return text;
+}
+
+int HexDigit(wchar_t c) noexcept {
+  if (c >= L'0' && c <= L'9') {
+    return static_cast<int>(c - L'0');
+  }
+  if (c >= L'a' && c <= L'f') {
+    return static_cast<int>(c - L'a') + 10;
+  }
+  if (c >= L'A' && c <= L'F') {
+    return static_cast<int>(c - L'A') + 10;
+  }
+  return -1;
+}
+
+bool HexDecode(std::wstring_view text, std::string* outBytes) {
+  if (outBytes == nullptr || text.size() % 2 != 0) {
+    return false;
+  }
+  std::string bytes;
+  bytes.reserve(text.size() / 2);
+  for (size_t index = 0; index < text.size(); index += 2) {
+    const int high = HexDigit(text[index]);
+    const int low = HexDigit(text[index + 1]);
+    if (high < 0 || low < 0) {
+      return false;
+    }
+    bytes.push_back(static_cast<char>((high << 4) | low));
+  }
+  *outBytes = std::move(bytes);
+  return true;
+}
+
+// 环境覆盖的名字/值在写进说明书之前做严格编码：无法无损表示就不执行本次操作，
+// 绝不写出 U+FFFD 或让某个字节悄悄消失后继续启动 Git。
+bool EncodeEnvironmentOverride(const EnvironmentOverride& override,
+                               std::wstring* outNameHex, std::wstring* outValueHex,
+                               std::wstring* failureReason) {
+  std::string nameBytes;
+  if (!platform::TryWideToUtf8Strict(override.name, nameBytes) || nameBytes.empty() ||
+      nameBytes.find('=') != std::string::npos || nameBytes.find('\0') != std::string::npos) {
+    if (failureReason != nullptr) {
+      *failureReason = L"环境覆盖的名字为空、含 '=' 或无法无损编码成 UTF-8";
+    }
+    return false;
+  }
+  *outNameHex = HexEncode(nameBytes);
+  if (!override.value.has_value()) {
+    outValueHex->clear();
+    return true;
+  }
+  std::string valueBytes;
+  if (!platform::TryWideToUtf8Strict(*override.value, valueBytes) ||
+      valueBytes.find('\0') != std::string::npos) {
+    if (failureReason != nullptr) {
+      *failureReason = L"环境覆盖的值含 NUL 或无法无损编码成 UTF-8：";
+      *failureReason += override.name;
+    }
+    return false;
+  }
+  *outValueHex = HexEncode(valueBytes);
+  return true;
+}
+
 // 开始标记与结果行都是“一行、TAB 分隔”的 ASCII 字节文本：与说明书同一种行形态，
 // 但值只有口令与十进制退出码，因此这里不做任何码页或 UTF 处理。
 constexpr std::string_view kStartMarkerKeyword = "start";
@@ -246,12 +324,15 @@ std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept {
       return L"操作目录名不符合执行器生成的形态（GcOp<进程ID>x<随机段>）";
     case CommandPlanReject::illegalWindowTitle:
       return L"窗口标题含控制字符或制表符";
+    case CommandPlanReject::illegalEnvironmentOverride:
+      return L"环境覆盖的名字或值含 NUL/无法无损编码成 UTF-8";
   }
   return L"未知原因";
 }
 
-bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* gitLine,
-                         CommandPlanReject* reject, std::wstring* detail) {
+bool BuildGitCommandLineForDialect(const CommandWindowOperation& operation,
+                                   CommandLineDialect dialect, std::wstring* gitLine,
+                                   CommandPlanReject* reject, std::wstring* detail) {
   const auto fail = [&](CommandPlanReject reason, std::wstring message) {
     return RejectAs(reason, std::move(message), reject, detail);
   };
@@ -289,8 +370,9 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
                 std::wstring(CommandPlanRejectLabel(CommandPlanReject::tooManyArguments)) + L"（上限 " +
                     std::to_wstring(kMaxArguments) + L"）");
   }
+  const bool windowsLine = dialect == CommandLineDialect::windowsCreateProcess;
   for (const std::wstring& path : {operation.gitExecutable, operation.repositoryDirectory}) {
-    if (HasQuote(path)) {
+    if (windowsLine && HasQuote(path)) {
       return fail(CommandPlanReject::quoteInPath,
                   std::wstring(CommandPlanRejectLabel(CommandPlanReject::quoteInPath)) + L"：" + path);
     }
@@ -300,15 +382,28 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
     }
   }
   for (const std::wstring& argument : operation.arguments) {
-    if (HasQuote(argument) || HasControl(argument)) {
+    if ((windowsLine && HasQuote(argument)) || HasControl(argument)) {
       return fail(CommandPlanReject::illegalArgument,
                   std::wstring(CommandPlanRejectLabel(CommandPlanReject::illegalArgument)) + L"：" + argument);
     }
   }
 
-  const std::wstring line = BuildQuotedLine(operation.gitExecutable, operation.arguments);
-  if (!CommandLineRegionSafe(line)) {
-    return fail(CommandPlanReject::quoteInPath, L"命令行存在无法安全交给命令窗口的引号区域：" + line);
+  std::wstring line;
+  if (windowsLine) {
+    line = BuildQuotedLine(operation.gitExecutable, operation.arguments);
+    if (!CommandLineRegionSafe(line)) {
+      return fail(CommandPlanReject::quoteInPath, L"命令行存在无法安全交给命令窗口的引号区域：" + line);
+    }
+  } else {
+    // POSIX 终端里的辅助程序直接 posix_spawn(argv)。这里生成的只是给人看的/可粘贴的
+    // 一行；执行仍使用参数数组，绝不再交给 shell。引号、$、&、分号在单引号里都是字面量。
+    const ShellCommandText formatted =
+        FormatShellCommand(operation.gitExecutable, operation.arguments, ShellDialect::posixSh);
+    if (!formatted.expressible) {
+      return fail(CommandPlanReject::illegalArgument,
+                  L"命令无法按 POSIX shell 的引用规则可靠表达：" + formatted.refusal);
+    }
+    line = formatted.text;
   }
   if (line.size() > kMaxDisplayCommandLength) {
     return fail(CommandPlanReject::commandTooLong,
@@ -316,6 +411,12 @@ bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* 
   }
   *gitLine = line;
   return true;
+}
+
+bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* gitLine,
+                         CommandPlanReject* reject, std::wstring* detail) {
+  return BuildGitCommandLineForDialect(operation, CommandLineDialect::windowsCreateProcess, gitLine,
+                                       reject, detail);
 }
 
 CommandWindowOperation MakeCommandWindowOperation(std::wstring_view operationId,
@@ -386,7 +487,8 @@ std::wstring MakeSafeConsoleTitle(std::wstring_view prefix, std::wstring_view di
 bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
                                std::wstring_view directoryToken, std::wstring_view title,
                                std::wstring_view nonce, std::wstring* specText,
-                               CommandPlanReject* reject, std::wstring* detail) {
+                               CommandPlanReject* reject, std::wstring* detail,
+                               CommandLineDialect dialect) {
   const auto fail = [&](CommandPlanReject reason, std::wstring message) {
     return RejectAs(reason, std::move(message), reject, detail);
   };
@@ -397,7 +499,7 @@ bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
 
   // 第一步的校验原样复用：说明书里能出现的值，必须与界面展示、辅助进程将要执行的完全同源。
   std::wstring displayLine;
-  if (!BuildGitCommandLine(operation, &displayLine, reject, detail)) {
+  if (!BuildGitCommandLineForDialect(operation, dialect, &displayLine, reject, detail)) {
     return false;
   }
   if (!IsSafeNonce(nonce)) {
@@ -418,6 +520,27 @@ bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
                     std::wstring(title));
   }
 
+  // 先把环境覆盖全部编码进临时列表：任何一项不合规都在写出说明书之前拒绝，
+  // 避免留下“说明书写了一半、Git 却又没跑”的残骸。
+  std::vector<std::wstring> environmentLines;
+  environmentLines.reserve(operation.environmentOverrides.size());
+  for (const EnvironmentOverride& override : operation.environmentOverrides) {
+    std::wstring nameHex;
+    std::wstring valueHex;
+    std::wstring encodeFailure;
+    if (!EncodeEnvironmentOverride(override, &nameHex, &valueHex, &encodeFailure)) {
+      return fail(CommandPlanReject::illegalEnvironmentOverride,
+                  std::wstring(
+                      CommandPlanRejectLabel(CommandPlanReject::illegalEnvironmentOverride)) +
+                      L"：" + encodeFailure);
+    }
+    if (override.value.has_value()) {
+      environmentLines.push_back(L"envset\t" + nameHex + L"=" + valueHex);
+    } else {
+      environmentLines.push_back(L"envdel\t" + nameHex);
+    }
+  }
+
   std::wstring text;
   text.reserve(displayLine.size() + title.size() + operation.repositoryDirectory.size() + 256);
   AppendSpecField(text, kSpecMagic, L"1");
@@ -427,8 +550,13 @@ bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
   AppendSpecField(text, L"title", title);
   AppendSpecField(text, L"program", operation.gitExecutable);
   AppendSpecField(text, L"cwd", operation.repositoryDirectory);
+  AppendSpecField(text, L"hold", operation.holdTerminalOpen ? L"1" : L"0");
   for (const std::wstring& argument : operation.arguments) {
     AppendSpecField(text, L"arg", argument);
+  }
+  for (const std::wstring& line : environmentLines) {
+    text.append(line);
+    text.append(kLineBreak);
   }
   *specText = std::move(text);
   return true;
@@ -453,6 +581,7 @@ bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* o
   CommandWindowSpec parsed;
   std::wstring cwd;
   bool versionChecked = false;
+  bool holdSeen = false;
   size_t cursor = 0;
   size_t lineNumber = 0;
   while (cursor < specText.size()) {
@@ -517,6 +646,49 @@ bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* o
         return fail(L"操作说明书有重复的 cwd 字段");
       }
       cwd = value;
+    } else if (name == L"hold") {
+      if (holdSeen) {
+        return fail(L"操作说明书有重复的 hold 字段");
+      }
+      holdSeen = true;
+      if (value == L"1") {
+        parsed.holdTerminalOpen = true;
+      } else if (value == L"0") {
+        parsed.holdTerminalOpen = false;
+      } else {
+        return fail(L"操作说明书的 hold 字段只能是 0 或 1");
+      }
+    } else if (name == L"envset" || name == L"envdel") {
+      std::wstring_view nameHex = value;
+      std::wstring_view valueHex;
+      if (name == L"envset") {
+        const size_t equals = value.find(L'=');
+        if (equals == std::wstring_view::npos) {
+          return fail(L"操作说明书的 envset 字段缺少 '=' 分隔");
+        }
+        nameHex = std::wstring_view(value).substr(0, equals);
+        valueHex = std::wstring_view(value).substr(equals + 1);
+      }
+      std::string nameBytes;
+      std::string valueBytes;
+      std::wstring nameText;
+      if (!HexDecode(nameHex, &nameBytes) || nameBytes.empty() ||
+          nameBytes.find('=') != std::string::npos ||
+          nameBytes.find('\0') != std::string::npos ||
+          !platform::TryUtf8ToWideStrict(nameBytes, nameText)) {
+        return fail(L"操作说明书的环境变量名不是合法的十六进制 UTF-8 文本");
+      }
+      EnvironmentOverride override;
+      override.name = std::move(nameText);
+      if (name == L"envset") {
+        std::wstring valueText;
+        if (!HexDecode(valueHex, &valueBytes) || valueBytes.find('\0') != std::string::npos ||
+            !platform::TryUtf8ToWideStrict(valueBytes, valueText)) {
+          return fail(L"操作说明书的环境变量值不是合法的十六进制 UTF-8 文本");
+        }
+        override.value = std::move(valueText);
+      }
+      parsed.environmentOverrides.push_back(std::move(override));
     } else if (name == L"arg") {
       parsed.arguments.push_back(value);
     } else {
@@ -538,6 +710,8 @@ bool ParseCommandWindowSpecText(std::wstring_view specText, CommandWindowSpec* o
   outSpec->gitExecutable = std::move(parsed.gitExecutable);
   outSpec->workingDirectory = std::move(cwd);
   outSpec->arguments = std::move(parsed.arguments);
+  outSpec->environmentOverrides = std::move(parsed.environmentOverrides);
+  outSpec->holdTerminalOpen = parsed.holdTerminalOpen;
   return true;
 }
 

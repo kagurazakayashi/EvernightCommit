@@ -194,6 +194,7 @@ add_library(gc_core STATIC
   src/platform/restore_probe.cpp
   src/platform/undo_probe.cpp
   src/platform/submodule_probe.cpp
+  src/platform/terminal_adapters.cpp
   src/platform/text_encoding.cpp)
 target_include_directories(gc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_core PUBLIC gc_build_settings)
@@ -237,6 +238,7 @@ add_library(gc_platform STATIC
   src/platform/windows/platform_init.cpp
   src/platform/windows/remote_choice_dialog.cpp
   src/platform/windows/subprocess.cpp
+  src/platform/windows/terminal.cpp
   src/platform/windows/utf_text.cpp
   src/platform/windows/win_path.cpp)
 target_include_directories(gc_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -308,14 +310,18 @@ else()
   # Linux 平台基础服务：路径/文件探测、Git 候选发现、环境、时区、临时文件。
   # 这里没有界面主程序，也刻意没有子进程执行器与持久化实现——那些属于后续步骤。
   add_library(gc_platform_linux STATIC
+    src/platform/linux/command_window_helper.cpp
+    src/platform/linux/command_window_runner.cpp
     src/platform/linux/environment.cpp
     src/platform/linux/git_query.cpp
     src/platform/linux/git_toolchain.cpp
     src/platform/linux/local_time.cpp
     src/platform/linux/notification.cpp
+    src/platform/linux/operation_directory.cpp
     src/platform/linux/path.cpp
     src/platform/linux/scratch_files.cpp
-    src/platform/linux/subprocess.cpp)
+    src/platform/linux/subprocess.cpp
+    src/platform/linux/terminal.cpp)
   target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
   message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"

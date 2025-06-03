@@ -14,6 +14,9 @@
 #ifdef _WIN32
 // 命令窗口辅助入口只在 Windows 那条执行链上存在（见 main() 里的用法）。
 #include "platform/windows/command_window_helper.h"
+#else
+// Linux 终端辅助入口：测试二进制同样是 /proc/self/exe，终端里启动的就是这份入口。
+#include "platform/linux/command_window_helper.h"
 #endif
 
 namespace gc::test {
@@ -153,6 +156,7 @@ constexpr const char* kPureFiles[] = {
     "staging_plan_tests.cpp",
     "submodule_journey_tests.cpp",
     "shell_text_tests.cpp",
+    "terminal_adapters_tests.cpp",
     "submodule_navigation_tests.cpp",
     "subprocess_capture_tests.cpp",
     "subprocess_command_line_tests.cpp",
@@ -186,6 +190,7 @@ constexpr const char* kLinuxFiles[] = {
     "linux_path_probe_tests.cpp",
     "linux_scratch_file_tests.cpp",
     "linux_subprocess_tests.cpp",
+    "linux_terminal_lifecycle_tests.cpp",
 };
 
 // 引用 GitFixture/RemoteRig 的文件；未列入下方两张名单的用例默认含提交/推送，
@@ -205,6 +210,7 @@ constexpr const char* kFixtureFiles[] = {
     "git_environment_fixture_tests.cpp",
     "git_fixture_tests.cpp",
     "linux_git_query_tests.cpp",
+    "linux_terminal_git_tests.cpp",
     "pull_probe_fixture_tests.cpp",
     "push_fixture_tests.cpp",
     "refresh_repository_tests.cpp",
@@ -340,6 +346,8 @@ constexpr const char* kLinuxVerifiedReadOnlyCases[] = {
     "linux_git_query_switch_repository_discards_older_background_result",
     "linux_git_query_timeout_is_classified_as_timeout",
     "linux_git_query_worker_cancel_stops_inflight_child",
+    "linux_terminal_xterm_runs_real_git_readonly_status",
+    "linux_terminal_xterm_delivers_metacharacter_pathspec_verbatim",
 };
 
 // Linux 真实 Git 集成：只在用例自有的 PosixTempDirectory 里执行真实 git commit，
@@ -347,6 +355,7 @@ constexpr const char* kLinuxVerifiedReadOnlyCases[] = {
 constexpr const char* kLinuxVerifiedCommitCases[] = {
     "linux_git_query_detects_repository_shapes",
     "linux_git_query_reads_real_status_history_author_detail_and_changes",
+    "linux_terminal_xterm_runs_real_git_commit",
 };
 
 // 逐例核实过「在自有隔离临时仓库里执行真实 git commit，但不执行 git push」的夹具用例
@@ -920,6 +929,12 @@ int main(int argc, char** argv) {
   int helperExitCode = 0;
   if (gc::platform::RunCommandWindowHelperIfRequested(&helperExitCode)) {
     return helperExitCode;
+  }
+#else
+  // Linux 终端执行器启动的也是当前可执行文件；辅助入口必须在测试参数解析之前接管。
+  int terminalHelperExitCode = 0;
+  if (gc::platform::RunTerminalHelperIfRequested(argc, argv, &terminalHelperExitCode)) {
+    return terminalHelperExitCode;
   }
 #endif
   // 行缓冲：重定向到文件时也能即时看到进度，不会把最后几行憋在块缓冲区里。

@@ -97,6 +97,33 @@ std::wstring QuoteForPowerShell(std::wstring_view token) {
   return quoted;
 }
 
+// POSIX shell 的单引号字符串里除了单引号本身没有特殊字符；单引号用
+// '\''（关引号 + 转义单引号 + 再开引号）表示。空串写成 ''，不会消失成一个空位置。
+std::wstring QuoteForPosix(std::wstring_view token) {
+  std::wstring quoted = L"'";
+  for (const wchar_t c : token) {
+    if (c == L'\'') {
+      quoted += L"'\\''";
+    } else {
+      quoted.push_back(c);
+    }
+  }
+  quoted += L"'";
+  return quoted;
+}
+
+bool PosixUnrepresentable(wchar_t c, std::wstring_view* why) {
+  if (c <= 0x20 && c != kSpace) {
+    *why = L"含控制字符（含制表与换行），一行命令里表达不出来";
+    return true;
+  }
+  if (c == 0x7F) {
+    *why = L"含删除符（0x7F）";
+    return true;
+  }
+  return false;
+}
+
 // cmd 的引号里，反斜杠是字面量，但**结尾**的反斜杠会把紧跟的闭引号当成转义对象
 // （`"abc\"` 不是参数 `abc\`），也没有可移植的写法能同时保住结尾反斜杠和闭引号。
 // 所以「以反斜杠结尾 + 需要加引号」这一组合直接判为不能表达。
@@ -147,6 +174,8 @@ std::wstring_view ShellDialectLabel(ShellDialect dialect) noexcept {
       return L"cmd（命令提示符）";
     case ShellDialect::powershell:
       return L"PowerShell";
+    case ShellDialect::posixSh:
+      return L"POSIX shell（sh / bash / zsh）";
   }
   return L"cmd（命令提示符）";
 }
@@ -186,37 +215,69 @@ ShellCommandText FormatShellCommand(std::wstring_view executable,
   }
 
   // PowerShell：单引号字符串按字面处理，因此 cmd 那三个「救不回来」的字符在这里都能表达。
+  if (dialect == ShellDialect::powershell) {
+    const std::wstring exeToken = executable.empty() ? std::wstring(L"git") : std::wstring(executable);
+    for (const wchar_t c : exeToken) {
+      std::wstring_view why;
+      if (PowerShellUnrepresentable(c, &why)) {
+        result.refusal = std::wstring(L"程序路径") + std::wstring(why);
+        return result;
+      }
+    }
+    line = QuoteForPowerShell(exeToken);
+    for (size_t index = 0; index < arguments.size(); ++index) {
+      const std::wstring& token = arguments[index];
+      if (token.empty()) {
+        result.refusal = L"第 " + std::to_wstring(index + 1) +
+                         L" 个参数是空串：粘贴后位置会变，因此不提供粘贴文本。";
+        return result;
+      }
+      for (const wchar_t c : token) {
+        std::wstring_view why;
+        if (PowerShellUnrepresentable(c, &why)) {
+          result.refusal = L"第 " + std::to_wstring(index + 1) + L" 个参数「" +
+                           EscapeControlChars(token) + std::wstring(why);
+          return result;
+        }
+      }
+      line.push_back(kSpace);
+      line += QuoteForPowerShell(token);
+    }
+    result.expressible = true;
+    result.text = std::move(line);
+    result.note = L"这一行按 PowerShell 的规则编排：每段都用单引号按字面包裹，"
+                  L"分支名与路径保持原样、没有任何字符被替换。";
+    return result;
+  }
+
+  // POSIX shell：单引号里 $、`、&、;、!、%、反斜杠都只是字面量；空参数写成 ''。
+  // 这里不假定用户用的是 bash 还是 zsh，只使用 POSIX 规定的引用形态。
   const std::wstring exeToken = executable.empty() ? std::wstring(L"git") : std::wstring(executable);
   for (const wchar_t c : exeToken) {
     std::wstring_view why;
-    if (PowerShellUnrepresentable(c, &why)) {
+    if (PosixUnrepresentable(c, &why)) {
       result.refusal = std::wstring(L"程序路径") + std::wstring(why);
       return result;
     }
   }
-  line = QuoteForPowerShell(exeToken);
+  line = QuoteForPosix(exeToken);
   for (size_t index = 0; index < arguments.size(); ++index) {
     const std::wstring& token = arguments[index];
-    if (token.empty()) {
-      result.refusal = L"第 " + std::to_wstring(index + 1) +
-                       L" 个参数是空串：粘贴后位置会变，因此不提供粘贴文本。";
-      return result;
-    }
     for (const wchar_t c : token) {
       std::wstring_view why;
-      if (PowerShellUnrepresentable(c, &why)) {
+      if (PosixUnrepresentable(c, &why)) {
         result.refusal = L"第 " + std::to_wstring(index + 1) + L" 个参数「" +
-                       EscapeControlChars(token) + std::wstring(why);
+                         EscapeControlChars(token) + std::wstring(why);
         return result;
       }
     }
     line.push_back(kSpace);
-    line += QuoteForPowerShell(token);
+    line += QuoteForPosix(token);
   }
   result.expressible = true;
   result.text = std::move(line);
-  result.note = L"这一行按 PowerShell 的规则编排：每段都用单引号按字面包裹，"
-                L"分支名与路径保持原样、没有任何字符被替换。";
+  result.note = L"这一行按 POSIX shell（sh / bash / zsh）的规则编排：每段都用单引号按字面包裹，"
+                L"空参数写成 ''，分支名与路径保持原样、没有任何字符被替换。";
   return result;
 }
 

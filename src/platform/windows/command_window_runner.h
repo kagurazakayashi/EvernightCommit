@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "git/command_window.h"
+#include "platform/command_window_result.h"
 #include "platform/windows/raii.h"
 
 namespace gc::platform {
@@ -53,23 +54,7 @@ inline constexpr std::uint64_t kStaleOperationDirectoryAgeTicks = FileTimeTicksF
 }
 
 // 一次外部命令窗口操作的最终结果（观察线程写出，UI 线程只读）。
-struct CommandWindowResult {
-  uint64_t operationId = 0;             // 执行器分配的 ID：完成通知与结果取回都按它绑定
-  std::wstring requestOperationId;      // 请求携带的文本 ID（诊断展示）
-  std::wstring displayName;             // 操作名称，如 "status"
-  git::CommandCompletion completion = git::CommandCompletion::launchFailed;
-  long exitCode = 0;                    // finished 时为 Git 退出码
-  unsigned long consoleExitCode = 0;    // 命令窗口辅助进程自身退出码（仅诊断，绝不当作 Git 的结果）
-  std::wstring commandLine;             // 实际执行的 Git 命令（展示用）
-  std::wstring repositoryDirectory;     // 命令窗口中 Git 的工作目录
-  std::wstring failureReason;           // 失败/未知时的具体原因（含 Windows 错误文本）
-  std::wstring directory;               // 本次操作的临时目录（诊断与清理）
-  // 集中环境策略从继承环境移除过的重定向变量告知（只含变量名，绝不含值）；没有移除则为空。
-  std::wstring environmentNotice;
-  [[nodiscard]] bool Success() const noexcept {
-    return completion == git::CommandCompletion::finished && exitCode == 0;
-  }
-};
+// 类型本身与平台无关，Linux 终端执行器共用同一份（platform/command_window_result.h）。
 
 // 外部命令窗口执行器：用户主动执行的 Git 操作一律在“新控制台 + 本程序自带的命令窗口辅助
 // 入口”里运行，Git 原生交互（凭据、GPG 口令）留在该终端；Git 结束后辅助进程把窗口交给

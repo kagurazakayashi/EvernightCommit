@@ -86,6 +86,9 @@ struct CommandWindowOperation {
   std::wstring repositoryDirectory;         // 子进程工作目录（绝对路径）
   std::vector<std::wstring> arguments;      // Git 参数列表，一项一个元素
   std::vector<EnvironmentOverride> environmentOverrides;  // 继承环境之上的受控覆盖
+  // Git 退出后是否让终端保持打开供查看。生产链路始终为 true；测试可以显式关闭，
+  // 以免一个已经拿到结果的终端窗口把测试进程拖到超时。
+  bool holdTerminalOpen = true;
 };
 
 // 统一装配点：一次命令窗口操作的五个必需字段一律按位置传入，不做「先默认构造、再逐行补字段」。
@@ -123,13 +126,28 @@ enum class CommandPlanReject {
   illegalNonce,              // 随机口令缺失或含非 ASCII 字母数字：无法与被启动的辅助进程绑定
   illegalOperationDirectory,  // 操作目录名不是执行器生成的形态：说明书与目录不是同一件事
   illegalWindowTitle,        // 窗口标题含控制字符或制表符，会破坏说明书的行形态
+  illegalEnvironmentOverride,  // 环境覆盖的名字/值含 NUL 或无法无损编码成 UTF-8
 };
 
 [[nodiscard]] std::wstring_view CommandPlanRejectLabel(CommandPlanReject reject) noexcept;
 
-// 第一步：校验请求并生成将展示/将执行的 Git 命令行（引号区域安全性在此判定）。
+// 命令行的目标形态。两种形态都只把参数当数据，不使用 shell：
+//   windowsCreateProcess —— CreateProcessW 的命令行转义规则（Windows 辅助入口）；
+//   posixArgv           —— 终端里的辅助程序直接 posix_spawn(argv)，显示用 POSIX 引用。
+// Windows 形态额外拒绝含双引号的路径与参数、以及引号区域外的 & | < > ^；
+// POSIX 形态不继承这些限制（引号、$、& 在 argv 里只是普通字符），
+// 但两种形态都拒绝控制字符与空参数表。
+enum class CommandLineDialect {
+  windowsCreateProcess = 0,
+  posixArgv,
+};
+
+// 第一步：校验请求并生成将展示/将执行的 Git 命令行（按目标形态选择转义规则）。
 [[nodiscard]] bool BuildGitCommandLine(const CommandWindowOperation& operation, std::wstring* gitLine,
                                        CommandPlanReject* reject, std::wstring* detail);
+[[nodiscard]] bool BuildGitCommandLineForDialect(const CommandWindowOperation& operation,
+                                                 CommandLineDialect dialect, std::wstring* gitLine,
+                                                 CommandPlanReject* reject, std::wstring* detail);
 
 // 生成命令窗口标题：前缀 + 操作名 + 操作 ID，并剔除操作名里会改变 shell 行解析的字符。
 // 结果保证是“可原样写进说明书、并可被 FindWindowW 精确匹配”的形态：
@@ -143,13 +161,17 @@ enum class CommandPlanReject {
 // 第二步：把校验过的操作序列化成说明书文本（UTF-16；落盘编码由平台层严格转成 UTF-8）。
 // 行格式固定为“字段名<TAB>值”，每行一个字段：值里不可能含制表符与控制字符
 // （第一步的校验已经把这类输入拒绝在边界上），因此拆分无歧义，参数只按数据传递。
+// 环境覆盖用 envset/envdel + 十六进制 UTF-8 表示，hold 用 0/1 表示；旧说明书没有
+// hold 字段时按“保留终端”处理，没有 env 行时表示没有操作级覆盖。
 // directoryToken 是操作独占目录的目录名（GcOp<进程ID>x<随机段>）：说明书与目录互相绑定，
 // 辅助进程核对两者一致才肯执行。nonce 是本次操作的随机口令：执行器用 Unicode 命令行把它
 // 交给辅助进程，辅助进程要求说明书里的 nonce 与之相符，防止有人用别的目录来驱动这个入口。
 [[nodiscard]] bool BuildCommandWindowSpecText(const CommandWindowOperation& operation,
                                               std::wstring_view directoryToken, std::wstring_view title,
                                               std::wstring_view nonce, std::wstring* specText,
-                                              CommandPlanReject* reject, std::wstring* detail);
+                                              CommandPlanReject* reject, std::wstring* detail,
+                                              CommandLineDialect dialect =
+                                                  CommandLineDialect::windowsCreateProcess);
 
 // 说明书读回后的结构化形态（全部字段来自文本，未经任何码页转换）。
 struct CommandWindowSpec {
@@ -160,6 +182,11 @@ struct CommandWindowSpec {
   std::wstring gitExecutable;
   std::wstring workingDirectory;  // Git 的工作目录（绝对路径；辅助进程核实后按它执行）
   std::vector<std::wstring> arguments;
+  // 操作自己的受控环境覆盖。Windows 由执行器在环境块里直接传入，说明书里的这一份
+  // 是给“终端里再启动一次辅助程序”的平台（Linux）用的；两边语义相同：
+  // 排在集中 Git 环境策略之后，只影响本次 Git 子进程。
+  std::vector<EnvironmentOverride> environmentOverrides;
+  bool holdTerminalOpen = true;   // Git 退出后是否保留终端窗口
 };
 
 // 解析说明书：任一行不合格式、字段缺失或重复、版本不符都返回 false 并给出原因。

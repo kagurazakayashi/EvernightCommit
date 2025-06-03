@@ -17,6 +17,7 @@ set(GC_TEST_SOURCES_PORTABLE
   commit_identity_tests.cpp
   commit_message_tests.cpp
   commit_plan_tests.cpp
+  command_window_plan_tests.cpp
   conflict_state_tests.cpp
   decimal_text_tests.cpp
   diff_view_tests.cpp
@@ -39,6 +40,7 @@ set(GC_TEST_SOURCES_PORTABLE
   repository_tests.cpp
   restore_plan_tests.cpp
   shell_text_tests.cpp
+  terminal_adapters_tests.cpp
   staging_plan_tests.cpp
   submodule_journey_tests.cpp
   submodule_navigation_tests.cpp
@@ -53,7 +55,6 @@ set(GC_TEST_SOURCES_WINDOWS_ONLY
   changes_pane_tests.cpp
   commit_form_time_tests.cpp
   command_window_directory_tests.cpp
-  command_window_plan_tests.cpp
   environment_block_tests.cpp
   layout_tests.cpp
   list_redraw_tests.cpp
@@ -100,7 +101,9 @@ set(GC_TEST_SOURCES_LINUX_ONLY
   linux_local_time_tests.cpp
   linux_path_probe_tests.cpp
   linux_scratch_file_tests.cpp
-  linux_subprocess_tests.cpp)
+  linux_subprocess_tests.cpp
+  linux_terminal_git_tests.cpp
+  linux_terminal_lifecycle_tests.cpp)
 
 # ---- 完整性审计：任何 *_tests.cpp 没进上面三张表，配置直接失败 ----
 # 用 GLOB 只做核对、不做构建输入（构建输入始终是上面三张显式清单）。

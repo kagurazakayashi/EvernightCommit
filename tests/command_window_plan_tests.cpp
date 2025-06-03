@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "git/command_window.h"
-#include "platform/windows/utf_text.h"
+#include "platform/text_encoding.h"
 
 namespace {
 
@@ -17,7 +17,7 @@ using gc::git::CommandWindowSpec;
 
 // 取说明书文本里以某段文字开头的那一行（去掉行尾 \r），用于逐字段核对形态。
 std::string FirstLineStartingWith(const std::wstring& text, std::wstring_view prefix) {
-  const std::string bytes = gc::platform::Utf16ToUtf8(text);
+  const std::string bytes = gc::platform::WideToUtf8(text);
   size_t lineStart = 0;
   while (lineStart < bytes.size()) {
     const size_t lineEnd = bytes.find('\n', lineStart);
@@ -61,7 +61,7 @@ std::wstring BuildLine(const CommandWindowOperation& operation, bool* ok, Comman
 
 // 说明书字段名与实际值之间的分隔符（值里不可能再有一个：制表符属于控制字符，边界已拒绝）。
 
-std::string Describe(std::wstring_view text) { return gc::platform::Utf16ToUtf8(text); }
+std::string Describe(std::wstring_view text) { return gc::platform::WideToUtf8(text); }
 
 std::wstring BuildSpec(const CommandWindowOperation& operation, std::wstring_view directoryToken,
                        std::wstring_view title, std::wstring_view nonce, bool* ok,
@@ -270,7 +270,7 @@ GC_TEST(command_spec_first_line_is_version_marker) {
   GC_CHECK(specText.find(L"\n\n") == std::wstring::npos);
   // 每行“字段名<TAB>值”，且值里只有一个分隔符。
   GC_CHECK(FirstLineStartingWith(specText, L"program") ==
-           std::string("program") + "\t" + gc::platform::Utf16ToUtf8(operation.gitExecutable));
+           std::string("program") + "\t" + gc::platform::WideToUtf8(operation.gitExecutable));
 }
 
 GC_TEST(command_spec_rejects_unsafe_nonce_and_directory) {
@@ -286,8 +286,8 @@ GC_TEST(command_spec_rejects_unsafe_nonce_and_directory) {
     std::wstring detail;
     specText = BuildSpec(operation, L"GcOp1xabcd1234", L"Git status", bad, &ok, &reject, &detail);
     GC_CHECK_MESSAGE(!ok && reject == CommandPlanReject::illegalNonce,
-                     "口令应被拒绝：" + gc::platform::Utf16ToUtf8(bad) + " -> " +
-                         gc::platform::Utf16ToUtf8(detail));
+                     "口令应被拒绝：" + gc::platform::WideToUtf8(bad) + " -> " +
+                         gc::platform::WideToUtf8(detail));
     GC_CHECK(specText.empty());
   }
   // 目录名同理：不是执行器生成的形态，就说明说明书与它所在的目录不是同一件事。
@@ -313,7 +313,7 @@ GC_TEST(command_spec_rejects_unsafe_nonce_and_directory) {
     std::wstring detail;
     specText = BuildSpec(operation, bad, L"Git status", L"abcdef0123456789", &ok, &reject, &detail);
     GC_CHECK_MESSAGE(!ok && reject == CommandPlanReject::illegalOperationDirectory,
-                     "目录名应被拒绝：" + gc::platform::Utf16ToUtf8(bad));
+                     "目录名应被拒绝：" + gc::platform::WideToUtf8(bad));
   }
   GC_CHECK(gc::git::IsSafeOperationDirectoryName(L"GcOp12345xabcd1234"));
   GC_CHECK(gc::git::IsSafeOperationDirectoryName(
@@ -375,9 +375,9 @@ GC_TEST(command_spec_survives_strict_utf8_round_trip) {
 
   // 平台层的严格 UTF-8 往返：一个码元都不能改，改了就等于把用户的文件名换成别的名字。
   std::string bytes;
-  GC_REQUIRE(gc::platform::TryUtf16ToUtf8Strict(specText, bytes), "严格编码失败");
+  GC_REQUIRE(gc::platform::TryWideToUtf8Strict(specText, bytes), "严格编码失败");
   std::wstring back;
-  GC_REQUIRE(gc::platform::TryUtf8ToUtf16Strict(bytes, back), "严格解码失败");
+  GC_REQUIRE(gc::platform::TryUtf8ToWideStrict(bytes, back), "严格解码失败");
   GC_CHECK(back == specText);
 
   CommandWindowSpec parsed;
@@ -394,10 +394,10 @@ GC_TEST(command_spec_rejects_lone_surrogate_instead_of_replacing_it) {
   // 孤立低代理项（前面没有高代理项）在 UTF-16 里是非法码元。
   const std::wstring bad = std::wstring(L"文件名 ") + wchar_t(0xDC00) + L".txt";
   std::string bytes;
-  GC_CHECK(!gc::platform::TryUtf16ToUtf8Strict(bad, bytes));
+  GC_CHECK(!gc::platform::TryWideToUtf8Strict(bad, bytes));
   GC_CHECK(bytes.empty());
   // 宽松编码会写出 U+FFFD —— 正是本执行器要避免的“悄悄改写”。
-  const std::string lenient = gc::platform::Utf16ToUtf8(bad);
+  const std::string lenient = gc::platform::WideToUtf8(bad);
   GC_CHECK(lenient.find("\xEF\xBF\xBD") != std::string::npos);
   GC_CHECK(lenient != bytes);
 }
@@ -414,19 +414,19 @@ GC_TEST(command_spec_rejects_invalid_utf8_on_the_way_back) {
     return text;
   };
   const std::string truncated = rawBytes({0xE4, 0xB8});             // 三字节序列少了尾字节
-  const std::string cesuHigh = rawBytes({0xED, 0x80, 0x80});        // 高代理项被编成三字节
-  const std::string cesuLow = rawBytes({0xED, 0xB0, 0x80});         // 低代理项同理
+  const std::string cesuHigh = rawBytes({0xED, 0xA0, 0x80});        // U+D800 被编成三字节
+  const std::string cesuLow = rawBytes({0xED, 0xB0, 0x80});         // U+DC00 同理
   const std::string badStart = rawBytes({0x61, 0x62, 0x63, 0xFF});  // 非法起始字节
-  GC_CHECK(!gc::platform::TryUtf8ToUtf16Strict(truncated, text));
-  GC_CHECK(!gc::platform::TryUtf8ToUtf16Strict(cesuHigh, text));
-  GC_CHECK(!gc::platform::TryUtf8ToUtf16Strict(cesuLow, text));
-  GC_CHECK(!gc::platform::TryUtf8ToUtf16Strict(badStart, text));
+  GC_CHECK(!gc::platform::TryUtf8ToWideStrict(truncated, text));
+  GC_CHECK(!gc::platform::TryUtf8ToWideStrict(cesuHigh, text));
+  GC_CHECK(!gc::platform::TryUtf8ToWideStrict(cesuLow, text));
+  GC_CHECK(!gc::platform::TryUtf8ToWideStrict(badStart, text));
   GC_CHECK(text.empty());
   // 这条记的是本机实测事实：Windows 会把 CESU 三字节当成可往返的编码接受，
   // 所以“是不是合法 UTF-8”不能交给 Windows 判定，必须靠上面那两个函数自己的码元检查。
   // 合法 UTF-8（含 4 字节 emoji）正常往返。
-  GC_CHECK(gc::platform::TryUtf8ToUtf16Strict("Ж 😀 ok", text));
-  GC_CHECK(text == gc::platform::Utf8ToUtf16("Ж 😀 ok"));
+  GC_CHECK(gc::platform::TryUtf8ToWideStrict("Ж 😀 ok", text));
+  GC_CHECK(text == gc::platform::Utf8ToWide("Ж 😀 ok"));
 }
 
 GC_TEST(command_title_is_kept_even_when_system_codepage_cannot_encode_it) {
@@ -755,7 +755,7 @@ GC_TEST(command_launch_boundary_refusal_names_operation_for_each_missing_part) {
     std::wstring_view what;
     CommandWindowOperation operation;
   };
-  CommandWindowOperation complete = MakeOperation(L"C:\git.exe", {L"status"});
+  CommandWindowOperation complete = MakeOperation(L"C:\\git.exe", {L"status"});
   complete.operationId = L"undo-ref";
   complete.displayName = L"撤回最近提交";
 
@@ -791,4 +791,83 @@ GC_TEST(command_launch_boundary_refusal_names_operation_for_each_missing_part) {
                        "拒绝文案要带操作名与 ID：" + Describe(refusal));
     }
   }
+}
+
+GC_TEST(command_spec_round_trips_hold_and_environment_overrides) {
+  CommandWindowOperation operation = MakeOperation(L"C:\\git.exe", {L"commit", L"-m", L"msg"});
+  operation.holdTerminalOpen = false;
+  operation.environmentOverrides = {
+      gc::git::EnvironmentOverride{L"GIT_AUTHOR_NAME", std::wstring(L"测试 作者")},
+      gc::git::EnvironmentOverride{L"GIT_ASKPASS", std::nullopt},
+      gc::git::EnvironmentOverride{L"GC_EMPTY", std::wstring()},
+  };
+  bool ok = false;
+  CommandPlanReject reject = CommandPlanReject::none;
+  std::wstring detail;
+  const std::wstring specText =
+      BuildSpec(operation, L"GcOp12xabcd1234", L"Git 提交 - GcOp12xabcd1234",
+                L"abcdef0123456789", &ok, &reject, &detail);
+  GC_REQUIRE(ok, "带 hold 与环境覆盖的说明书应可构造");
+
+  CommandWindowSpec parsed;
+  std::wstring reason;
+  GC_REQUIRE(gc::git::ParseCommandWindowSpecText(specText, &parsed, &reason), Describe(reason));
+  GC_CHECK(!parsed.holdTerminalOpen);
+  GC_REQUIRE(parsed.environmentOverrides.size() == 3, "三个环境覆盖都应读回");
+  GC_CHECK(parsed.environmentOverrides[0].name == L"GIT_AUTHOR_NAME");
+  GC_REQUIRE(parsed.environmentOverrides[0].value.has_value(), "第一条应有值");
+  GC_CHECK(*parsed.environmentOverrides[0].value == L"测试 作者");
+  GC_CHECK(parsed.environmentOverrides[1].name == L"GIT_ASKPASS");
+  GC_CHECK(!parsed.environmentOverrides[1].value.has_value());
+  GC_REQUIRE(parsed.environmentOverrides[2].value.has_value(), "空值仍是一个有值的覆盖");
+  GC_CHECK(parsed.environmentOverrides[2].value->empty());
+}
+
+GC_TEST(command_spec_defaults_to_hold_when_old_document_has_no_hold_field) {
+  const std::wstring valid =
+      L"evernight-command-window-spec\t1\r\n"
+      L"token\tGcOp1xabcd1234\r\nopid\tstatus\r\nnonce\tabcdef0123456789\r\n"
+      L"title\tGit status - GcOp1xabcd1234\r\nprogram\tC:\\git.exe\r\ncwd\tC:\\repo\r\narg\tstatus\r\n";
+  CommandWindowSpec parsed;
+  std::wstring reason;
+  GC_REQUIRE(gc::git::ParseCommandWindowSpecText(valid, &parsed, &reason), Describe(reason));
+  GC_CHECK(parsed.holdTerminalOpen);
+  GC_CHECK(parsed.environmentOverrides.empty());
+}
+
+GC_TEST(command_spec_rejects_unrepresentable_environment_override) {
+  CommandWindowOperation operation = MakeOperation(L"C:\\git.exe", {L"status"});
+  operation.environmentOverrides = {
+      gc::git::EnvironmentOverride{L"BAD=NAME", std::wstring(L"value")},
+  };
+  bool ok = false;
+  CommandPlanReject reject = CommandPlanReject::none;
+  std::wstring detail;
+  const std::wstring specText =
+      BuildSpec(operation, L"GcOp12xabcd1234", L"Git status", L"abcdef0123456789", &ok, &reject,
+                &detail);
+  GC_CHECK(!ok);
+  GC_CHECK(reject == CommandPlanReject::illegalEnvironmentOverride);
+  GC_CHECK(specText.empty());
+}
+
+GC_TEST(command_plan_posix_dialect_allows_quotes_but_still_rejects_control_characters) {
+  CommandWindowOperation operation = MakeOperation(
+      L"/usr/bin/git", {L"status", L"--", L"a\"b;$(touch pwned).txt"}, L"/tmp/仓库");
+  std::wstring line;
+  CommandPlanReject reject = CommandPlanReject::none;
+  std::wstring detail;
+  GC_CHECK(gc::git::BuildGitCommandLineForDialect(
+      operation, gc::git::CommandLineDialect::posixArgv, &line, &reject, &detail));
+  GC_CHECK(line.find(L"''") == std::wstring::npos);
+  GC_CHECK(line.find(L"a\"b;$(touch pwned).txt") != std::wstring::npos);
+
+  // Windows 形态仍拒绝引号：两个方言的边界必须能分别测试。
+  GC_CHECK(!gc::git::BuildGitCommandLine(operation, &line, &reject, &detail));
+  GC_CHECK(reject == CommandPlanReject::quoteInPath || reject == CommandPlanReject::illegalArgument);
+
+  operation.arguments = {L"status", std::wstring(L"line\nbreak")};
+  GC_CHECK(!gc::git::BuildGitCommandLineForDialect(
+      operation, gc::git::CommandLineDialect::posixArgv, &line, &reject, &detail));
+  GC_CHECK(reject == CommandPlanReject::illegalArgument);
 }

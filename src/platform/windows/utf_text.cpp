@@ -33,8 +33,9 @@ constexpr std::string_view kUtf8Replacement{"\xEF\xBF\xBD"};  // U+FFFD
 // 孤立代理项：Windows 的两个方向都不按标准 UTF-8 处理它。
 //   * 编码：WC_ERR_INVALID_CHARS 实测会把非法码元换成 U+FFFD 后“成功返回”（也可能按
 //     三字节 CESU 形态原样写出），两者都等于悄悄改写了用户的名字；
-//   * 解码：ED 80..BF 这个“把代理项编成三字节”的形态（CESU）被 Windows 接受，
+//   * 解码：ED A0..BF 这个“把代理项编成三字节”的形态（CESU）被 Windows 接受，
 //     而它按 The Unicode Table / RFC 3629 都是非法 UTF-8，别的实现（Git、Go、Rust）会拒绝。
+//     ED 80..9F 是合法的 U+D000..U+D7FF，不能一并拒绝。
 // 所以两个方向都先自己做码元级判定，绝不把“合法性”交给 Windows 的脾气。
 [[nodiscard]] bool HasUnpairedSurrogate(std::wstring_view utf16) {
   for (size_t index = 0; index < utf16.size(); ++index) {
@@ -56,7 +57,7 @@ constexpr std::string_view kUtf8Replacement{"\xEF\xBF\xBD"};  // U+FFFD
   for (size_t index = 0; index + 1 < utf8.size(); ++index) {
     if (static_cast<unsigned char>(utf8[index]) == surrogateLead) {
       const unsigned char follow = static_cast<unsigned char>(utf8[index + 1]);
-      if (follow >= 0x80u && follow <= 0xBFu) {
+      if (follow >= 0xA0u && follow <= 0xBFu) {
         return true;
       }
     }

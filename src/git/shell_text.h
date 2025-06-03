@@ -19,6 +19,7 @@ namespace gc::git {
 enum class ShellDialect {
   cmdInteractive,  // 交互式 cmd（默认未启用延迟扩展；用户是否启用无法由本程序确认）
   powershell,      // PowerShell（单引号字符串按字面处理）
+  posixSh,         // POSIX shell（sh / bash / zsh；单引号字符串按字面处理）
 };
 
 [[nodiscard]] std::wstring_view ShellDialectLabel(ShellDialect dialect) noexcept;
