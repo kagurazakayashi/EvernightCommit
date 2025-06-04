@@ -6,9 +6,9 @@
 #include "git/commit_history.h"
 #include "git/commit_identity.h"
 #include "git/repository.h"
-#include "platform/windows/commit_message_file.h"
 #include "platform/local_time.h"
-#include "ui/commands.h"
+#include "platform/scratch_files.h"
+#include "ui/flow_notifications.h"
 
 namespace gc::ui {
 namespace {
@@ -114,8 +114,8 @@ void CommitFlow::RequestPreflightProbe(CommitOperationHost& host, const Operatio
   platform::CommitProbeRequest request;
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
-  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  worker_.Request(ctx.notify, kCommitProbeCompleted, std::move(request),
+  request.timeoutMilliseconds = kCommitProbeQueryTimeoutMs;
+  worker_.Request(ctx.notify, kCommitProbeCompletionId, std::move(request),
                   [](const platform::CommitProbeRequest& pending) {
                     return platform::RunCommitProbeLoad(pending);
                   });
@@ -244,8 +244,8 @@ void CommitFlow::RequestExecutionRecheck(CommitOperationHost& host, const Operat
   platform::CommitProbeRequest request;
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
-  request.timeoutMilliseconds = kCommitProbeTimeoutMs;
-  worker_.Request(ctx.notify, kCommitProbeCompleted, std::move(request),
+  request.timeoutMilliseconds = kCommitProbeQueryTimeoutMs;
+  worker_.Request(ctx.notify, kCommitProbeCompletionId, std::move(request),
                   [](const platform::CommitProbeRequest& pending) {
                     return platform::RunCommitProbeLoad(pending);
                   });
@@ -358,6 +358,11 @@ void CommitFlow::BeginStop() {
 
 void CommitFlow::JoinWorkers() {
   worker_.Join();
+}
+
+void CommitFlow::SetCompletionDispatcher(std::shared_ptr<platform::MainThreadDispatcher> dispatcher,
+                                         uint64_t sourceId) {
+  worker_.SetCompletionDispatcher(std::move(dispatcher), sourceId);
 }
 
 }  // namespace gc::ui

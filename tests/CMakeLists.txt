@@ -103,7 +103,8 @@ set(GC_TEST_SOURCES_LINUX_ONLY
   linux_scratch_file_tests.cpp
   linux_subprocess_tests.cpp
   linux_terminal_git_tests.cpp
-  linux_terminal_lifecycle_tests.cpp)
+  linux_terminal_lifecycle_tests.cpp
+  linux_staging_commit_tests.cpp)
 
 # ---- 完整性审计：任何 *_tests.cpp 没进上面三张表，配置直接失败 ----
 # 用 GLOB 只做核对、不做构建输入（构建输入始终是上面三张显式清单）。
@@ -146,7 +147,7 @@ endif()
 
 add_executable(gc_tests ${gc_test_sources})
 target_include_directories(gc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(gc_tests PRIVATE gc_core gc_platform_contract)
+target_link_libraries(gc_tests PRIVATE gc_core gc_platform_contract gc_ui_flows)
 if(WIN32)
   # Windows 目标继续链完整的界面与平台实现：夹具要用的子进程执行器、环境块、
   # 命令窗口辅助入口都在那两层里。

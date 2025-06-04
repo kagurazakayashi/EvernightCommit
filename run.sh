@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Linux 运行入口。本轮 Linux 上唯一能跑起来的界面目标是 wxWidgets 启动检查窗口
-# （gc_wx_bootstrap）：正式主程序 EvernightCommit 还是 Win32 实现，Linux 上跑不了，
-# 这里不做「假装能跑」的空壳。
+# Linux 运行入口。Linux 上跑的是统一的 wxWidgets 界面 evernight_commit_wx
+# （当前接通：暂存/取消暂存 + 完整提交表单与创建提交）。
+# 更早那一步的依赖检查窗口仍在，需要时直接跑 build/.../bin/gc_wx_bootstrap。
 #
 # 用法：
-#   bash ./run.sh                    # 开检查窗口（需要 $DISPLAY 或 Wayland）
+#   bash ./run.sh                    # 打开界面（需要 $DISPLAY 或 Wayland）
 #   bash ./run.sh --config Release
 #   bash ./run.sh --check            # 只打印版本与链接形态，不需要显示服务
-#   bash ./run.sh -- --version       # -- 之后的参数原样转给程序
+#   bash ./run.sh -- /path/to/repo   # 其余参数原样转给程序
 #
 # 产物不存在时先构建（Debug 预设），构建失败按 cmake 的退出码结束。
 set -euo pipefail
@@ -30,11 +30,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$preset" ]] || preset="$(gc_preset_for_config "$config")"
-exe="$(gc_bin_path "$preset" gc_wx_bootstrap)"
+exe="$(gc_bin_path "$preset" evernight_commit_wx)"
 
 if [[ ! -x "$exe" ]]; then
   printf '产物不存在，先构建：%s\n' "$exe"
-  gc_in_root cmake --build --preset "$preset" --target gc_wx_bootstrap
+  gc_in_root cmake --build --preset "$preset" --target evernight_commit_wx
 fi
 [[ -x "$exe" ]] || gc_die "构建后仍找不到产物：$exe"
 

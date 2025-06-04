@@ -3,8 +3,8 @@
 # EvernightCommit —— Git 提交图形工具（当前交付 Windows）
 
 EvernightCommit 是一款 Git 图形界面工具。业务逻辑（Git 机器输出解析、操作方案与确认判定）
-与平台能力已经分成两层，界面则按统一的 wxWidgets 收敛；**当前能给用户用的仍然只有
-Windows 版**，它的界面还是原生 Win32 + Common Controls 的过渡实现。
+与平台能力已经分成两层，界面正按统一的 wxWidgets 收敛；**当前能给用户用的完整功能仍然只有
+Windows 版**（原生 Win32 + Common Controls 的过渡实现）。
 窗口标题为“Git 提交工具”。
 
 Linux 侧已经有可用的**开发入口**（配置、构建、安全测试、调试、wxWidgets 依赖与最小启动
@@ -12,10 +12,16 @@ Linux 侧已经有可用的**开发入口**（配置、构建、安全测试、�
 后台进程执行器，以及**交互式终端执行链路**（终端发现/选择、受控辅助入口、真实 Git 结果回传）；
 仓库识别、状态、历史、身份、提交详情/变化与各操作预检已能在 Windows/Linux 共用同一套编排，
 Linux 上也有隔离临时仓库的真实 Git 只读/提交测试，其中包含在 xterm 里执行的用例。
-但还没有 Linux 版程序：终端设置界面、持久化与界面尚未迁移，Linux 上构建不到主程序。
+统一 wxWidgets 界面（`evernight_commit_wx`）**已经开工**：Linux 上可构建、可运行，
+接通了「加入/移出暂存区（选中与全部四个入口）」与「完整提交表单 + 创建提交」，
+走的正是上面那套共用的预检—确认—执行前复核—终端执行链路。
+还没有的是：撤回、`fetch`、`pull`、推送、冲突处理、子模块导航与按记录恢复的界面入口，
+以及终端设置界面与持久化（最近仓库/草稿/操作历史）。
+Windows 侧的 wxWidgets 依赖获取没有机器可验，默认不构建该目标。
 范围与未迁移清单见 [docs/building.md](docs/building.md) 与
 [docs/testing.md](docs/testing.md)。跨平台拆分进度与还差的环节见
-[docs/architecture.md](docs/architecture.md) 的「过渡期的 Win32 界面」和「已知待办差异」。
+[docs/architecture.md](docs/architecture.md) 的「src/ui/wx/（统一 wxWidgets 界面）」
+「过渡期的 Win32 界面」和「已知待办差异」。
 
 它的设计取向是**看得见、不越权**：你主动触发的每一次 Git 操作（暂存、取消暂存、提交、
 撤回、`fetch`、`pull`、推送、`status`）都在一个新开的命令窗口里执行**真实的 git 命令**，
@@ -27,12 +33,12 @@ Linux 上也有隔离临时仓库的真实 Git 只读/提交测试，其中包�
 
 ## 支持平台与前提
 
-- **操作系统（程序）**：仅支持 Windows x64（Windows 10 及以上）。非 x64 架构在构建配置
-  阶段就会直接报错，程序也不提供 ARM64 版本。
-- **操作系统（开发入口）**：Linux x86_64 可以配置、构建、跑安全测试与调试，也能起一个
-  wxWidgets 启动检查窗口；交互式 Git 终端链路已实现并有 xterm 端到端测试。这条路径验的是
-  共用业务逻辑层，**不等于 Linux 版可用**——终端设置界面、持久化与界面还没迁移，Linux 上
-  构建不出主程序。其他平台或非 x86_64 架构配置期直接拒绝。
+- **操作系统（程序）**：完整功能只在 Windows x64（Windows 10 及以上）可用。非 x64 架构在构建
+  配置阶段就会直接报错，程序也不提供 ARM64 版本。
+- **操作系统（Linux 统一界面）**：Linux x86_64 除了配置、构建、安全测试与调试入口，现在还能
+  构建并运行 `evernight_commit_wx`——暂存/取消暂存与创建提交这两项业务与 Windows 共用同一套
+  流程与表单。它**不等于** Linux 版功能齐了：其余六个被编排操作没有界面入口，终端设置与
+  持久化也还没迁移。其他平台或非 x86_64 架构配置期直接拒绝。
 - **Linux 交互式终端（开发入口）**：已做 xterm（端到端实测）、xfce4-terminal（`-x` 形态，
   手动实测）、gnome-terminal、konsole、alacritty、kitty 适配器；至少安装一个并在图形会话
   中运行。没有终端或桌面会话时，程序会给出安装/会话建议，**不会**把交互式 Git 改成隐藏执行。
@@ -71,13 +77,14 @@ cmake --build --preset vs2026-debug
 开关见 [docs/building.md](docs/building.md)。产物是单个 `EvernightCommit.exe`，双击
 即可启动（GUI 程序，无需命令行参数）。
 
-Linux（bash，仓库根目录；只到开发入口为止，没有主程序）：
+Linux（bash，仓库根目录）：
 
 ```sh
 bash ./configure.sh   # 默认 Debug 预设；--config Release 换配置
-bash ./build.sh       # 核心层 + 测试 + gc_wx_bootstrap
+bash ./build.sh       # 核心层 + 平台层 + 统一界面 evernight_commit_wx + 测试
 bash ./test.sh        # 安全测试入口（ctest，只跑可自动运行的分组）
-bash ./run.sh --check # 核对 wxWidgets 依赖与链接形态
+bash ./run.sh         # 打开统一界面（暂存 + 创建提交；需要 $DISPLAY 或 Wayland）
+bash ./run.sh --check # 只核对 wxWidgets 依赖与链接形态，不开窗口
 bash ./debug.sh       # 带符号构建并交给 gdb/lldb
 ```
 

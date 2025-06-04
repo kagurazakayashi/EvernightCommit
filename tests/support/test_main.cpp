@@ -210,6 +210,7 @@ constexpr const char* kFixtureFiles[] = {
     "git_environment_fixture_tests.cpp",
     "git_fixture_tests.cpp",
     "linux_git_query_tests.cpp",
+    "linux_staging_commit_tests.cpp",
     "linux_terminal_git_tests.cpp",
     "pull_probe_fixture_tests.cpp",
     "push_fixture_tests.cpp",
@@ -353,8 +354,17 @@ constexpr const char* kLinuxVerifiedReadOnlyCases[] = {
 // Linux 真实 Git 集成：只在用例自有的 PosixTempDirectory 里执行真实 git commit，
 // 不执行 git push、不联网；提交身份与配置全部隔离在临时根内。
 constexpr const char* kLinuxVerifiedCommitCases[] = {
+    "linux_commit_cleanup_only_clears_what_was_actually_committed",
+    "linux_commit_form_flow_writes_the_whole_form_into_a_real_commit",
+    "linux_commit_hook_rejection_keeps_index_and_form_content",
+    "linux_commit_recheck_voids_the_plan_when_the_index_moves",
     "linux_git_query_detects_repository_shapes",
     "linux_git_query_reads_real_status_history_author_detail_and_changes",
+    "linux_staging_batch_add_all_and_unstage_all_cover_the_whole_tree",
+    "linux_staging_conflict_requires_nod_and_blocks_batch_unstage",
+    "linux_staging_selected_add_handles_special_names_and_leaves_unselected",
+    "linux_staging_unstage_selected_writes_index_only",
+    "linux_staging_worktree_rename_needs_both_entries_and_records_one_rename",
     "linux_terminal_xterm_runs_real_git_commit",
 };
 

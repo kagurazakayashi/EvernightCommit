@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "git/commit_plan.h"
 #include "git/commit_message.h"
 #include "platform/commit_probe.h"
+#include "platform/main_thread_dispatch.h"
 #include "ui/operation_host.h"
 
 namespace gc::ui {
@@ -60,6 +62,11 @@ public:
   // 窗口关闭：两阶段收尾。
   void BeginStop();
   void JoinWorkers();
+
+  // 预检/复核的完成通知改走主线程调度器（统一 wxWidgets 界面使用）。
+  // 未设置时保持平台的 PostCompletionNotification 投递（Win32 过渡界面）。
+  void SetCompletionDispatcher(std::shared_ptr<platform::MainThreadDispatcher> dispatcher,
+                               uint64_t sourceId);
 
 private:
   // 列表读回来后发起身份预检（确认框之前的那一趟）。

@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "platform/windows/command_window_runner.h"  // 只用它的 kCompletionMessage 做一句编译期防撞
+#include "ui/flow_notifications.h"
 
 namespace gc::ui {
 
@@ -140,7 +141,8 @@ inline constexpr UINT kPushVerifyCompleted = WM_APP + 11;
 // 「创建提交」绑定的那组身份事实（工作区根与 Git 目录／完整分支引用／HEAD 完整对象 ID／
 // 索引内容标识／流程痕迹／提交者身份配置）的后台查询完成通知；wParam 为请求序号。
 // 确认框之前的预检与点头之后的执行前复核共用这一条，回来给谁用由界面的阶段标记分辨。
-inline constexpr UINT kCommitProbeCompleted = WM_APP + 12;
+inline constexpr UINT kCommitProbeCompleted =
+    static_cast<UINT>(kCommitProbeCompletionId);  // 值与 WM_APP + 12 相同
 // 「撤回最近提交」点头之后的 HEAD/分支后台复核完成通知；wParam 为请求序号。
 // 这一步原来是 GUI 线程上的同步子进程调用，走后台之后窗口不再冻结；没回来之前不发命令。
 inline constexpr UINT kUndoRecheckCompleted = WM_APP + 13;
@@ -261,7 +263,7 @@ inline constexpr unsigned long kSubmoduleProbeTimeoutMs = 8000;
 // 「创建提交」的身份预检里最慢的一条是 git write-tree（大仓库要现算若干棵树），量级与 git status
 // 相当，沿用工作区读取的 20 秒放宽值。超时一律按「这份事实没读回来」放弃这次提交：确认框不弹、
 // 命令不发，绝不退回用早前那一份事实继续，也不自动重试。
-inline constexpr unsigned long kCommitProbeTimeoutMs = 20000;
+inline constexpr unsigned long kCommitProbeTimeoutMs = kCommitProbeQueryTimeoutMs;
 // 「冲突与暂停流程」的现场读取里最慢的一条是 `git diff --name-only -z --diff-filter=U`
 // （大仓库要扫完整棵树），与 git status 同一量级，沿用工作区读取的 20 秒放宽值。
 // 「点头之后、发命令之前」的复核原样重发同一组查询，因此用同一个超时——两面对得上，

@@ -1,4 +1,6 @@
+/docs
 /.w*
+/M*.md
 /A*.md
 /build
 /.evernight-local/

@@ -6,8 +6,8 @@ project(EvernightCommit
   LANGUAGES CXX)
 
 # ---------- 平台与架构判定 ----------
-# 交付范围只有两个已验证形态：Windows x64（MSVC + Windows SDK，完整程序）与
-# Linux x86_64（GCC，本轮只构建共用层 + 测试 + 最小 wxWidgets 启动目标）。
+# 交付范围只有两个已验证形态：Windows x64（MSVC + Windows SDK，Win32 过渡界面 + 完整功能）与
+# Linux x86_64（GCC，统一 wxWidgets 界面 evernight_commit_wx，当前接通暂存与创建提交）。
 # RC 资源语言只在 Windows 需要：Linux 上没有 .rc，也没有 app.manifest。
 if(WIN32)
   set(GC_PLATFORM "windows")
@@ -73,7 +73,7 @@ if(GC_PLATFORM STREQUAL "linux")
 else()
   set(_gc_wx_default OFF)
 endif()
-option(GC_WITH_WX "构建 wxWidgets 启动目标（需要已装好的 wxWidgets 3.2+）" ${_gc_wx_default})
+option(GC_WITH_WX "构建 wxWidgets 目标：统一界面 evernight_commit_wx 与依赖检查窗口 gc_wx_bootstrap（需要已装好的 wxWidgets 3.2+）" ${_gc_wx_default})
 if(GC_BUILD_WIN32_UI AND NOT WIN32)
   message(FATAL_ERROR
     "GC_BUILD_WIN32_UI 只能在 Windows 打开：Win32 界面与 src/platform/windows/ 需要 MSVC、"
@@ -213,6 +213,14 @@ add_library(gc_platform_contract INTERFACE)
 target_include_directories(gc_platform_contract INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_platform_contract INTERFACE gc_build_settings gc_core)
 
+# ---------- 跨平台界面控制器（随统一 wxWidgets 界面保留） ----------
+# 这些控制器只依赖 app/、git/ 与 platform/ 契约，不包含任何原生句柄。
+# 单独成库，使 Linux 的 wxWidgets 目标与 Windows 的过渡界面消费同一份业务流程。
+add_library(gc_ui_flows STATIC
+  src/ui/commit_flow.cpp)
+target_include_directories(gc_ui_flows PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gc_ui_flows PUBLIC gc_platform_contract)
+
 # ---------- Windows 平台能力 / 界面 / 主程序（只在 Windows 构建） ----------
 # 下面三段全部受 GC_BUILD_WIN32_UI 管辖：Linux 上既没有 Win32 平台实现，也不该出现
 # 第二套「看着能配过、实际是空壳」的目标。要接 Linux 平台实现时，按 src/platform/
@@ -222,6 +230,7 @@ add_library(gc_platform STATIC
   src/platform/windows/clipboard.cpp
   src/platform/windows/command_window_helper.cpp
   src/platform/windows/command_window_runner.cpp
+  src/platform/windows/command_window_service.cpp
   src/platform/windows/commit_message_file.cpp
   src/platform/windows/conflict_probe.cpp
   src/platform/windows/environment_block.cpp
@@ -253,8 +262,7 @@ target_link_libraries(gc_platform PUBLIC gc_build_settings gc_platform_contract
 #     src/platform/ 的契约，将来 wxWidgets 界面接着用；
 #   * Win32 过渡实现（main_window、控件、布局、消息号表）是本轮要被 wxWidgets 替换掉的部分。
 add_library(gc_ui STATIC
-  # ---- 操作控制器（跨平台，随统一界面保留） ----
-  src/ui/commit_flow.cpp
+  # ---- 操作控制器（跨平台）已拆到 gc_ui_flows，这里只保留过渡界面与其余控制器 ----
   src/ui/conflict_flow.cpp
   src/ui/fetch_flow.cpp
   src/ui/pull_flow.cpp
@@ -274,7 +282,7 @@ add_library(gc_ui STATIC
   src/ui/splitter.cpp
   src/ui/ui_metrics.cpp)
 target_include_directories(gc_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(gc_ui PUBLIC gc_core gc_platform_contract gc_platform
+target_link_libraries(gc_ui PUBLIC gc_core gc_platform_contract gc_platform gc_ui_flows
   comctl32 gdi32 user32 uxtheme)
 target_compile_definitions(gc_ui PRIVATE
   GC_VERSION_STRING="${PROJECT_VERSION}"
@@ -312,6 +320,7 @@ else()
   add_library(gc_platform_linux STATIC
     src/platform/linux/command_window_helper.cpp
     src/platform/linux/command_window_runner.cpp
+    src/platform/linux/command_window_service.cpp
     src/platform/linux/environment.cpp
     src/platform/linux/git_query.cpp
     src/platform/linux/git_toolchain.cpp
@@ -325,12 +334,15 @@ else()
   target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
   message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"
-                 "（尚无界面主程序、子进程执行器与持久化实现）")
+                 "（统一界面 evernight_commit_wx 已接通暂存与创建提交；"
+                 "终端设置与持久化仍无实现）")
 endif()
 
-# ---------- wxWidgets 启动目标 ----------
-# 目的只有一个：把「依赖怎么来、怎么链接、能不能真起一个窗口」这三件事在
-# 迁移业务界面之前先落到可验证的程度上，不夹带任何业务流程。
+# ---------- wxWidgets 目标 ----------
+# gc_wx_bootstrap 的目的只有一个：把「依赖怎么来、怎么链接、能不能真起一个窗口」这三件事
+# 验到可复核的程度上，不夹带任何业务流程。
+# evernight_commit_wx 是统一的业务界面（当前：暂存 + 创建提交），Windows 与 Linux 共用同一套
+# 流程与控件代码；Windows 侧的 wx 依赖获取没有机器可验，故 GC_WITH_WX 在 Windows 默认 OFF。
 if(GC_WITH_WX)
   include("${CMAKE_CURRENT_LIST_DIR}/cmake/GcWxWidgets.cmake")
   add_executable(gc_wx_bootstrap src/ui/wx/bootstrap_main.cpp)
@@ -343,6 +355,29 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
     # GUI 子系统：Windows 下启动不附控制台窗口（与主程序一致）。
     set_target_properties(gc_wx_bootstrap PROPERTIES WIN32_EXECUTABLE TRUE)
   endif()
+
+  # ---------- 统一 wxWidgets 界面（暂存 + 创建提交） ----------
+  # 业务流程复用 gc_ui_flows 与 platform/ 契约；这里只写窗口、控件与事件。
+  if(WIN32)
+    set(_gc_wx_platform_lib gc_platform)
+  else()
+    set(_gc_wx_platform_lib gc_platform_linux)
+  endif()
+  add_executable(evernight_commit_wx
+    src/ui/wx/app_main.cpp
+    src/ui/wx/commit_form_panel.cpp
+    src/ui/wx/main_frame.cpp)
+  target_include_directories(evernight_commit_wx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(evernight_commit_wx PRIVATE
+    gc_wx gc_ui_flows gc_platform_contract gc_core ${_gc_wx_platform_lib})
+  target_compile_definitions(evernight_commit_wx PRIVATE
+    GC_VERSION_STRING="${PROJECT_VERSION}"
+    GC_WX_VERSION_STRING="${wxWidgets_VERSION_STRING}")
+  set_target_properties(evernight_commit_wx PROPERTIES OUTPUT_NAME "evernight_commit_wx")
+  if(WIN32)
+    set_target_properties(evernight_commit_wx PROPERTIES WIN32_EXECUTABLE TRUE)
+  endif()
+  message(STATUS "[wx] 统一界面目标：evernight_commit_wx（暂存 + 创建提交）")
 endif()
 
 # ---------- 测试 ----------
