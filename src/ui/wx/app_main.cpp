@@ -46,6 +46,8 @@ public:
       std::exit(exitCode);
     }
 #endif
+    // 应用图标由各窗口设置（MainFrame::SetIcon，Windows 任务栏同样取窗口图标）；
+    // wxApp::SetIcon 只在 MSW 存在，不在这里做平台分支。
     auto* frame = new gc::ui::wx::MainFrame();
     frame->Show();
     return true;
@@ -71,7 +73,7 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
       std::printf("用法：evernight_commit_wx [--version|--check|--help]\n"
-                  "  无参数：打开暂存与创建提交界面（需要 DISPLAY 或 WAYLAND_DISPLAY）。\n"
+                  "  无参数：打开统一主界面（仓库浏览、只读查看、暂存与创建提交；需要 DISPLAY 或 WAYLAND_DISPLAY）。\n"
                   "  --version/--check：只打印版本与链接形态，不碰显示服务。\n");
       return 0;
     }

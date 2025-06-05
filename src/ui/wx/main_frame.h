@@ -15,9 +15,13 @@
 #include "app/submodule_journey.h"
 #include "app/task_coordinator.h"
 #include "git/commit_plan.h"
+#include "git/diff_view.h"
 #include "git/staging_plan.h"
+#include "git/workspace_model.h"
 #include "platform/author_config.h"
 #include "platform/command_window_service.h"
+#include "platform/commit_changes.h"
+#include "platform/commit_detail.h"
 #include "platform/commit_probe.h"
 #include "platform/git_task_worker.h"
 #include "platform/git_verify_worker.h"
@@ -26,22 +30,27 @@
 #include "platform/workspace_status.h"
 #include "ui/commit_flow.h"
 #include "ui/operation_host.h"
+#include "ui/wx/changes_panel.h"
 #include "ui/wx/commit_form_panel.h"
 #include "ui/wx/completion_pump.h"
 
 class wxButton;
-class wxListBox;
+class wxCheckBox;
+class wxComboBox;
 class wxStaticText;
 class wxTextCtrl;
 
 namespace gc::ui::wx {
 
-// Windows 与 Linux 共用的 wxWidgets 主窗口。
+// Windows 与 Linux 共用的 wxWidgets 主窗口（统一界面）。
 //
-// 本步骤只接通「暂存/取消暂存」与「创建提交」：仓库识别、刷新、工作区列表、完整提交表单、
-// 后台预检与执行前复核全部复用既有业务层（git/staging_plan、ui/commit_flow、
-// platform/*_probe），不重写任何 Git 语义。命令窗口执行器由平台服务提供，
-// 界面只轮询终态；交互式 Git 仍在这个程序之外的终端里运行。
+// 与 Win32 过渡实现（ui/main_window.*）的对应关系：仓库栏（目录 + Git 程序组合框 +
+// 浏览 + 验证状态）、两页变化区（ui/wx/changes_panel）、后台状态刷新与提交历史读取、
+// 提交详情/文件变化带、差异查看（命令窗口里的 git diff / git show）、暂存与创建提交。
+// 尚未迁移的写操作入口（撤回、fetch、pull、推送、冲突处理、子模块导航、操作历史、
+// 持久化开关）在这里以禁用态呈现并说明开发状态，不接空实现。
+// 所有业务语义走既有共用代码（git/、app/、platform/ 契约、ui/commit_flow），
+// 界面只做搬运与显示，没有第二套业务流程。
 class MainFrame final : public wxFrame, private ui::CommitOperationHost {
 public:
   MainFrame();
@@ -56,13 +65,17 @@ private:
   void ClearWorkspaceState();
   void RebuildChangesLists();
   void SetRepositorySummary();
-  [[nodiscard]] std::vector<int> SelectedRows(const wxListBox& list) const;
+  void SetGitCandidates(const std::vector<std::wstring>& candidates);
 
   // ---- 后台任务 ----
   void RequestGitVerification(const std::wstring& path);
+  void CommitGitInput();
   void RequestRepoDetection(bool initial);
   void RequestWorkspaceRead();
   void RequestAuthorConfig();
+  void RequestCommitChanges(int row);
+  void RequestCommitDetail(int row);
+  void ReconcileSelectedCommit();
   void ScheduleRefreshSoon();
   void HandleNotice(const platform::MainThreadDispatcher::Notice& notice);
   void OnGitVerificationCompleted(uint64_t serial);
@@ -70,8 +83,12 @@ private:
   void OnWorkspaceReadCompleted(uint64_t serial);
   void OnAuthorConfigCompleted(uint64_t serial);
   void OnCommitProbeCompleted(uint64_t serial);
+  void OnCommitChangesCompleted(uint64_t serial);
+  void OnCommitDetailCompleted(uint64_t serial);
   void OnRefreshTimer(wxTimerEvent& event);
   void OnOperationTimer(wxTimerEvent& event);
+  void OnGitVerifyDebounce(wxTimerEvent& event);
+  void OnRepoDetectDebounce(wxTimerEvent& event);
   void FinishActiveOperation(const platform::CommandWindowResult& result);
   [[nodiscard]] OperationContext CaptureOperationContext() const;
 
@@ -92,6 +109,16 @@ private:
 
   // ---- 提交入口 ----
   void CreateCommit();
+
+  // ---- 查看入口（命令窗口里的只读 Git） ----
+  void OnChangesDoubleClicked(git::ChangeSide side, int row);
+  void OnHistoryDoubleClicked(int row);
+  void OnFileDoubleClicked(int row);
+  void LaunchStatusOperation();
+  void CopyCommitDetailToClipboard();
+  void OpenTerminalDialog();
+  // 三处双击共用的发起前核对：不通过时把原因写进状态栏并返回 false。
+  [[nodiscard]] bool RequireViewPrerequisites(std::wstring_view actionLabel);
 
   // ---- OperationHost / CommitOperationHost ----
   void SetStatus(std::wstring note) override;
@@ -121,22 +148,34 @@ private:
   void ApplyHeldFormForNavigation(const app::HeldForm& held, std::wstring_view note) override;
 
   void OnClose(wxCloseEvent& event);
+  void StopWorkers();
 
   // ---- 控件 ----
   wxTextCtrl* repoPath_ = nullptr;
   wxButton* browseRepo_ = nullptr;
+  wxComboBox* gitCombo_ = nullptr;
+  wxButton* browseGit_ = nullptr;
+  wxButton* terminalButton_ = nullptr;
+  wxButton* statusButton_ = nullptr;
+  wxButton* fetchButton_ = nullptr;
+  wxButton* pullButton_ = nullptr;
   wxButton* refreshButton_ = nullptr;
   wxStaticText* gitLabel_ = nullptr;
   wxStaticText* repoSummary_ = nullptr;
-  wxStaticText* unstagedLabel_ = nullptr;
-  wxListBox* unstagedList_ = nullptr;
-  wxStaticText* unstagedHint_ = nullptr;
-  wxListBox* stagedList_ = nullptr;
-  wxStaticText* stagedHint_ = nullptr;
-  wxButton* stageSelected_ = nullptr;
-  wxButton* stageAll_ = nullptr;
-  wxButton* unstageSelected_ = nullptr;
-  wxButton* unstageAll_ = nullptr;
+  // 尚未迁移的入口（禁用 + 说明开发状态）：
+  wxButton* undoCommitButton_ = nullptr;
+  wxButton* pushButton_ = nullptr;
+  wxButton* conflictViewButton_ = nullptr;
+  wxButton* conflictContinueButton_ = nullptr;
+  wxButton* conflictAbortButton_ = nullptr;
+  wxButton* enterSubmoduleButton_ = nullptr;
+  wxButton* returnToParentButton_ = nullptr;
+  wxButton* historyBrowseButton_ = nullptr;
+  wxCheckBox* persistRecordsCheck_ = nullptr;
+  wxCheckBox* persistDraftsCheck_ = nullptr;
+  wxCheckBox* historyRecordCheck_ = nullptr;
+  wxButton* clearPrefsButton_ = nullptr;
+  ChangesPanel* panel_ = nullptr;
   wxButton* createCommit_ = nullptr;
   CommitFormPanel* form_ = nullptr;
   wxStaticText* statusText_ = nullptr;
@@ -152,22 +191,30 @@ private:
   platform::RepoDetectWorker repoWorker_;
   platform::WorkspaceStatusWorker workspaceWorker_;
   platform::AuthorConfigWorker authorWorker_;
+  platform::CommitChangesWorker commitChangesWorker_;
+  platform::CommitDetailWorker commitDetailWorker_;
   ui::CommitFlow commitFlow_;
   std::unique_ptr<platform::CommandWindowService> commandWindows_;
   wxTimer refreshTimer_;
   wxTimer operationTimer_;
+  wxTimer gitVerifyTimer_;
+  wxTimer repoDetectTimer_;
 
   bool refreshCycleActive_ = false;
   bool refreshPending_ = false;
   bool closing_ = false;
-  std::vector<std::wstring> selectedUnstagedPaths_;
-  std::vector<std::wstring> selectedStagedPaths_;
+  bool settingGitCombo_ = false;  // 程序回填组合框时抑制「键入即验证」回环
+  unsigned long long commitFilesSerial_ = 0;
+  unsigned long long commitDetailSerial_ = 0;
+  git::CommitItem pendingFilesCommit_;
+  git::CommitItem pendingDetailCommit_;
   unsigned long long activeOperationSerial_ = 0;
   uint64_t activeRunnerId_ = 0;
   std::wstring activePathspecFile_;
   std::wstring activeMessageFile_;
   bool activeCommitOperation_ = false;
   git::CommitFormData activeCommittedForm_;
+  std::optional<git::DiffViewKind> activeViewKind_;
 };
 
 }  // namespace gc::ui::wx

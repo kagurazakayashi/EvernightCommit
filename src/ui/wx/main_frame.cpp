@@ -8,18 +8,24 @@
 
 #include <wx/arrstr.h>
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/choicdlg.h>
+#include <wx/clipbrd.h>
+#include <wx/combobox.h>
+#include <wx/dataobj.h>
 #include <wx/dateevt.h>
 #include <wx/dirdlg.h>
-#include <wx/listbox.h>
+#include <wx/filedlg.h>
 #include <wx/msgdlg.h>
-#include <wx/scrolwin.h>
+#include <wx/radiobox.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
 #include <wx/utils.h>
 
+#include "git/commit_changes.h"
+#include "git/commit_history.h"
 #include "git/commit_identity.h"
 #include "git/repository.h"
 #include "git/workspace_model.h"
@@ -29,6 +35,8 @@
 #include "platform/local_time.h"
 #include "platform/path.h"
 #include "platform/scratch_files.h"
+#include "platform/terminal.h"
+#include "ui/wx/app_icon.h"
 #include "ui/wx/wx_text.h"
 
 namespace gc::ui::wx {
@@ -39,39 +47,50 @@ constexpr uint64_t kRepoDetectSource = 2;
 constexpr uint64_t kWorkspaceSource = 3;
 constexpr uint64_t kAuthorConfigSource = 4;
 constexpr uint64_t kCommitProbeSource = 5;
+constexpr uint64_t kCommitChangesSource = 6;
+constexpr uint64_t kCommitDetailSource = 7;
 
 constexpr int kRefreshTimerId = wxID_HIGHEST + 101;
 constexpr int kOperationTimerId = wxID_HIGHEST + 102;
+constexpr int kGitVerifyTimerId = wxID_HIGHEST + 103;
+constexpr int kRepoDetectTimerId = wxID_HIGHEST + 104;
 
+// 超时与防抖取值与 Win32 过渡实现（ui/commands.h）逐项对齐：那是业务承诺，不是实现细节。
 constexpr unsigned long kGitVerifyTimeoutMs = 3000;
 constexpr unsigned long kRepoDetectTimeoutMs = 8000;
 constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
 constexpr unsigned long kAuthorConfigTimeoutMs = 8000;
+constexpr unsigned long kCommitChangesTimeoutMs = 20000;
+constexpr unsigned long kCommitDetailTimeoutMs = 8000;
 constexpr unsigned long kRefreshDebounceMs = 200;
+constexpr unsigned long kInputDebounceMs = 500;
 constexpr unsigned long kOperationPollMs = 500;
 
-bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring& path) {
-  return std::find(paths.begin(), paths.end(), path) != paths.end();
-}
+// 尚未迁移到统一界面的入口共用的说明（不接空实现，点了也不会有任何动作）。
+constexpr const wchar_t* kNotMigratedSuffix =
+    L"｜该入口尚未迁移到统一界面（开发中）：这里只呈现禁用态，不接任何空实现；"
+    L"Windows 过渡期的 Win32 界面（EvernightCommit.exe）仍保留完整入口供行为对照。";
 
-std::vector<std::wstring> SelectedPaths(const wxListBox& list,
-                                        const std::vector<git::ChangeItem>& items) {
-  std::vector<std::wstring> paths;
-  for (unsigned int row = 0; row < list.GetCount(); ++row) {
-    if (list.IsSelected(row) && row < items.size()) {
-      paths.push_back(items[row].path);
-    }
+// 标签只在内容真的变了才重设：空闲刷新不该反复触发重画（wx 各端口对同文本 SetLabel 的
+// 重画代价不一致，这里统一在界面层挡掉）。
+void SetLabelIfChanged(wxStaticText* text, const wxString& value) {
+  if (text->GetLabel() != value) {
+    text->SetLabel(value);
   }
-  return paths;
 }
 
 }  // namespace
 
 MainFrame::MainFrame()
-    : wxFrame(nullptr, wxID_ANY, FromWide(L"EvernightCommit — 暂存与创建提交"),
-              wxDefaultPosition, wxSize(1100, 760)),
+    : wxFrame(nullptr, wxID_ANY, FromWide(L"Git 提交工具"), wxDefaultPosition, wxSize(1100, 760)),
       refreshTimer_(this, kRefreshTimerId),
-      operationTimer_(this, kOperationTimerId) {
+      operationTimer_(this, kOperationTimerId),
+      gitVerifyTimer_(this, kGitVerifyTimerId),
+      repoDetectTimer_(this, kRepoDetectTimerId) {
+  const wxIcon icon = MakeAppIcon();
+  if (icon.IsOk()) {
+    SetIcon(icon);
+  }
   dispatcher_ = platform::MakeQueuedMainThreadDispatcher();
   completionPump_ = std::make_unique<CompletionPump>(
       dispatcher_, [this](const platform::MainThreadDispatcher::Notice& notice) {
@@ -83,6 +102,8 @@ MainFrame::MainFrame()
   repoWorker_.SetCompletionDispatcher(dispatcher_, kRepoDetectSource);
   workspaceWorker_.SetCompletionDispatcher(dispatcher_, kWorkspaceSource);
   authorWorker_.SetCompletionDispatcher(dispatcher_, kAuthorConfigSource);
+  commitChangesWorker_.SetCompletionDispatcher(dispatcher_, kCommitChangesSource);
+  commitDetailWorker_.SetCompletionDispatcher(dispatcher_, kCommitDetailSource);
   commitFlow_.SetCompletionDispatcher(dispatcher_, kCommitProbeSource);
 
   commandWindows_ = platform::MakeCommandWindowService();
@@ -95,7 +116,7 @@ MainFrame::MainFrame()
 
   const wxString cwd = wxGetCwd();
   state_.SetRepoPath(ToWide(cwd));
-  repoPath_->SetValue(cwd);
+  repoPath_->ChangeValue(cwd);
   state_.SetStatusNote(L"正在验证 Git 程序并识别当前目录…");
   UpdateUi();
 
@@ -103,8 +124,14 @@ MainFrame::MainFrame()
 }
 
 MainFrame::~MainFrame() {
+  StopWorkers();
+}
+
+void MainFrame::StopWorkers() {
   refreshTimer_.Stop();
   operationTimer_.Stop();
+  gitVerifyTimer_.Stop();
+  repoDetectTimer_.Stop();
   if (completionPump_) {
     completionPump_->Stop();
   }
@@ -112,11 +139,15 @@ MainFrame::~MainFrame() {
   repoWorker_.BeginStop();
   workspaceWorker_.BeginStop();
   authorWorker_.BeginStop();
+  commitChangesWorker_.BeginStop();
+  commitDetailWorker_.BeginStop();
   commitFlow_.BeginStop();
   gitWorker_.Join();
   repoWorker_.Join();
   workspaceWorker_.Join();
   authorWorker_.Join();
+  commitChangesWorker_.Join();
+  commitDetailWorker_.Join();
   commitFlow_.JoinWorkers();
   if (commitFlow_.Active()) {
     commitFlow_.ReleaseAttempt(true);
@@ -132,83 +163,125 @@ MainFrame::~MainFrame() {
 void MainFrame::BuildUi() {
   auto* frameSizer = new wxBoxSizer(wxVERTICAL);
 
-  // 主体放进滚动区：864 高的笔记本屏幕上也要能滚到提交表单的最后一行。
-  auto* mainScroll =
-      new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(-1, 200), wxVSCROLL);
-  auto* panel = new wxPanel(mainScroll);
-  auto* root = new wxBoxSizer(wxVERTICAL);
+  auto* topPanel = new wxPanel(this);
+  auto* top = new wxBoxSizer(wxVERTICAL);
 
   auto* repoRow = new wxBoxSizer(wxHORIZONTAL);
-  repoRow->Add(new wxStaticText(panel, wxID_ANY, FromWide(L"本地仓库")), 0,
-               wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-  repoPath_ = new wxTextCtrl(panel, wxID_ANY, wxString(), wxDefaultPosition, wxDefaultSize,
+  repoRow->Add(new wxStaticText(topPanel, wxID_ANY, FromWide(L"本地仓库：")), 0,
+               wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  repoPath_ = new wxTextCtrl(topPanel, wxID_ANY, wxString(), wxDefaultPosition, wxDefaultSize,
                              wxTE_PROCESS_ENTER);
-  repoRow->Add(repoPath_, 1, wxEXPAND | wxRIGHT, 8);
-  browseRepo_ = new wxButton(panel, wxID_ANY, FromWide(L"浏览…"));
-  repoRow->Add(browseRepo_, 0, wxRIGHT, 6);
-  refreshButton_ = new wxButton(panel, wxID_ANY, FromWide(L"刷新"));
-  repoRow->Add(refreshButton_, 0);
-  root->Add(repoRow, 0, wxEXPAND | wxALL, 10);
+  repoRow->Add(repoPath_, 1, wxEXPAND | wxRIGHT, 6);
+  browseRepo_ = new wxButton(topPanel, wxID_ANY, FromWide(L"浏览…"));
+  repoRow->Add(browseRepo_, 0, wxRIGHT, 12);
+  repoRow->Add(new wxStaticText(topPanel, wxID_ANY, FromWide(L"Git 程序：")), 0,
+               wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  gitCombo_ = new wxComboBox(topPanel, wxID_ANY, wxString(), wxDefaultPosition, wxSize(260, -1), 0,
+                             nullptr);
+  repoRow->Add(gitCombo_, 0, wxRIGHT, 6);
+  browseGit_ = new wxButton(topPanel, wxID_ANY, FromWide(L"浏览…"));
+  repoRow->Add(browseGit_, 0, wxRIGHT, 12);
+  terminalButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"终端…"));
+  repoRow->Add(terminalButton_, 0, wxRIGHT, 6);
+  fetchButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"fetch"));
+  repoRow->Add(fetchButton_, 0, wxRIGHT, 6);
+  pullButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"pull"));
+  repoRow->Add(pullButton_, 0, wxRIGHT, 6);
+  statusButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"status"));
+  repoRow->Add(statusButton_, 0);
+  top->Add(repoRow, 0, wxEXPAND | wxALL, 10);
 
-  gitLabel_ = new wxStaticText(panel, wxID_ANY, FromWide(L"Git：正在发现…"));
-  root->Add(gitLabel_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
-  repoSummary_ = new wxStaticText(panel, wxID_ANY, FromWide(L"尚未识别仓库。"), wxDefaultPosition,
-                                  wxDefaultSize, wxST_NO_AUTORESIZE);
-  root->Add(repoSummary_, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 10);
+  gitLabel_ = new wxStaticText(topPanel, wxID_ANY, FromWide(L"Git：正在发现…"));
+  top->Add(gitLabel_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
 
-  auto* changesRow = new wxBoxSizer(wxHORIZONTAL);
-  auto* unstagedColumn = new wxBoxSizer(wxVERTICAL);
-  unstagedLabel_ = new wxStaticText(panel, wxID_ANY, FromWide(L"未暂存的更改"));
-  unstagedColumn->Add(unstagedLabel_, 0, wxBOTTOM, 4);
-  unstagedList_ = new wxListBox(panel, wxID_ANY, wxDefaultPosition, wxSize(-1, 100), 0, nullptr,
-                                wxLB_EXTENDED);
-  unstagedColumn->Add(unstagedList_, 1, wxEXPAND);
-  unstagedHint_ = new wxStaticText(panel, wxID_ANY, FromWide(L"尚未读取。"), wxDefaultPosition,
-                                   wxDefaultSize, wxST_NO_AUTORESIZE);
-  unstagedColumn->Add(unstagedHint_, 0, wxTOP | wxEXPAND, 4);
-  changesRow->Add(unstagedColumn, 1, wxEXPAND | wxRIGHT, 10);
+  auto* summaryRow = new wxBoxSizer(wxHORIZONTAL);
+  repoSummary_ = new wxStaticText(topPanel, wxID_ANY, FromWide(L"尚未识别仓库。"),
+                                  wxDefaultPosition, wxDefaultSize, wxST_NO_AUTORESIZE);
+  summaryRow->Add(repoSummary_, 1, wxEXPAND | wxRIGHT, 8);
+  enterSubmoduleButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"进入子模块"));
+  summaryRow->Add(enterSubmoduleButton_, 0, wxRIGHT, 6);
+  returnToParentButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"返回父仓库"));
+  summaryRow->Add(returnToParentButton_, 0);
+  top->Add(summaryRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
 
-  auto* stagingButtons = new wxBoxSizer(wxVERTICAL);
-  stageAll_ = new wxButton(panel, wxID_ANY, FromWide(L"全部加入 →"));
-  stageSelected_ = new wxButton(panel, wxID_ANY, FromWide(L"加入暂存区 →"));
-  unstageSelected_ = new wxButton(panel, wxID_ANY, FromWide(L"← 移出暂存区"));
-  unstageAll_ = new wxButton(panel, wxID_ANY, FromWide(L"← 全部移出"));
-  stagingButtons->AddStretchSpacer();
-  stagingButtons->Add(stageAll_, 0, wxEXPAND | wxBOTTOM, 6);
-  stagingButtons->Add(stageSelected_, 0, wxEXPAND | wxBOTTOM, 12);
-  stagingButtons->Add(unstageSelected_, 0, wxEXPAND | wxBOTTOM, 6);
-  stagingButtons->Add(unstageAll_, 0, wxEXPAND);
-  stagingButtons->AddStretchSpacer();
-  changesRow->Add(stagingButtons, 0, wxEXPAND | wxLEFT | wxRIGHT, 4);
+  auto* actionRow = new wxBoxSizer(wxHORIZONTAL);
+  refreshButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"刷新"));
+  actionRow->Add(refreshButton_, 0, wxRIGHT, 6);
+  createCommit_ = new wxButton(topPanel, wxID_ANY, FromWide(L"创建提交…"));
+  actionRow->Add(createCommit_, 0, wxRIGHT, 6);
+  undoCommitButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"撤回最近提交"));
+  actionRow->Add(undoCommitButton_, 0, wxRIGHT, 6);
+  pushButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"推送"));
+  actionRow->Add(pushButton_, 0, wxRIGHT, 6);
+  conflictViewButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"查看冲突状态"));
+  actionRow->Add(conflictViewButton_, 0, wxRIGHT, 6);
+  conflictContinueButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"继续该流程"));
+  actionRow->Add(conflictContinueButton_, 0, wxRIGHT, 6);
+  conflictAbortButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"中止该流程"));
+  actionRow->Add(conflictAbortButton_, 0, wxRIGHT, 6);
+  historyBrowseButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"操作历史…"));
+  actionRow->Add(historyBrowseButton_, 0);
+  top->Add(actionRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, 6);
 
-  auto* stagedColumn = new wxBoxSizer(wxVERTICAL);
-  stagedColumn->Add(new wxStaticText(panel, wxID_ANY, FromWide(L"已暂存的更改")), 0, wxBOTTOM, 4);
-  stagedList_ = new wxListBox(panel, wxID_ANY, wxDefaultPosition, wxSize(-1, 100), 0, nullptr,
-                              wxLB_EXTENDED);
-  stagedColumn->Add(stagedList_, 1, wxEXPAND);
-  stagedHint_ = new wxStaticText(panel, wxID_ANY, FromWide(L"尚未读取。"), wxDefaultPosition,
-                                 wxDefaultSize, wxST_NO_AUTORESIZE);
-  stagedColumn->Add(stagedHint_, 0, wxTOP | wxEXPAND, 4);
-  changesRow->Add(stagedColumn, 1, wxEXPAND);
-  root->Add(changesRow, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+  auto* prefsRow = new wxBoxSizer(wxHORIZONTAL);
+  persistRecordsCheck_ = new wxCheckBox(topPanel, wxID_ANY, FromWide(L"保存记录"));
+  prefsRow->Add(persistRecordsCheck_, 0, wxRIGHT, 10);
+  persistDraftsCheck_ = new wxCheckBox(topPanel, wxID_ANY, FromWide(L"保存草稿"));
+  prefsRow->Add(persistDraftsCheck_, 0, wxRIGHT, 10);
+  clearPrefsButton_ = new wxButton(topPanel, wxID_ANY, FromWide(L"清除已存记录"));
+  prefsRow->Add(clearPrefsButton_, 0, wxRIGHT, 16);
+  historyRecordCheck_ = new wxCheckBox(topPanel, wxID_ANY, FromWide(L"记录操作历史"));
+  prefsRow->Add(historyRecordCheck_, 0);
+  top->Add(prefsRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
-  auto* commitHeader = new wxBoxSizer(wxHORIZONTAL);
-  commitHeader->Add(new wxStaticText(panel, wxID_ANY, FromWide(L"提交表单")), 1,
-                    wxALIGN_CENTER_VERTICAL);
-  createCommit_ = new wxButton(panel, wxID_ANY, FromWide(L"创建提交…"));
-  commitHeader->Add(createCommit_, 0);
-  root->Add(commitHeader, 0, wxEXPAND | wxALL, 10);
+  // 尚未迁移的入口：一律禁用并说明开发状态（点了不会有动作，也不接空实现）。
+  const wxString notMigrated = FromWide(kNotMigratedSuffix);
+  fetchButton_->Enable(false);
+  fetchButton_->SetToolTip(FromWide(
+                               L"fetch 尚未迁移到统一界面（开发中）。\r\n") +
+                           notMigrated);
+  pullButton_->Enable(false);
+  pullButton_->SetToolTip(FromWide(L"pull 尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
+  undoCommitButton_->Enable(false);
+  undoCommitButton_->SetToolTip(
+      FromWide(L"撤回最近提交尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
+  pushButton_->Enable(false);
+  pushButton_->SetToolTip(FromWide(L"推送尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
+  conflictViewButton_->Enable(false);
+  conflictContinueButton_->Enable(false);
+  conflictAbortButton_->Enable(false);
+  conflictViewButton_->SetToolTip(
+      FromWide(L"冲突与暂停流程的三个入口尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
+  conflictContinueButton_->SetToolTip(conflictViewButton_->GetToolTip());
+  conflictAbortButton_->SetToolTip(conflictViewButton_->GetToolTip());
+  enterSubmoduleButton_->Enable(false);
+  returnToParentButton_->Enable(false);
+  enterSubmoduleButton_->SetToolTip(
+      FromWide(L"子模块导航尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
+  returnToParentButton_->SetToolTip(enterSubmoduleButton_->GetToolTip());
+  historyBrowseButton_->Enable(false);
+  historyBrowseButton_->SetToolTip(
+      FromWide(L"操作历史（查看/导出/清除/按记录恢复）尚未迁移到统一界面（开发中）。\r\n") +
+      notMigrated);
+  persistRecordsCheck_->Enable(false);
+  persistDraftsCheck_->Enable(false);
+  clearPrefsButton_->Enable(false);
+  historyRecordCheck_->Enable(false);
+  persistRecordsCheck_->SetToolTip(FromWide(
+      L"持久化（最近仓库/Git 程序/布局/草稿）尚未迁移到统一界面（开发中）：\r\n"
+      L"这里不读写任何用户数据文件。\r\n") + notMigrated);
+  persistDraftsCheck_->SetToolTip(persistRecordsCheck_->GetToolTip());
+  clearPrefsButton_->SetToolTip(persistRecordsCheck_->GetToolTip());
+  historyRecordCheck_->SetToolTip(
+      FromWide(L"操作历史开关尚未迁移到统一界面（开发中）：不记录、不写盘。\r\n") + notMigrated);
 
-  form_ = new CommitFormPanel(panel);
-  root->Add(form_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+  topPanel->SetSizer(top);
+  frameSizer->Add(topPanel, 0, wxEXPAND);
 
-  panel->SetSizer(root);
-  auto* scrollSizer = new wxBoxSizer(wxVERTICAL);
-  scrollSizer->Add(panel, 1, wxEXPAND);
-  mainScroll->SetSizer(scrollSizer);
-  mainScroll->SetScrollRate(0, 12);
-  mainScroll->SetMinSize(wxSize(-1, 200));
-  frameSizer->Add(mainScroll, 1, wxEXPAND);
+  // 两页变化区（变化信息 / 提交历史）与提交表单（表单由面板创建在变化信息页下半区）。
+  panel_ = new ChangesPanel(this);
+  form_ = panel_->form();
+  frameSizer->Add(panel_, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
 
   // 两条说明通道固定在窗口底部：仓库结论与表单自己的话都不会被滚动区带走。
   auto* statusPanel = new wxPanel(this);
@@ -225,6 +298,47 @@ void MainFrame::BuildUi() {
   frameSizer->Add(statusPanel, 0, wxEXPAND | wxBOTTOM, 4);
 
   SetSizer(frameSizer);
+
+  // 工具提示：文案与 Win32 过渡实现逐条对齐（迁移的是说明，不是新写的文案）。
+  repoPath_->SetToolTip(
+      FromWide(L"输入本地仓库目录（也可以是其子目录）；识别在后台只读执行，不会改动仓库。"));
+  browseRepo_->SetToolTip(FromWide(
+      L"选择本地仓库目录；也可在输入框直接键入路径（停顿后自动识别）。"
+      L"支持仓库的子目录，识别时会上溯到工作区根。"));
+  browseGit_->SetToolTip(
+      FromWide(L"浏览选择 git 程序；选定后立即在后台运行 git --version 验证。"));
+  gitCombo_->SetToolTip(FromWide(
+      L"Git 程序路径：下拉里是 PATH 上发现的候选，也可以直接键入或浏览选择。\r\n"
+      L"任何一条都要经过后台 git --version 验证才算可用。"));
+  terminalButton_->SetToolTip(FromWide(
+      L"选择命令窗口用哪个终端模拟器（Linux）：命令窗口里的 Git 由选中的终端承载。\r\n"
+      L"选择只对本次运行生效；终端设置的持久化尚未迁移。"));
+  statusButton_->SetToolTip(FromWide(
+      L"在新命令窗口里执行 git status：显示真实命令与输出，Git 结束窗口仍保留；"
+      L"本程序通过结果文件获知退出码。"));
+  refreshButton_->SetToolTip(FromWide(
+      L"重新读取当前仓库的摘要、两个更改列表与提交历史：只在本程序后台执行只读 Git 查询，"
+      L"不弹出命令窗口。\r\n在外部终端里改过仓库、或命令窗口里的 Git 已结束，都可以点这里恢复真实状态。"));
+  createCommit_->SetToolTip(FromWide(
+      L"把「已暂存的更改」里现在的索引内容提交出去：在命令窗口里执行 git commit，"
+      L"显示真实命令与输出，执行结束后窗口保留，本程序自动重读仓库状态。\r\n"
+      L"点击后先做一次只读重读，确认框里摆出的是刚刚读回的现状；只提交索引里那一份，绝不带 -a。\r\n"
+      L"命令里没有 --no-verify：仓库的 hooks 与签名设置照常生效。"));
+  panel_->unstagedHint()->SetToolTip(FromWide(
+      L"双击某一行可在命令窗口里查看它的差异（未跟踪文件按其内容显示）；只读，不改动仓库。"));
+  panel_->stagedHint()->SetToolTip(panel_->unstagedHint()->GetToolTip());
+  panel_->stageAllButton()->SetToolTip(FromWide(
+      L"「全部加入 →」：把「未暂存的更改」里此刻全部条目一次交给 git 原生的批量命令 git add .：\r\n"
+      L"它不看选中项；只想暂存其中几项，请用下面的「加入暂存区 →」。"));
+  panel_->stageSelectedButton()->SetToolTip(FromWide(
+      L"把「未暂存的更改」里选中的条目交给 git add：在命令窗口里显示真实命令与完整输出。\r\n"
+      L"只处理选中的行（可多选）：没有选中就是「什么都不做」，绝不会代为暂存全部改动。"));
+  panel_->unstageSelectedButton()->SetToolTip(FromWide(
+      L"把「已暂存的更改」里选中的条目从索引撤回：这一步只写索引，绝不改写工作区。\r\n"
+      L"只处理选中的行（可多选）：没有选中就是「什么都不做」。"));
+  panel_->unstageAllButton()->SetToolTip(FromWide(
+      L"「← 全部移出」：把「已暂存的更改」里此刻全部条目从索引撤回（只写索引）。\r\n"
+      L"仓库里只要还有未合并（冲突）条目，这个按钮会整份拒绝并说明原因。"));
 }
 
 void MainFrame::BindEvents() {
@@ -232,12 +346,51 @@ void MainFrame::BindEvents() {
     wxDirDialog dialog(this, FromWide(L"选择本地 Git 仓库"), repoPath_->GetValue(),
                        wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) {
-      return;
+      return;  // 取消或空结果：不改任何状态。
     }
-    repoPath_->SetValue(dialog.GetPath());
+    repoPath_->ChangeValue(dialog.GetPath());
     RequestRepoDetection(true);
   });
   repoPath_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { RequestRepoDetection(true); });
+  repoPath_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
+    repoDetectTimer_.StartOnce(static_cast<int>(kInputDebounceMs));
+  });
+
+  gitCombo_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
+    if (settingGitCombo_) {
+      return;
+    }
+    gitVerifyTimer_.StartOnce(static_cast<int>(kInputDebounceMs));
+  });
+  gitCombo_->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
+    if (settingGitCombo_) {
+      return;
+    }
+    gitVerifyTimer_.Stop();
+    CommitGitInput();  // 从下拉里选定：不再防抖，立即验证。
+  });
+  gitCombo_->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& event) {
+    if (!settingGitCombo_) {
+      gitVerifyTimer_.Stop();
+      CommitGitInput();  // 失焦立即提交；与当前路径相同时 CommitGitInput 自己会跳过。
+    }
+    event.Skip();
+  });
+  browseGit_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    wxFileDialog dialog(this, FromWide(L"选择 Git 程序"), wxString(), L"git",
+                        FromWide(L"Git 程序|git.exe;git|所有文件|*"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dialog.ShowModal() != wxID_OK) {
+      return;
+    }
+    gitVerifyTimer_.Stop();
+    const std::wstring normalized = platform::NormalizeGitExeInput(ToWide(dialog.GetPath()));
+    settingGitCombo_ = true;
+    gitCombo_->SetValue(FromWide(normalized));
+    settingGitCombo_ = false;
+    RequestGitVerification(normalized);
+  });
+  terminalButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OpenTerminalDialog(); });
+  statusButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { LaunchStatusOperation(); });
   refreshButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     if (!state_.GitUsable()) {
       SetStatus(L"Git 程序还不能用，没法刷新。请确认本机已安装 Git 并在 PATH 上。");
@@ -252,17 +405,30 @@ void MainFrame::BindEvents() {
     }
   });
 
-  stageSelected_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StageSelected(); });
-  stageAll_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StageAll(); });
-  unstageSelected_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageSelected(); });
-  unstageAll_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageAll(); });
+  panel_->stageSelectedButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StageSelected(); });
+  panel_->stageAllButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StageAll(); });
+  panel_->unstageSelectedButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageSelected(); });
+  panel_->unstageAllButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageAll(); });
   createCommit_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { CreateCommit(); });
-  unstagedList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) {
-    selectedUnstagedPaths_ = SelectedPaths(*unstagedList_, state_.WorkspaceModel().unstaged);
-  });
-  stagedList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) {
-    selectedStagedPaths_ = SelectedPaths(*stagedList_, state_.WorkspaceModel().staged);
-  });
+
+  panel_->onStagingSelectionChanged = [this] {
+    if (panel_->UpdatingLists()) {
+      return;
+    }
+    // 点击瞬间按行号把选中条目拷成快照（行数与模型不符就整份拒绝），这里只维护显示语义。
+  };
+  panel_->onHistorySelectionChanged = [this] {
+    if (panel_->UpdatingLists()) {
+      return;
+    }
+    ReconcileSelectedCommit();
+  };
+  panel_->onChangesDoubleClicked = [this](git::ChangeSide side, int row) {
+    OnChangesDoubleClicked(side, row);
+  };
+  panel_->onHistoryDoubleClicked = [this](int row) { OnHistoryDoubleClicked(row); };
+  panel_->onFileDoubleClicked = [this](int row) { OnFileDoubleClicked(row); };
+  panel_->onCopyDetail = [this] { CopyCommitDetailToClipboard(); };
 
   form_->onFieldEdited = [this](app::CommitFormSession::Field field) {
     formSession_.NoteUserEdit(field);
@@ -281,25 +447,98 @@ void MainFrame::BindEvents() {
 
   refreshTimer_.Bind(wxEVT_TIMER, &MainFrame::OnRefreshTimer, this, kRefreshTimerId);
   operationTimer_.Bind(wxEVT_TIMER, &MainFrame::OnOperationTimer, this, kOperationTimerId);
+  gitVerifyTimer_.Bind(wxEVT_TIMER, &MainFrame::OnGitVerifyDebounce, this, kGitVerifyTimerId);
+  repoDetectTimer_.Bind(wxEVT_TIMER, &MainFrame::OnRepoDetectDebounce, this, kRepoDetectTimerId);
   Bind(wxEVT_CLOSE_WINDOW, &MainFrame::OnClose, this);
 }
 
 void MainFrame::StartInitialization() {
   const std::vector<std::wstring> candidates = platform::DiscoverGitCandidates();
+  SetGitCandidates(candidates);
   if (candidates.empty()) {
-    SetStatus(L"没有在 PATH 上找到 Git 程序。请先安装 Git，或把 Git 加入 PATH 后重新启动本程序。");
+    SetStatus(L"没有在 PATH 上找到 Git 程序。请先安装 Git，或在“Git 程序”里手动输入路径、"
+              L"用“浏览…”选择。");
+    app::GitToolState tool;
+    tool.status = app::GitExeStatus::unverified;
+    tool.message = L"当前进程 PATH 中未找到 git 程序，请手动输入路径或用“浏览…”选择。";
+    state_.SetGitTool(std::move(tool));
     UpdateUi();
     return;
   }
   RequestGitVerification(platform::NormalizeGitExeInput(candidates.front()));
 }
 
+void MainFrame::SetGitCandidates(const std::vector<std::wstring>& candidates) {
+  wxArrayString items;
+  for (const std::wstring& candidate : candidates) {
+    items.Add(FromWide(candidate));
+  }
+  const wxString keep = gitCombo_->GetValue();
+  settingGitCombo_ = true;
+  gitCombo_->Clear();
+  gitCombo_->Append(items);
+  gitCombo_->SetValue(keep);
+  settingGitCombo_ = false;
+}
+
+void MainFrame::CommitGitInput() {
+  const std::wstring raw = ToWide(gitCombo_->GetValue());
+  const std::wstring normalized = platform::NormalizeGitExeInput(raw);
+  if (normalized.empty()) {
+    app::GitToolState tool;
+    tool.status = app::GitExeStatus::unverified;
+    tool.message = L"未选择 Git 程序。";
+    state_.SetGitTool(std::move(tool));
+    SetStatus(L"Git 未设置：请输入 git 程序路径或用“浏览…”选择。");
+    UpdateUi();
+    return;
+  }
+  const app::GitToolState& current = state_.Git();
+  if (normalized == current.path &&
+      (current.status == app::GitExeStatus::verifying ||
+       current.status == app::GitExeStatus::verified)) {
+    return;  // 程序回填文本回环触发的重复提交：跳过。
+  }
+  if (normalized != raw) {
+    settingGitCombo_ = true;
+    gitCombo_->SetValue(FromWide(normalized));
+    settingGitCombo_ = false;
+  }
+  RequestGitVerification(normalized);
+}
+
+void MainFrame::OnGitVerifyDebounce(wxTimerEvent&) {
+  if (!closing_) {
+    CommitGitInput();
+  }
+}
+
+void MainFrame::OnRepoDetectDebounce(wxTimerEvent&) {
+  if (closing_) {
+    return;
+  }
+  const std::wstring text = ToWide(repoPath_->GetValue());
+  if (text.empty()) {
+    tasks_.UnbindRepository();
+    ClearWorkspaceState();
+    app::RepoState repo;
+    repo.status = app::RepoLoadStatus::unloaded;
+    state_.SetRepo(std::move(repo));
+    SetStatus(L"本地仓库路径为空，没有发起识别。");
+    UpdateUi();
+    return;
+  }
+  refreshCycleActive_ = true;
+  RequestRepoDetection(true);
+}
+
 void MainFrame::RequestGitVerification(const std::wstring& path) {
   app::GitToolState tool;
   tool.status = app::GitExeStatus::verifying;
   tool.path = path;
-  tool.message = L"正在后台执行 git --version 验证…";
+  tool.message = L"正在后台验证 Git 程序（git --version）…";
   state_.SetGitTool(std::move(tool));
+  state_.SetGitExePath(path);
   SetStatus(L"正在验证 Git 程序：" + path);
   UpdateUi();
   gitWorker_.Request(nullptr, 0, path, [](const std::wstring& exePath) {
@@ -318,6 +557,10 @@ void MainFrame::HandleNotice(const platform::MainThreadDispatcher::Notice& notic
     OnAuthorConfigCompleted(notice.serial);
   } else if (notice.sourceId == kCommitProbeSource) {
     OnCommitProbeCompleted(notice.serial);
+  } else if (notice.sourceId == kCommitChangesSource) {
+    OnCommitChangesCompleted(notice.serial);
+  } else if (notice.sourceId == kCommitDetailSource) {
+    OnCommitDetailCompleted(notice.serial);
   }
 }
 
@@ -326,20 +569,30 @@ void MainFrame::OnGitVerificationCompleted(uint64_t serial) {
   if (!gitWorker_.FetchLatest(serial, &verification)) {
     return;
   }
+  // 换 Git 程序同样是一次身份变化：旧 Git 读回来的摘要与列表都要作废。
+  const std::wstring previousGitPath = state_.Git().path;
   app::GitToolState tool;
   tool.path = verification.path;
+  tool.message = verification.message;
   if (verification.outcome == git::GitProbeOutcome::verified) {
     tool.status = app::GitExeStatus::verified;
     tool.version = verification.version;
     state_.SetGitTool(std::move(tool));
     state_.SetGitExePath(verification.path);
     SetStatus(L"Git 程序可用：" + verification.path + L"（版本 " + verification.version + L"）。");
-    repoPath_->SetValue(FromWide(platform::ToAbsolutePath(ToWide(repoPath_->GetValue()))));
+    settingGitCombo_ = true;
+    gitCombo_->SetValue(FromWide(verification.path));
+    settingGitCombo_ = false;
+    repoPath_->ChangeValue(FromWide(platform::ToAbsolutePath(ToWide(repoPath_->GetValue()))));
+    const bool switchedGit = !previousGitPath.empty() && previousGitPath != verification.path &&
+                             !state_.Info().repoPath.empty();
     refreshCycleActive_ = true;
     RequestRepoDetection(true);
+    if (switchedGit) {
+      SetStatus(L"已改用另一个 Git 程序重新识别当前仓库（在途的旧结果按身份作废）。");
+    }
   } else {
     tool.status = app::GitExeStatus::invalid;
-    tool.message = verification.message;
     state_.SetGitTool(std::move(tool));
     SetStatus(L"Git 程序不可用：" + verification.message);
     UpdateUi();
@@ -559,8 +812,6 @@ void MainFrame::OnWorkspaceReadCompleted(uint64_t serial) {
     return;
   }
   const bool succeeded = outcome.snapshot.status == git::WorkspaceLoadStatus::loaded;
-  selectedUnstagedPaths_ = SelectedPaths(*unstagedList_, state_.WorkspaceModel().unstaged);
-  selectedStagedPaths_ = SelectedPaths(*stagedList_, state_.WorkspaceModel().staged);
   state_.SetWorkspace(outcome.snapshot);
   refreshCycleActive_ = false;
   RebuildChangesLists();
@@ -573,6 +824,7 @@ void MainFrame::OnWorkspaceReadCompleted(uint64_t serial) {
 
   commitFlow_.OnWorkspaceLoaded(*this, CaptureOperationContext(), succeeded);
   UpdateUi();
+  ReconcileSelectedCommit();  // 重建结束后按新列表统一重对一次（与 Win32 同一收口）。
   if (tasks_.RefreshStillQueued() || refreshPending_) {
     refreshPending_ = false;
     ScheduleRefreshSoon();
@@ -615,6 +867,146 @@ void MainFrame::OnAuthorConfigCompleted(uint64_t serial) {
     RunFormValidation({});
   }
   UpdateUi();
+}
+
+void MainFrame::RequestCommitChanges(int row) {
+  // 只读查询，但有一个硬前提：仓库身份还成立。不成立时不动清单（宁可停在引导语上）。
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (!state_.GitUsable() || !state_.RepoUsable() || repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot) ||
+      state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    return;
+  }
+  if (panel_->HistoryRowCount() !=
+      static_cast<int>(state_.WorkspaceModel().recentCommits.size())) {
+    return;  // 显示的行数与已读取的历史对不上：宁可不读。
+  }
+  const git::CommitItem* item = panel_->CommitItemAt(row);
+  if (item == nullptr) {
+    return;
+  }
+  platform::CommitChangesRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = repositoryRoot;
+  request.objectId = item->objectId;
+  request.timeoutMilliseconds = kCommitChangesTimeoutMs;
+  request.readSerial = ++commitFilesSerial_;
+  request.bindingGeneration = tasks_.Identity().generation;
+  // 请求发出时就把这条提交完整记下来：回来时按它核对，绝不用「现在恰好选中的那一条」认领。
+  pendingFilesCommit_ = *item;
+
+  ChangesPanel::CommitFilesView loading;
+  loading.hasCommit = true;
+  loading.commit = pendingFilesCommit_;
+  loading.loading = true;
+  panel_->ShowCommitFiles(loading);
+
+  commitChangesWorker_.Request(nullptr, 0, std::move(request),
+                               [](const platform::CommitChangesRequest& pending) {
+                                 return platform::RunCommitChangesLoad(pending);
+                               });
+}
+
+void MainFrame::OnCommitChangesCompleted(uint64_t serial) {
+  platform::CommitChangesOutcome outcome;
+  if (!commitChangesWorker_.FetchLatest(serial, &outcome)) {
+    return;  // 期间又读了更晚的一条（用户换了提交）：这份结果不再有意义。
+  }
+  // 序号只保证「最后一次请求」；仓库身份与那条提交还要各核一次。
+  if (outcome.bindingGeneration != tasks_.Identity().generation ||
+      outcome.objectId != pendingFilesCommit_.objectId ||
+      panel_->CommitFilesCommitId() != outcome.objectId) {
+    return;
+  }
+  ChangesPanel::CommitFilesView view;
+  view.hasCommit = true;
+  view.commit = pendingFilesCommit_;
+  view.note = outcome.message;
+  if (outcome.error != git::RepoError::none) {
+    view.error = outcome.message;  // 失败不留半份清单。
+  } else {
+    view.changes = std::move(outcome.changes);
+  }
+  panel_->ShowCommitFiles(view);
+  SetStatus(outcome.message);  // 只读仓库：不改操作结论。
+  UpdateUi();
+}
+
+void MainFrame::RequestCommitDetail(int row) {
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (!state_.GitUsable() || !state_.RepoUsable() || repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot) ||
+      state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    return;
+  }
+  if (panel_->HistoryRowCount() !=
+      static_cast<int>(state_.WorkspaceModel().recentCommits.size())) {
+    return;
+  }
+  const git::CommitItem* item = panel_->CommitItemAt(row);
+  if (item == nullptr) {
+    return;
+  }
+  platform::CommitDetailRequest request;
+  request.exePath = state_.Git().path;
+  request.repositoryDirectory = repositoryRoot;
+  request.objectId = item->objectId;
+  request.timeoutMilliseconds = kCommitDetailTimeoutMs;
+  request.readSerial = ++commitDetailSerial_;
+  request.bindingGeneration = tasks_.Identity().generation;
+  pendingDetailCommit_ = *item;
+
+  ChangesPanel::CommitDetailView loading;
+  loading.hasCommit = true;
+  loading.commit = pendingDetailCommit_;
+  loading.loading = true;
+  panel_->ShowCommitDetail(loading);
+
+  commitDetailWorker_.Request(nullptr, 0, std::move(request),
+                              [](const platform::CommitDetailRequest& pending) {
+                                return platform::RunCommitDetailLoad(pending);
+                              });
+}
+
+void MainFrame::OnCommitDetailCompleted(uint64_t serial) {
+  platform::CommitDetailOutcome outcome;
+  if (!commitDetailWorker_.FetchLatest(serial, &outcome)) {
+    return;
+  }
+  if (outcome.bindingGeneration != tasks_.Identity().generation ||
+      outcome.objectId != pendingDetailCommit_.objectId ||
+      panel_->CommitDetailCommitId() != outcome.objectId) {
+    return;
+  }
+  ChangesPanel::CommitDetailView view;
+  view.hasCommit = true;
+  view.commit = pendingDetailCommit_;
+  if (outcome.error != git::RepoError::none) {
+    view.error = outcome.message;  // 失败不留上一条的文本冒充现状。
+  } else {
+    view.text = outcome.text;
+  }
+  panel_->ShowCommitDetail(view);
+  SetStatus(outcome.message);
+  UpdateUi();
+}
+
+void MainFrame::ReconcileSelectedCommit() {
+  // 「当前选中的那一条」是唯一判据：列表刚刷新、选项卡刚切回、用户点了另一行，
+  // 三种来源都只问这一个问题，不会出现「列表已换而清单还是上一条」的窗口期。
+  const int row = panel_->SelectedHistoryRow();
+  const git::CommitItem* item = row >= 0 ? panel_->CommitItemAt(row) : nullptr;
+  if (item == nullptr) {
+    panel_->ShowCommitFiles(ChangesPanel::CommitFilesView{});
+    panel_->ShowCommitDetail(ChangesPanel::CommitDetailView{});
+    return;
+  }
+  if (!(panel_->CommitFilesLoading() && panel_->CommitFilesCommitId() == item->objectId)) {
+    RequestCommitChanges(row);
+  }
+  if (panel_->CommitDetailCommitId() != item->objectId) {
+    RequestCommitDetail(row);
+  }
 }
 
 void MainFrame::OnCommitProbeCompleted(uint64_t serial) {
@@ -702,6 +1094,7 @@ void MainFrame::OnOperationTimer(wxTimerEvent&) {
     activeMessageFile_.clear();
     activeCommitOperation_ = false;
     activeCommittedForm_ = {};
+    activeViewKind_.reset();
     operationTimer_.Stop();
     UpdateUi();
     ScheduleRefreshSoon();
@@ -723,12 +1116,14 @@ void MainFrame::FinishActiveOperation(const platform::CommandWindowResult& resul
 
   const bool commitOperation = activeCommitOperation_;
   const git::CommitFormData committedForm = activeCommittedForm_;
+  const std::optional<git::DiffViewKind> viewKind = activeViewKind_;
   activeOperationSerial_ = 0;
   activeRunnerId_ = 0;
   activePathspecFile_.clear();
   activeMessageFile_.clear();
   activeCommitOperation_ = false;
   activeCommittedForm_ = {};
+  activeViewKind_.reset();
   operationTimer_.Stop();
 
   if (commitOperation) {
@@ -736,6 +1131,11 @@ void MainFrame::FinishActiveOperation(const platform::CommandWindowResult& resul
   }
 
   std::wstring note = outcome.note;
+  if (viewKind.has_value() && result.completion == git::CommandCompletion::finished) {
+    // 查看类操作的退出码语义在这里补完整：`git diff` 有差异时也是 0，
+    // `git diff --no-index` 则用 1 表示「有差异」。不解释就会被读成「操作失败」。
+    note += git::DescribeDiffViewExitCode(*viewKind, result.exitCode);
+  }
   if (!result.environmentNotice.empty()) {
     note += L"｜" + result.environmentNotice;
   }
@@ -760,49 +1160,75 @@ OperationContext MainFrame::CaptureOperationContext() const {
 }
 
 void MainFrame::ClearWorkspaceState() {
-  selectedUnstagedPaths_.clear();
-  selectedStagedPaths_.clear();
   state_.SetWorkspace(git::WorkspaceSnapshot{});
   RebuildChangesLists();
 }
 
 void MainFrame::RebuildChangesLists() {
-  const git::WorkspaceModel& model = state_.WorkspaceModel();
-  const std::vector<std::wstring>& keepUnstaged = selectedUnstagedPaths_;
-  const std::vector<std::wstring>& keepStaged = selectedStagedPaths_;
-
-  unstagedList_->Clear();
-  for (const git::ChangeItem& item : model.unstaged) {
-    unstagedList_->Append(FromWide(item.StatusLabel() + L"  " + item.PathLabel()));
-  }
-  for (size_t row = 0; row < model.unstaged.size(); ++row) {
-    if (ContainsPath(keepUnstaged, model.unstaged[row].path)) {
-      unstagedList_->SetSelection(static_cast<int>(row));
-    }
-  }
-
-  stagedList_->Clear();
-  for (const git::ChangeItem& item : model.staged) {
-    stagedList_->Append(FromWide(item.StatusLabel() + L"  " + item.PathLabel()));
-  }
-  for (size_t row = 0; row < model.staged.size(); ++row) {
-    if (ContainsPath(keepStaged, model.staged[row].path)) {
-      stagedList_->SetSelection(static_cast<int>(row));
-    }
-  }
+  panel_->ShowWorkspace(state_.WorkspaceModel(), state_.WorkspaceHintTexts());
 }
 
 void MainFrame::UpdateUi() {
   if (state_.GitUsable()) {
-    gitLabel_->SetLabel(FromWide(L"Git：" + state_.Git().path + L"（" +
-                                 (state_.Git().version.empty() ? L"已验证" : state_.Git().version) +
-                                 L"）"));
+    SetLabelIfChanged(gitLabel_, FromWide(L"Git：" + state_.Git().path + L"（" +
+                                          (state_.Git().version.empty() ? L"已验证"
+                                                                         : state_.Git().version) +
+                                          L"）"));
   } else {
     const std::wstring message = state_.Git().message.empty() ? L"正在发现 Git 程序…"
                                                               : state_.Git().message;
-    gitLabel_->SetLabel(FromWide(L"Git：" + message));
+    SetLabelIfChanged(gitLabel_, FromWide(L"Git：" + message));
   }
 
+  SetRepositorySummary();
+
+  const git::EmptyStateTexts texts = state_.WorkspaceHintTexts();
+  std::wstring unstagedNote;
+  if (panel_->UnstagedRowCount() == 0) {
+    unstagedNote = texts.unstaged;
+  } else {
+    unstagedNote = L"共 " + std::to_wstring(panel_->UnstagedRowCount()) +
+                   L" 项；只处理选中的条目；双击可看差异";
+  }
+  const std::wstring submodule = git::SubmoduleExplanationText(state_.WorkspaceModel());
+  if (!submodule.empty()) {
+    unstagedNote += L" " + submodule;
+  }
+  SetLabelIfChanged(panel_->unstagedHint(), FromWide(unstagedNote));
+  if (panel_->StagedRowCount() == 0) {
+    SetLabelIfChanged(panel_->stagedHint(), FromWide(texts.staged));
+  } else {
+    SetLabelIfChanged(panel_->stagedHint(), FromWide(L"共 " +
+                                                     std::to_wstring(panel_->StagedRowCount()) +
+                                                     L" 项；提交只来自索引里这一份；双击可看差异"));
+  }
+
+  const bool busy = tasks_.OperationInFlight();
+  const bool repositoryReady = state_.GitUsable() && state_.RepoUsable();
+  const bool workspaceReady =
+      repositoryReady && state_.Workspace().status == git::WorkspaceLoadStatus::loaded;
+  refreshButton_->Enable(state_.GitUsable());
+  browseRepo_->Enable(!busy);
+  statusButton_->Enable(repositoryReady && !busy);
+  const bool stagingReady = workspaceReady && !busy;
+  panel_->stageSelectedButton()->Enable(stagingReady);
+  panel_->stageAllButton()->Enable(stagingReady);
+  panel_->unstageSelectedButton()->Enable(stagingReady);
+  panel_->unstageAllButton()->Enable(stagingReady);
+  createCommit_->Enable(workspaceReady && !busy && !commitFlow_.Active());
+
+  SetLabelIfChanged(statusText_, FromWide(state_.StatusNote()));
+  SetLabelIfChanged(formNoteText_, FromWide(state_.FormNote()));
+  const int width = GetClientSize().GetWidth() > 200 ? GetClientSize().GetWidth() - 40 : 900;
+  statusText_->Wrap(width);
+  formNoteText_->Wrap(width);
+  repoSummary_->Wrap(width);
+  panel_->unstagedHint()->Wrap(width / 2 - 20 > 100 ? width / 2 - 20 : 300);
+  panel_->stagedHint()->Wrap(width / 2 - 20 > 100 ? width / 2 - 20 : 300);
+  Layout();
+}
+
+void MainFrame::SetRepositorySummary() {
   const git::RepoDetection& detection = state_.Repo().detection;
   std::wstring summary;
   switch (state_.Repo().status) {
@@ -822,58 +1248,7 @@ void MainFrame::UpdateUi() {
       }
       break;
   }
-  repoSummary_->SetLabel(FromWide(summary));
-
-  const git::EmptyStateTexts texts = state_.WorkspaceHintTexts();
-  if (unstagedList_->GetCount() == 0) {
-    unstagedHint_->SetLabel(FromWide(texts.unstaged));
-  } else {
-    unstagedHint_->SetLabel(
-        FromWide(L"共 " + std::to_wstring(unstagedList_->GetCount()) + L" 项；只处理选中的条目"));
-  }
-  std::wstring submodule = git::SubmoduleExplanationText(state_.WorkspaceModel());
-  if (!submodule.empty()) {
-    unstagedHint_->SetLabel(unstagedHint_->GetLabel() + FromWide(L" " + submodule));
-  }
-  if (stagedList_->GetCount() == 0) {
-    stagedHint_->SetLabel(FromWide(texts.staged));
-  } else {
-    stagedHint_->SetLabel(FromWide(L"共 " + std::to_wstring(stagedList_->GetCount()) +
-                                   L" 项；提交只来自索引里这一份"));
-  }
-
-  const bool busy = tasks_.OperationInFlight();
-  const bool repositoryReady = state_.GitUsable() && state_.RepoUsable();
-  const bool workspaceReady = repositoryReady &&
-                              state_.Workspace().status == git::WorkspaceLoadStatus::loaded;
-  refreshButton_->Enable(state_.GitUsable());
-  browseRepo_->Enable(!busy);
-  const bool stagingReady = workspaceReady && !busy;
-  stageSelected_->Enable(stagingReady);
-  stageAll_->Enable(stagingReady);
-  unstageSelected_->Enable(stagingReady);
-  unstageAll_->Enable(stagingReady);
-  createCommit_->Enable(workspaceReady && !busy && !commitFlow_.Active());
-
-  statusText_->SetLabel(FromWide(state_.StatusNote()));
-  formNoteText_->SetLabel(FromWide(state_.FormNote()));
-  const int width = GetClientSize().GetWidth() > 200 ? GetClientSize().GetWidth() - 40 : 900;
-  statusText_->Wrap(width);
-  formNoteText_->Wrap(width);
-  repoSummary_->Wrap(width);
-  unstagedHint_->Wrap(width / 2 - 20 > 100 ? width / 2 - 20 : 300);
-  stagedHint_->Wrap(width / 2 - 20 > 100 ? width / 2 - 20 : 300);
-  Layout();
-}
-
-std::vector<int> MainFrame::SelectedRows(const wxListBox& list) const {
-  std::vector<int> rows;
-  for (unsigned int row = 0; row < list.GetCount(); ++row) {
-    if (list.IsSelected(row)) {
-      rows.push_back(static_cast<int>(row));
-    }
-  }
-  return rows;
+  SetLabelIfChanged(repoSummary_, FromWide(summary));
 }
 
 bool MainFrame::RequireStagingPrerequisites(std::wstring_view actionLabel) {
@@ -902,14 +1277,14 @@ void MainFrame::StageSelected() {
   if (!RequireStagingPrerequisites(L"暂存")) {
     return;
   }
-  const std::vector<int> rows = SelectedRows(*unstagedList_);
+  const std::vector<int> rows = panel_->SelectedUnstagedRows();
   if (rows.empty()) {
     SetStatus(L"先在“未暂存的更改”里选中文件，再点“加入暂存区”；没有选中时不会暂存全部。");
     UpdateUi();
     return;
   }
   const git::WorkspaceModel& model = state_.WorkspaceModel();
-  if (unstagedList_->GetCount() != static_cast<unsigned int>(model.unstaged.size())) {
+  if (panel_->UnstagedRowCount() != static_cast<int>(model.unstaged.size())) {
     SetStatus(L"列表行数与已读取的仓库状态对不上，为避免暂存错文件，本次没有执行任何命令。点“刷新”后重试。");
     UpdateUi();
     return;
@@ -936,14 +1311,14 @@ void MainFrame::UnstageSelected() {
   if (!RequireStagingPrerequisites(L"取消暂存")) {
     return;
   }
-  const std::vector<int> rows = SelectedRows(*stagedList_);
+  const std::vector<int> rows = panel_->SelectedStagedRows();
   if (rows.empty()) {
     SetStatus(L"先在“已暂存的更改”里选中文件，再点“移出暂存区”；没有选中时不会取消全部。");
     UpdateUi();
     return;
   }
   const git::WorkspaceModel& model = state_.WorkspaceModel();
-  if (stagedList_->GetCount() != static_cast<unsigned int>(model.staged.size())) {
+  if (panel_->StagedRowCount() != static_cast<int>(model.staged.size())) {
     SetStatus(L"列表行数与已读取的仓库状态对不上，为避免取消错文件，本次没有执行任何命令。点“刷新”后重试。");
     UpdateUi();
     return;
@@ -974,7 +1349,7 @@ void MainFrame::StageAll() {
     return;
   }
   const git::WorkspaceModel& model = state_.WorkspaceModel();
-  if (unstagedList_->GetCount() != static_cast<unsigned int>(model.unstaged.size())) {
+  if (panel_->UnstagedRowCount() != static_cast<int>(model.unstaged.size())) {
     SetStatus(L"列表行数与已读取的仓库状态对不上，为避免按过期状态解释这次操作，本次没有执行任何命令。"
               L"点“刷新”后重试。");
     UpdateUi();
@@ -989,7 +1364,7 @@ void MainFrame::UnstageAll() {
     return;
   }
   const git::WorkspaceModel& model = state_.WorkspaceModel();
-  if (stagedList_->GetCount() != static_cast<unsigned int>(model.staged.size())) {
+  if (panel_->StagedRowCount() != static_cast<int>(model.staged.size())) {
     SetStatus(L"列表行数与已读取的仓库状态对不上，为避免按过期状态解释这次操作，本次没有执行任何命令。"
               L"点“刷新”后重试。");
     UpdateUi();
@@ -1086,10 +1461,326 @@ void MainFrame::CreateCommit() {
   UpdateUi();
 }
 
+bool MainFrame::RequireViewPrerequisites(std::wstring_view actionLabel) {
+  static_cast<void>(actionLabel);
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    SetStatus(L"Git 或仓库当前不可用，无法查看。请先确认路径并点“刷新”。");
+    UpdateUi();
+    return false;
+  }  if (tasks_.OperationInFlight()) {
+    // 命令窗口操作是单槽的：并发发起两次会让「哪个窗口对应哪一行」变得含糊。
+    SetStatus(L"已有一个命令窗口操作在进行，请等它结束后再双击查看。");
+    UpdateUi();
+    return false;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  if (repositoryRoot.empty() ||
+      !git::PathsEqualFolded(repositoryRoot, tasks_.Identity().workTreeRoot)) {
+    // 界面显示的条目属于「已经绑定过的那个工作区」：根与协调器身份不一致时，
+    // 哪怕只读命令也不能发出去，否则可能把上一个仓库的路径用到新仓库上。
+    SetStatus(L"仓库工作区已改变，请先点“刷新”再查看。");
+    UpdateUi();
+    return false;
+  }
+  return true;
+}
+
+void MainFrame::OnChangesDoubleClicked(git::ChangeSide side, int row) {
+  if (!RequireViewPrerequisites(L"查看差异")) {
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    SetStatus(L"这一轮仓库状态没有读成功，列表不可信。请点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const git::ChangeItem* shown = panel_->ItemAt(side, row);
+  if (shown == nullptr) {
+    SetStatus(L"这一行已不在当前列表里（内容刚被刷新），请重新选择后再双击。");
+    UpdateUi();
+    return;
+  }
+  const git::WorkspaceModel& model = state_.WorkspaceModel();
+  const std::vector<git::ChangeItem>& items =
+      side == git::ChangeSide::staged ? model.staged : model.unstaged;
+  const int rowCount =
+      side == git::ChangeSide::staged ? panel_->StagedRowCount() : panel_->UnstagedRowCount();
+  if (rowCount != static_cast<int>(items.size()) ||
+      static_cast<size_t>(row) >= items.size()) {
+    SetStatus(L"列表行数与已读取的仓库状态对不上，为避免看错文件，本次没有执行任何命令。点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const git::ChangeItem& item = items[static_cast<size_t>(row)];
+  if (item.path != shown->path || item.kind != shown->kind) {
+    SetStatus(L"这一行已经换成另一个文件，为避免看错文件，本次没有执行任何命令。请重新双击。");
+    UpdateUi();
+    return;
+  }
+
+  // 未跟踪文件没有「正常差异」，要先把档案本身问清楚（存在？可读？二进制？多大？）再决定显示什么。
+  // 已跟踪条目（含删除项）不需要这一步：差异由 Git 自己给出，程序不会去打开已不存在的路径。
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  git::WorktreeFileFacts facts;
+  if (item.kind == git::ChangeKind::untracked) {
+    facts = platform::ProbeWorktreeFileForPreview(
+        git::JoinWorktreeFilePath(repositoryRoot, item.path));
+  }
+  const git::DiffViewPlan plan = git::BuildDiffViewPlan(side, item, facts);
+  if (plan.kind == git::DiffViewKind::blocked) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.blockedReason + L"\n\n条目：" +
+        item.PathLabel();
+    ShowInfo(L"无法查看该条目", message);
+    SetStatus(L"未查看 " + item.PathLabel() + L"：" + plan.blockedReason);
+    UpdateUi();
+    return;
+  }
+
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
+  CommandLaunchOptions options;
+  options.policy = app::OperationExitPolicy::readOnlyView;
+  options.viewKind = plan.kind;
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 " + std::wstring(git::DiffViewKindLabel(plan.kind)) +
+                        L"（" + repositoryRoot + L"）：" + item.PathLabel() + L"，等待 Git 退出码…";
+  if (!LaunchCommandWindow(operation, options)) {
+    SetStatus(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    UpdateUi();
+  }
+}
+
+void MainFrame::OnHistoryDoubleClicked(int row) {
+  if (!RequireViewPrerequisites(L"查看提交")) {
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    SetStatus(L"这一轮仓库状态没有读成功，提交历史不可用。请点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const std::vector<git::CommitItem>& commits = state_.WorkspaceModel().recentCommits;
+  const git::CommitItem* shown = panel_->CommitItemAt(row);
+  if (panel_->HistoryRowCount() != static_cast<int>(commits.size()) || shown == nullptr) {
+    SetStatus(L"列表行数与已读取的提交历史对不上，为避免看错提交，本次没有执行任何命令。点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const git::CommitItem& item = commits[static_cast<size_t>(row)];
+  // 两头核对：显示的那一条和模型的那一条必须是同一个对象 ID；命令只用完整 ID。
+  if (shown->objectId != item.objectId) {
+    SetStatus(L"这一行已经换成另一条提交，为避免看错提交，本次没有执行任何命令。请重新双击。");
+    UpdateUi();
+    return;
+  }
+  const git::CommitShowPlan plan = git::BuildCommitShowPlan(item);
+  if (!plan.allowed) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.refusalReason +
+        L"\n\n提交：" + git::ShortObjectId(item.objectId) + L" " + item.summary;
+    ShowInfo(L"无法查看该提交", message);
+    SetStatus(L"未查看提交 " + git::ShortObjectId(item.objectId) + L"：对象 ID 不符合约定。");
+    UpdateUi();
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
+  CommandLaunchOptions options;
+  // 退出码按常规判定：git show 读到对象就是 0，报错误非 0——不像 --no-index 那样有「1 也算正常」的语义。
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 git show（" + repositoryRoot + L"）：查看提交 " +
+                        git::ShortObjectId(item.objectId) + L"「" + item.summary +
+                        L"」，等待 Git 退出码…";
+  if (!LaunchCommandWindow(operation, options)) {
+    SetStatus(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    UpdateUi();
+  }
+}
+
+void MainFrame::OnFileDoubleClicked(int row) {
+  if (!RequireViewPrerequisites(L"查看差异")) {
+    return;
+  }
+  if (state_.Workspace().status != git::WorkspaceLoadStatus::loaded) {
+    SetStatus(L"这一轮仓库状态没有读成功，提交历史不可用。请点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const git::CommitItem* commit = nullptr;
+  const git::ChangeItem* change = nullptr;
+  if (!panel_->CommitFileAt(row, &commit, &change)) {
+    SetStatus(L"这一行已不在当前「文件变化」清单里（清单刚被刷新），请重新选择提交后再双击。");
+    UpdateUi();
+    return;
+  }
+  // 两头核对：显示行数与已落地清单条数、清单所属提交，都必须是同一份。
+  if (panel_->FilesRowCount() != panel_->CommitFilesCount() ||
+      commit->objectId != panel_->CommitFilesCommitId()) {
+    SetStatus(L"「文件变化」的显示行数与已读取的内容对不上，为避免看错文件，本次没有执行任何命令。"
+              L"点“刷新”后重试。");
+    UpdateUi();
+    return;
+  }
+  const git::CommitFileDiffPlan plan = git::BuildCommitFileDiffPlan(*commit, *change);
+  if (!plan.allowed) {
+    const std::wstring message =
+        L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + plan.refusalReason + L"\n\n条目：" +
+        change->PathLabel();
+    ShowInfo(L"无法查看该文件", message);
+    SetStatus(L"未查看 " + change->PathLabel() + L"：" + plan.refusalReason);
+    UpdateUi();
+    return;
+  }
+  const std::wstring repositoryRoot = state_.Repo().detection.root;
+  git::CommandWindowOperation operation =
+      git::MakeCommandWindowOperation(plan.operationId, plan.displayName, state_.Git().path,
+                                      repositoryRoot, plan.arguments);
+  CommandLaunchOptions options;
+  // 与双击提交同一条退出口径：git show 读到对象就是 0，报错误非 0。
+  options.scopeNotice = plan.notice;
+  options.startedNote = L"已在命令窗口执行 git show（" + repositoryRoot + L"）：查看提交 " +
+                        git::ShortObjectId(commit->objectId) + L" 里的 " + change->PathLabel() +
+                        L"，等待 Git 退出码…";
+  if (!LaunchCommandWindow(operation, options)) {
+    SetStatus(L"这次查看没有启动：命令窗口未能打开，或启动失败（原因见上一行状态）。");
+    UpdateUi();
+  }
+}
+
+void MainFrame::LaunchStatusOperation() {
+  if (!state_.GitUsable() || !state_.RepoUsable()) {
+    return;
+  }
+  if (tasks_.OperationInFlight()) {
+    SetStatus(L"已有一个命令窗口操作在进行，请等它结束。");
+    UpdateUi();
+    return;
+  }
+  const std::wstring gitExe = state_.Git().path;
+  std::wstring repository = state_.Repo().detection.root;
+  if (repository.empty()) {
+    repository = state_.Info().repoPath;
+  }
+  // 只读地查看工作区状态；参数按数组提交，不进任何 shell 字符串。
+  git::CommandWindowOperation operation = git::MakeCommandWindowOperation(
+      L"status", L"status", gitExe, repository, {L"status"});
+  CommandLaunchOptions options;
+  options.startedNote =
+      L"已在命令窗口启动 git status（" + repository + L"），等待 Git 退出码…";
+  static_cast<void>(LaunchCommandWindow(operation, options));
+}
+
+void MainFrame::CopyCommitDetailToClipboard() {
+  const std::wstring text = panel_->CommitDetailText();
+  if (text.empty()) {
+    SetStatus(L"现在没有可复制的提交详情：请先在「最近提交」里选中一条，并等它读出来。");
+    UpdateUi();
+    return;
+  }
+  bool copied = false;
+  if (wxTheClipboard->Open()) {
+    copied = wxTheClipboard->SetData(new wxTextDataObject(FromWide(text)));
+    wxTheClipboard->Close();
+  }
+  if (!copied) {
+    SetStatus(L"没能复制到剪贴板。 面板上的文字仍可以直接选中后用 Ctrl+C。");
+    UpdateUi();
+    return;
+  }
+  SetStatus(L"已把这条提交的完整信息复制到剪贴板（只是复制，没有执行任何命令）。");
+  UpdateUi();
+}
+
+void MainFrame::OpenTerminalDialog() {
+  const platform::TerminalSelection current = commandWindows_->DescribeTerminalSelection();
+  if (current.candidates.size() <= 1) {
+    // Windows 只有控制台辅助入口一种候选：没有可选项，如实说明，不摆一个点了没反应的框。
+    ShowInfo(L"终端选择",
+             current.guidance.empty()
+                 ? L"本平台的命令窗口固定使用控制台辅助入口，没有可替换的终端模拟器实现。"
+                 : current.guidance);
+    return;
+  }
+
+  wxDialog dialog(this, wxID_ANY, FromWide(L"命令窗口终端选择"), wxDefaultPosition, wxDefaultSize,
+                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* sizer = new wxBoxSizer(wxVERTICAL);
+  wxString choiceHint;
+  if (!current.usable) {
+    choiceHint = FromWide(L"当前没有可用终端：" +
+                          (current.failureReason.empty() ? current.guidance : current.failureReason));
+  } else {
+    choiceHint = FromWide(L"当前使用：" + current.selected.programPath);
+  }
+  sizer->Add(new wxStaticText(&dialog, wxID_ANY, choiceHint), 0, wxALL, 10);
+  if (!current.note.empty()) {
+    sizer->Add(new wxStaticText(&dialog, wxID_ANY, FromWide(current.note)), 0, wxLEFT | wxRIGHT, 10);
+  }
+  wxArrayString labels;
+  for (const platform::TerminalCandidate& candidate : current.candidates) {
+    std::wstring label = std::wstring(platform::TerminalAdapterDisplayName(candidate.kind));
+    label += L" — " + candidate.programPath;
+    if (!candidate.discoveredAs.empty() && candidate.discoveredAs != candidate.programPath) {
+      label += L"（经 " + candidate.discoveredAs + L"）";
+    }
+    labels.Add(FromWide(label));
+  }
+  auto* radio = new wxRadioBox(&dialog, wxID_ANY, FromWide(L"显式选择终端"), wxDefaultPosition,
+                               wxDefaultSize, labels, 1, wxRA_SPECIFY_COLS);
+  sizer->Add(radio, 1, wxEXPAND | wxALL, 10);
+  auto* fallback = new wxCheckBox(&dialog, wxID_ANY,
+                                  FromWide(L"显式选择不可用时回退到其他终端"));
+  fallback->SetValue(commandWindows_->GetTerminalPreferences().allowFallback);
+  sizer->Add(fallback, 0, wxLEFT | wxRIGHT, 10);
+  sizer->Add(
+      new wxStaticText(
+          &dialog, wxID_ANY,
+          FromWide(L"选择只对本次运行生效；终端设置的持久化尚未迁移到统一界面。")),
+      0, wxALL, 10);
+  auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+  buttons->AddStretchSpacer();
+  buttons->Add(new wxButton(&dialog, wxID_OK, FromWide(L"确定")), 0, wxRIGHT, 6);
+  buttons->Add(new wxButton(&dialog, wxID_CANCEL, FromWide(L"取消")), 0);
+  sizer->Add(buttons, 0, wxEXPAND | wxALL, 10);
+  dialog.SetSizerAndFit(sizer);
+  if (current.usable) {
+    for (size_t i = 0; i < current.candidates.size(); ++i) {
+      if (current.candidates[i].programPath == current.selected.programPath) {
+        radio->SetSelection(static_cast<int>(i));
+        break;
+      }
+    }
+  }
+  if (dialog.ShowModal() != wxID_OK) {
+    return;
+  }
+  const int selection = radio->GetSelection();
+  if (selection < 0 || static_cast<size_t>(selection) >= current.candidates.size()) {
+    return;
+  }
+  const platform::TerminalCandidate& chosen = current.candidates[static_cast<size_t>(selection)];
+  platform::TerminalPreferences prefs;
+  prefs.preferredKind = chosen.kind;
+  prefs.preferredProgramPath = chosen.programPath;
+  prefs.allowFallback = fallback->GetValue();
+  std::wstring refusal;
+  if (!commandWindows_->SetTerminalPreferences(prefs, &refusal)) {
+    ShowWarning(L"终端选择", refusal);
+    return;
+  }
+  SetStatus(L"终端选择已更新（本会话生效）：" + chosen.programPath +
+            L"；下一次命令窗口操作起使用。终端设置的持久化尚未迁移。");
+  UpdateUi();
+}
+
 void MainFrame::SetStatus(std::wstring note) {
   state_.SetStatusNote(std::move(note));
   if (statusText_ != nullptr) {
-    statusText_->SetLabel(FromWide(state_.StatusNote()));
+    SetLabelIfChanged(statusText_, FromWide(state_.StatusNote()));
     const int width = GetClientSize().GetWidth() > 200 ? GetClientSize().GetWidth() - 40 : 900;
     statusText_->Wrap(width);
     Layout();
@@ -1099,7 +1790,7 @@ void MainFrame::SetStatus(std::wstring note) {
 void MainFrame::SetFormNote(std::wstring note) {
   state_.SetFormNote(std::move(note));
   if (formNoteText_ != nullptr) {
-    formNoteText_->SetLabel(FromWide(state_.FormNote()));
+    SetLabelIfChanged(formNoteText_, FromWide(state_.FormNote()));
     const int width = GetClientSize().GetWidth() > 200 ? GetClientSize().GetWidth() - 40 : 900;
     formNoteText_->Wrap(width);
     Layout();
@@ -1209,6 +1900,7 @@ bool MainFrame::LaunchCommandWindow(const git::CommandWindowOperation& operation
   activeMessageFile_ = options.messageFile;
   activeCommitOperation_ = options.commitOperation;
   activeCommittedForm_ = options.committedForm;
+  activeViewKind_ = options.viewKind;
   operationTimer_.Start(static_cast<int>(kOperationPollMs));
   SetStatus(options.startedNote);
   UpdateUi();
@@ -1336,30 +2028,7 @@ void MainFrame::OnClose(wxCloseEvent& event) {
     return;
   }
   closing_ = true;
-  refreshTimer_.Stop();
-  operationTimer_.Stop();
-  if (completionPump_) {
-    completionPump_->Stop();
-  }
-  gitWorker_.BeginStop();
-  repoWorker_.BeginStop();
-  workspaceWorker_.BeginStop();
-  authorWorker_.BeginStop();
-  commitFlow_.BeginStop();
-  gitWorker_.Join();
-  repoWorker_.Join();
-  workspaceWorker_.Join();
-  authorWorker_.Join();
-  commitFlow_.JoinWorkers();
-  if (commitFlow_.Active()) {
-    commitFlow_.ReleaseAttempt(true);
-  }
-  if (commandWindows_) {
-    commandWindows_->Shutdown();
-  }
-  if (dispatcher_) {
-    dispatcher_->Close();
-  }
+  StopWorkers();
   event.Skip();
 }
 

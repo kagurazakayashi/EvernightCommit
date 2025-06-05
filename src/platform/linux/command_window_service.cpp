@@ -37,6 +37,21 @@ public:
 
   [[nodiscard]] size_t ActiveCount() const override { return runner_.ActiveCount(); }
 
+  [[nodiscard]] bool SetTerminalPreferences(const TerminalPreferences& preferences,
+                                            std::wstring* refusal) override {
+    static_cast<void>(refusal);
+    preferences_ = preferences;
+    return true;
+  }
+
+  [[nodiscard]] TerminalPreferences GetTerminalPreferences() const override {
+    return preferences_;
+  }
+
+  [[nodiscard]] TerminalSelection DescribeTerminalSelection() override {
+    return DiscoverAndSelectTerminal(preferences_);
+  }
+
 private:
   TerminalPreferences preferences_;
   LinuxCommandWindowRunner runner_;

@@ -27,6 +27,7 @@ set(GC_TEST_SOURCES_PORTABLE
   git_environment_tests.cpp
   git_locator_tests.cpp
   git_probe_tests.cpp
+  list_rebuild_tests.cpp
   list_view_memory_tests.cpp
   machine_output_completeness_tests.cpp
   main_thread_dispatch_tests.cpp

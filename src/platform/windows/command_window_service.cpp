@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "platform/terminal.h"
 #include "platform/windows/command_window_runner.h"
 
 namespace gc::platform {
@@ -36,6 +37,26 @@ public:
   }
 
   [[nodiscard]] size_t ActiveCount() const override { return runner_.ActiveCount(); }
+
+  // Windows 的命令窗口固定走控制台辅助入口（AllocConsole），没有可替换的终端模拟器实现：
+  // 这里如实拒绝，绝不静默收下偏好造成「设置成功」的假象。
+  [[nodiscard]] bool SetTerminalPreferences(const TerminalPreferences& preferences,
+                                            std::wstring* refusal) override {
+    static_cast<void>(preferences);
+    if (refusal != nullptr) {
+      *refusal = L"Windows 的命令窗口固定使用控制台辅助入口，本机没有可替换的终端模拟器实现；"
+                 L"终端选择只在 Linux 生效。";
+    }
+    return false;
+  }
+
+  [[nodiscard]] TerminalPreferences GetTerminalPreferences() const override {
+    return TerminalPreferences{};
+  }
+
+  [[nodiscard]] TerminalSelection DescribeTerminalSelection() override {
+    return DiscoverAndSelectTerminal(TerminalPreferences{});
+  }
 
 private:
   CommandWindowRunner runner_;

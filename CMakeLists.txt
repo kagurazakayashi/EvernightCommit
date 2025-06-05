@@ -7,7 +7,7 @@ project(EvernightCommit
 
 # ---------- 平台与架构判定 ----------
 # 交付范围只有两个已验证形态：Windows x64（MSVC + Windows SDK，Win32 过渡界面 + 完整功能）与
-# Linux x86_64（GCC，统一 wxWidgets 界面 evernight_commit_wx，当前接通暂存与创建提交）。
+# Linux x86_64（GCC，统一 wxWidgets 界面 evernight_commit_wx，当前接通仓库浏览、只读查看、暂存与创建提交）。
 # RC 资源语言只在 Windows 需要：Linux 上没有 .rc，也没有 app.manifest。
 if(WIN32)
   set(GC_PLATFORM "windows")
@@ -143,6 +143,7 @@ endif()
 add_library(gc_core STATIC
   src/app/app_state.cpp
   src/app/commit_form_session.cpp
+  src/app/list_rebuild.cpp
   src/app/list_view_memory.cpp
   src/app/operation_conclusions.cpp
   src/app/operation_gate.cpp
@@ -334,14 +335,14 @@ else()
   target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
   message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"
-                 "（统一界面 evernight_commit_wx 已接通暂存与创建提交；"
+                 "（统一界面 evernight_commit_wx 已接通仓库浏览、只读查看、暂存与创建提交；"
                  "终端设置与持久化仍无实现）")
 endif()
 
 # ---------- wxWidgets 目标 ----------
 # gc_wx_bootstrap 的目的只有一个：把「依赖怎么来、怎么链接、能不能真起一个窗口」这三件事
 # 验到可复核的程度上，不夹带任何业务流程。
-# evernight_commit_wx 是统一的业务界面（当前：暂存 + 创建提交），Windows 与 Linux 共用同一套
+# evernight_commit_wx 是统一的业务界面（当前：仓库浏览、只读查看、暂存 + 创建提交），Windows 与 Linux 共用同一套
 # 流程与控件代码；Windows 侧的 wx 依赖获取没有机器可验，故 GC_WITH_WX 在 Windows 默认 OFF。
 if(GC_WITH_WX)
   include("${CMAKE_CURRENT_LIST_DIR}/cmake/GcWxWidgets.cmake")
@@ -356,7 +357,7 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
     set_target_properties(gc_wx_bootstrap PROPERTIES WIN32_EXECUTABLE TRUE)
   endif()
 
-  # ---------- 统一 wxWidgets 界面（暂存 + 创建提交） ----------
+  # ---------- 统一 wxWidgets 界面（仓库浏览、只读查看、暂存 + 创建提交） ----------
   # 业务流程复用 gc_ui_flows 与 platform/ 契约；这里只写窗口、控件与事件。
   if(WIN32)
     set(_gc_wx_platform_lib gc_platform)
@@ -364,7 +365,9 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
     set(_gc_wx_platform_lib gc_platform_linux)
   endif()
   add_executable(evernight_commit_wx
+    src/ui/wx/app_icon.cpp
     src/ui/wx/app_main.cpp
+    src/ui/wx/changes_panel.cpp
     src/ui/wx/commit_form_panel.cpp
     src/ui/wx/main_frame.cpp)
   target_include_directories(evernight_commit_wx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -376,8 +379,12 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
   set_target_properties(evernight_commit_wx PROPERTIES OUTPUT_NAME "evernight_commit_wx")
   if(WIN32)
     set_target_properties(evernight_commit_wx PROPERTIES WIN32_EXECUTABLE TRUE)
+    # 与 Win32 主程序同一份 manifest（DPI 感知与 Unicode 声明）：wx 目标在 Windows 上
+    # 同样需要它才能按每显示器 DPI 渲染。链接方式没有 Windows 机器可验，见 docs/building.md。
+    target_link_options(evernight_commit_wx PRIVATE
+      "/MANIFEST:EMBED" "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.manifest")
   endif()
-  message(STATUS "[wx] 统一界面目标：evernight_commit_wx（暂存 + 创建提交）")
+  message(STATUS "[wx] 统一界面目标：evernight_commit_wx（仓库浏览 + 只读查看 + 暂存 + 创建提交）")
 endif()
 
 # ---------- 测试 ----------

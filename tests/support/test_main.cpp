@@ -140,6 +140,7 @@ constexpr const char* kPureFiles[] = {
     "git_locator_tests.cpp",
     "git_probe_tests.cpp",
     "layout_tests.cpp",
+    "list_rebuild_tests.cpp",
     "list_view_memory_tests.cpp",
     "main_thread_dispatch_tests.cpp",
     "local_time_tests.cpp",
