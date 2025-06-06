@@ -126,7 +126,8 @@ std::wstring_view RestoreFeasibilityLabel(RestoreFeasibility feasibility) noexce
   return L"未能判定";
 }
 
-RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQueries& queries) {
+RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQueries& queries,
+                             ShellDialect copyDialect) {
   RestorePlan plan;
   plan.operationId = L"restore-ref";
   plan.displayName = L"按记录恢复引用";
@@ -251,7 +252,7 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
   if (!SameObjectId(currentOid, clues.expectedCurrentOid)) {
     // 分支还在，但已经不在这次操作留下的位置上——现场已变。给一条带预期旧值的命令供复制，
     // 但明确标注：照发也会被 Git 用预期旧值挡下，因此这里不自动执行。
-    const RestoreCopyText copy = DescribeRestoreCopy(clues, ShellDialect::cmdInteractive);
+    const RestoreCopyText copy = DescribeRestoreCopy(clues, copyDialect);
     plan.targetRef = clues.branchRef;
     plan.expectedOldObjectId = clues.expectedCurrentOid;
     plan.newObjectId = clues.isRootDeletion ? std::wstring() : clues.moveToOid;
@@ -317,7 +318,7 @@ RestorePlan BuildRestorePlan(const RestoreClues& clues, const RestorePreflightQu
   // ---- feasible：产出一条与撤回同族的、带预期旧值的原子命令 ----
   // 参数、预览、可粘贴文本、字段清单一律取自 DescribeRestoreCopy：确认框里说的那一串、
   // 实际发出的那一条、以及界面上「复制恢复命令」复制的那一份，从此是同一份构造。
-  const RestoreCopyText copy = DescribeRestoreCopy(clues, ShellDialect::cmdInteractive);
+  const RestoreCopyText copy = DescribeRestoreCopy(clues, copyDialect);
   if (!copy.cluesUsable) {
     return conclude(RestoreFeasibility::undetermined, copy.refusal);
   }

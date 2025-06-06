@@ -248,6 +248,21 @@ HistoryStorePaths ResolveHistoryStorePaths(std::wstring_view baseDirectoryOverri
   return paths;
 }
 
+HistoryStorageAvailability DescribeHistoryStorageAvailability() {
+  HistoryStorageAvailability availability;
+  availability.crossSessionPersistence = true;
+  const HistoryStorePaths paths = ResolveHistoryStorePaths();
+  availability.usable = paths.valid;
+  if (!paths.valid) {
+    availability.reason = paths.failureReason.empty()
+                              ? std::wstring(L"当前用户的应用数据目录取不到，操作历史不会写盘。")
+                              : paths.failureReason;
+    return availability;
+  }
+  availability.location = app::DescribeHistoryStoragePath(paths.directory, kHistoryFileName);
+  return availability;
+}
+
 HistoryReadResult ReadHistoryFile(const std::wstring& historyFile) {
   HistoryReadResult result;
   const DWORD attributes = ::GetFileAttributesW(historyFile.c_str());

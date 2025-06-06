@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,7 @@
 #include "git/commit_history.h"
 #include "git/commit_identity.h"
 #include "git/repository.h"
+#include "git/shell_text.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
 #include "platform/git_discovery.h"
@@ -35,8 +37,10 @@
 #include "platform/local_time.h"
 #include "platform/path.h"
 #include "platform/scratch_files.h"
+#include "platform/shell_dialect.h"
 #include "platform/terminal.h"
 #include "ui/wx/app_icon.h"
+#include "ui/wx/history_dialog.h"
 #include "ui/wx/wx_text.h"
 
 namespace gc::ui::wx {
@@ -49,11 +53,16 @@ constexpr uint64_t kAuthorConfigSource = 4;
 constexpr uint64_t kCommitProbeSource = 5;
 constexpr uint64_t kCommitChangesSource = 6;
 constexpr uint64_t kCommitDetailSource = 7;
+constexpr uint64_t kUndoProbeSource = 8;
+constexpr uint64_t kUndoRecheckSource = 9;
+constexpr uint64_t kRestoreProbeSource = 10;
+constexpr uint64_t kRestoreRecheckSource = 11;
 
 constexpr int kRefreshTimerId = wxID_HIGHEST + 101;
 constexpr int kOperationTimerId = wxID_HIGHEST + 102;
 constexpr int kGitVerifyTimerId = wxID_HIGHEST + 103;
 constexpr int kRepoDetectTimerId = wxID_HIGHEST + 104;
+constexpr int kHistorySaveTimerId = wxID_HIGHEST + 105;
 
 // 超时与防抖取值与 Win32 过渡实现（ui/commands.h）逐项对齐：那是业务承诺，不是实现细节。
 constexpr unsigned long kGitVerifyTimeoutMs = 3000;
@@ -65,6 +74,8 @@ constexpr unsigned long kCommitDetailTimeoutMs = 8000;
 constexpr unsigned long kRefreshDebounceMs = 200;
 constexpr unsigned long kInputDebounceMs = 500;
 constexpr unsigned long kOperationPollMs = 500;
+// 历史落账防抖与 Win32 过渡实现同值：一次终态、逐目标核实追加、开关切换都只重排这一个定时器。
+constexpr unsigned long kHistorySaveDebounceMs = 1200;
 
 // 尚未迁移到统一界面的入口共用的说明（不接空实现，点了也不会有任何动作）。
 constexpr const wchar_t* kNotMigratedSuffix =
@@ -86,7 +97,8 @@ MainFrame::MainFrame()
       refreshTimer_(this, kRefreshTimerId),
       operationTimer_(this, kOperationTimerId),
       gitVerifyTimer_(this, kGitVerifyTimerId),
-      repoDetectTimer_(this, kRepoDetectTimerId) {
+      repoDetectTimer_(this, kRepoDetectTimerId),
+      historySaveTimer_(this, kHistorySaveTimerId) {
   const wxIcon icon = MakeAppIcon();
   if (icon.IsOk()) {
     SetIcon(icon);
@@ -105,12 +117,15 @@ MainFrame::MainFrame()
   commitChangesWorker_.SetCompletionDispatcher(dispatcher_, kCommitChangesSource);
   commitDetailWorker_.SetCompletionDispatcher(dispatcher_, kCommitDetailSource);
   commitFlow_.SetCompletionDispatcher(dispatcher_, kCommitProbeSource);
+  undoFlow_.SetCompletionDispatcher(dispatcher_, kUndoProbeSource, kUndoRecheckSource);
+  restoreFlow_.SetCompletionDispatcher(dispatcher_, kRestoreProbeSource, kRestoreRecheckSource);
 
   commandWindows_ = platform::MakeCommandWindowService();
   commandWindows_->SweepStaleOperationDirectories();
 
   BuildUi();
   BindEvents();
+  InitializeOperationHistory();
   SetMinSize(wxSize(900, 700));
   Centre();
 
@@ -132,6 +147,7 @@ void MainFrame::StopWorkers() {
   operationTimer_.Stop();
   gitVerifyTimer_.Stop();
   repoDetectTimer_.Stop();
+  historySaveTimer_.Stop();
   if (completionPump_) {
     completionPump_->Stop();
   }
@@ -142,6 +158,8 @@ void MainFrame::StopWorkers() {
   commitChangesWorker_.BeginStop();
   commitDetailWorker_.BeginStop();
   commitFlow_.BeginStop();
+  undoFlow_.BeginStop();
+  restoreFlow_.BeginStop();
   gitWorker_.Join();
   repoWorker_.Join();
   workspaceWorker_.Join();
@@ -149,6 +167,8 @@ void MainFrame::StopWorkers() {
   commitChangesWorker_.Join();
   commitDetailWorker_.Join();
   commitFlow_.JoinWorkers();
+  undoFlow_.JoinWorkers();
+  restoreFlow_.JoinWorkers();
   if (commitFlow_.Active()) {
     commitFlow_.ReleaseAttempt(true);
   }
@@ -242,9 +262,6 @@ void MainFrame::BuildUi() {
                            notMigrated);
   pullButton_->Enable(false);
   pullButton_->SetToolTip(FromWide(L"pull 尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
-  undoCommitButton_->Enable(false);
-  undoCommitButton_->SetToolTip(
-      FromWide(L"撤回最近提交尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
   pushButton_->Enable(false);
   pushButton_->SetToolTip(FromWide(L"推送尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
   conflictViewButton_->Enable(false);
@@ -259,21 +276,27 @@ void MainFrame::BuildUi() {
   enterSubmoduleButton_->SetToolTip(
       FromWide(L"子模块导航尚未迁移到统一界面（开发中）。\r\n") + notMigrated);
   returnToParentButton_->SetToolTip(enterSubmoduleButton_->GetToolTip());
-  historyBrowseButton_->Enable(false);
-  historyBrowseButton_->SetToolTip(
-      FromWide(L"操作历史（查看/导出/清除/按记录恢复）尚未迁移到统一界面（开发中）。\r\n") +
-      notMigrated);
+  historyBrowseButton_->Enable(true);
+  historyBrowseButton_->SetToolTip(FromWide(
+      L"操作历史：查看本程序做过的写操作（含启动与终态、逐目标核实、引用级恢复线索）。\r\n"
+      L"选中一条「引用级可回退」的记录可重新预检现状后确认恢复：只移动那一个本地分支引用，"
+      L"索引与工作区一字不动，远端不受影响；绝不自动 force push / hard reset / clean。"));
+  undoCommitButton_->SetToolTip(FromWide(
+      L"把当前分支的最新一次提交挪回它的第一父提交（软撤回）：只移动那一个分支引用，"
+      L"索引与工作区一个字节都不动，原提交的改动会留在「已暂存的更改」里。\r\n"
+      L"不是 revert，也不是 reset --hard；绝不触碰远端。点击后先只读预检，确认后再复核一次。"));
   persistRecordsCheck_->Enable(false);
   persistDraftsCheck_->Enable(false);
   clearPrefsButton_->Enable(false);
-  historyRecordCheck_->Enable(false);
   persistRecordsCheck_->SetToolTip(FromWide(
       L"持久化（最近仓库/Git 程序/布局/草稿）尚未迁移到统一界面（开发中）：\r\n"
       L"这里不读写任何用户数据文件。\r\n") + notMigrated);
   persistDraftsCheck_->SetToolTip(persistRecordsCheck_->GetToolTip());
   clearPrefsButton_->SetToolTip(persistRecordsCheck_->GetToolTip());
-  historyRecordCheck_->SetToolTip(
-      FromWide(L"操作历史开关尚未迁移到统一界面（开发中）：不记录、不写盘。\r\n") + notMigrated);
+  historyRecordCheck_->SetToolTip(FromWide(
+      L"记录本程序启动的写操作（含启动与终态、逐目标核实与引用级恢复线索）。\r\n"
+      L"默认关闭；关闭时一个字节都不写。Windows 落在当前用户的应用数据目录；"
+      L"Linux 在后续步骤接入持久化之前只保存在本次运行的内存里，关闭界面即丢失。"));
 
   topPanel->SetSizer(top);
   frameSizer->Add(topPanel, 0, wxEXPAND);
@@ -410,6 +433,24 @@ void MainFrame::BindEvents() {
   panel_->unstageSelectedButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageSelected(); });
   panel_->unstageAllButton()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UnstageAll(); });
   createCommit_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { CreateCommit(); });
+  undoCommitButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { UndoLastCommit(); });
+  historyBrowseButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowOperationHistory(); });
+  historyRecordCheck_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent& event) {
+    historyLog_.historyEnabled = event.IsChecked();
+    if (historyWritable_) {
+      historyIntents_.policy = true;
+      ScheduleHistorySave();
+      SetFormNote(event.IsChecked()
+                      ? L"已开始记录操作历史：" + HistoryStorageLine()
+                      : L"已停止记录操作历史：不再新增记录，已有的保留不动。");
+    } else {
+      SetFormNote(event.IsChecked()
+                      ? L"已开始记录操作历史，但只保存在本次运行的内存里：" +
+                            historyStorage_.reason + L"（开关与已有记录都不会写盘。）"
+                      : L"已停止记录操作历史：本次运行不再新增内存记录。");
+    }
+    UpdateUi();
+  });
 
   panel_->onStagingSelectionChanged = [this] {
     if (panel_->UpdatingLists()) {
@@ -449,6 +490,7 @@ void MainFrame::BindEvents() {
   operationTimer_.Bind(wxEVT_TIMER, &MainFrame::OnOperationTimer, this, kOperationTimerId);
   gitVerifyTimer_.Bind(wxEVT_TIMER, &MainFrame::OnGitVerifyDebounce, this, kGitVerifyTimerId);
   repoDetectTimer_.Bind(wxEVT_TIMER, &MainFrame::OnRepoDetectDebounce, this, kRepoDetectTimerId);
+  historySaveTimer_.Bind(wxEVT_TIMER, &MainFrame::OnHistorySaveTimer, this, kHistorySaveTimerId);
   Bind(wxEVT_CLOSE_WINDOW, &MainFrame::OnClose, this);
 }
 
@@ -561,6 +603,14 @@ void MainFrame::HandleNotice(const platform::MainThreadDispatcher::Notice& notic
     OnCommitChangesCompleted(notice.serial);
   } else if (notice.sourceId == kCommitDetailSource) {
     OnCommitDetailCompleted(notice.serial);
+  } else if (notice.sourceId == kUndoProbeSource) {
+    OnUndoProbeCompleted(notice.serial);
+  } else if (notice.sourceId == kUndoRecheckSource) {
+    OnUndoRecheckCompleted(notice.serial);
+  } else if (notice.sourceId == kRestoreProbeSource) {
+    OnRestoreProbeCompleted(notice.serial);
+  } else if (notice.sourceId == kRestoreRecheckSource) {
+    OnRestoreRecheckCompleted(notice.serial);
   }
 }
 
@@ -1014,6 +1064,26 @@ void MainFrame::OnCommitProbeCompleted(uint64_t serial) {
   UpdateUi();
 }
 
+void MainFrame::OnUndoProbeCompleted(uint64_t serial) {
+  undoFlow_.OnProbeCompleted(*this, CaptureOperationContext(), serial);
+  UpdateUi();
+}
+
+void MainFrame::OnUndoRecheckCompleted(uint64_t serial) {
+  undoFlow_.OnRecheckCompleted(*this, CaptureOperationContext(), serial);
+  UpdateUi();
+}
+
+void MainFrame::OnRestoreProbeCompleted(uint64_t serial) {
+  restoreFlow_.OnProbeCompleted(*this, CaptureOperationContext(), serial);
+  UpdateUi();
+}
+
+void MainFrame::OnRestoreRecheckCompleted(uint64_t serial) {
+  restoreFlow_.OnRecheckCompleted(*this, CaptureOperationContext(), serial);
+  UpdateUi();
+}
+
 void MainFrame::ApplyAuthorDefaultIfAllowed() {
   if (!formSession_.AcceptsAuthorDefault()) {
     return;
@@ -1080,6 +1150,9 @@ void MainFrame::OnOperationTimer(wxTimerEvent&) {
   if (!commandWindows_->DescribeOperation(activeRunnerId_, &status, &snapshot)) {
     // 执行器已经不认识这次操作：完成通知/结果都不可能再回来。按「结果未知」释放槽位，
     // 绝不自动重发，也绝不把未知说成成功或失败。
+    const bool restoreStepInProgress = activeRestoreOperation_;
+    const std::wstring inFlightHistoryId =
+        activeHistoryRecording_ ? activeHistoryRecordId_ : std::wstring();
     const app::OperationOutcome outcome =
         tasks_.ForgetOperation(activeOperationSerial_, L"执行器已不再认识这次操作（结果未知）");
     platform::RemoveNulPathspecFile(activePathspecFile_);
@@ -1087,7 +1160,15 @@ void MainFrame::OnOperationTimer(wxTimerEvent&) {
     if (activeCommitOperation_) {
       commitFlow_.OnCommandSettled(*this, false, activeCommittedForm_);
     }
+    if (restoreStepInProgress) {
+      // 恢复的那条 update-ref 没拿到终态就是「结果未知」：控制器放开流程状态，
+      // 既不说成功也不说失败，更不自动重发。
+      restoreFlow_.Forget();
+    }
     SetStatus(outcome.note);
+    // 同一条在途记录补成「结果未知」：不是成功、不是失败，也不是「已撤销」。
+    // 排在结论写进状态之后，补记失败那句会附在它后面并列。
+    MarkHistoryRecordUnknown(inFlightHistoryId, outcome.note);
     activeOperationSerial_ = 0;
     activeRunnerId_ = 0;
     activePathspecFile_.clear();
@@ -1095,6 +1176,13 @@ void MainFrame::OnOperationTimer(wxTimerEvent&) {
     activeCommitOperation_ = false;
     activeCommittedForm_ = {};
     activeViewKind_.reset();
+    activeUndoOperation_ = false;
+    activeRestoreHint_.clear();
+    activeRestoreOperation_ = false;
+    activeHistoryCapture_ = {};
+    activeHistoryStartedEpoch_ = 0;
+    activeHistoryRecordId_.clear();
+    activeHistoryRecording_ = false;
     operationTimer_.Stop();
     UpdateUi();
     ScheduleRefreshSoon();
@@ -1117,6 +1205,14 @@ void MainFrame::FinishActiveOperation(const platform::CommandWindowResult& resul
   const bool commitOperation = activeCommitOperation_;
   const git::CommitFormData committedForm = activeCommittedForm_;
   const std::optional<git::DiffViewKind> viewKind = activeViewKind_;
+  const bool undoOperation = activeUndoOperation_;
+  const std::wstring restoreHint = activeRestoreHint_;
+  const bool restoreOperation = activeRestoreOperation_;
+  const app::HistoryCapture historyCapture = activeHistoryCapture_;
+  const long long historyStartedEpoch = activeHistoryStartedEpoch_;
+  const std::wstring historyRecordId = activeHistoryRecordId_;
+  const bool historyRecording = activeHistoryRecording_;
+
   activeOperationSerial_ = 0;
   activeRunnerId_ = 0;
   activePathspecFile_.clear();
@@ -1124,6 +1220,13 @@ void MainFrame::FinishActiveOperation(const platform::CommandWindowResult& resul
   activeCommitOperation_ = false;
   activeCommittedForm_ = {};
   activeViewKind_.reset();
+  activeUndoOperation_ = false;
+  activeRestoreHint_.clear();
+  activeRestoreOperation_ = false;
+  activeHistoryCapture_ = {};
+  activeHistoryStartedEpoch_ = 0;
+  activeHistoryRecordId_.clear();
+  activeHistoryRecording_ = false;
   operationTimer_.Stop();
 
   if (commitOperation) {
@@ -1136,9 +1239,44 @@ void MainFrame::FinishActiveOperation(const platform::CommandWindowResult& resul
     // `git diff --no-index` 则用 1 表示「有差异」。不解释就会被读成「操作失败」。
     note += git::DescribeDiffViewExitCode(*viewKind, result.exitCode);
   }
+  // 撤回成功才追加恢复线索（原提交完整 ID + 找回方式）：失败/结果未知时不说「撤回了」。
+  if (undoOperation && succeeded && !restoreHint.empty()) {
+    note += L"｜" + restoreHint;
+  }
   if (!result.environmentNotice.empty()) {
     note += L"｜" + result.environmentNotice;
   }
+
+  // 历史落账排在「记住结论」之前：被拒的那句要并进结论本身，再交给紧随其后的刷新显示。
+  // 启动与终态用同一个操作 ID；unknown / launchFailed / gitNotStarted 各有自己的终态档，
+  // 绝不因为命令窗口曾经打开就把这一条写成成功。
+  if (historyRecording) {
+    app::HistoryTerminalInfo terminal;
+    terminal.outcome = app::MapCommandCompletionToHistoryOutcome(result.completion, succeeded);
+    terminal.startedEpoch = historyStartedEpoch;
+    const platform::LocalInstant now = platform::CurrentLocalInstant();
+    terminal.terminalEpoch = now.valid ? now.utcEpochSeconds : 0;
+    terminal.exitCodeKnown = result.completion == git::CommandCompletion::finished;
+    terminal.exitCode = result.exitCode;
+    terminal.completionLabel = std::wstring(git::CommandCompletionLabel(result.completion));
+    terminal.conclusion = note;
+    std::wstring refusal;
+    RecordHistory(historyCapture, terminal, historyRecordId, &refusal);
+    if (!refusal.empty()) {
+      note += L"｜" + refusal;
+    }
+  }
+
+  if (restoreOperation && restoreFlow_.Active()) {
+    // 按记录恢复的终态交回控制器结案：它先说清「只移动了那一个本地引用」或「没有成功」，
+    // 再请求刷新。这里不替它把未知判定成成功，也不自动重试或回退。
+    tasks_.RememberOperationConclusion(note);
+    restoreFlow_.OnCommandSettled(*this, succeeded, note);
+    UpdateUi();
+    ScheduleRefreshSoon();
+    return;
+  }
+
   SetStatus(note);
   tasks_.RememberOperationConclusion(note);
   UpdateUi();
@@ -1157,6 +1295,362 @@ OperationContext MainFrame::CaptureOperationContext() const {
   ctx.workspaceMessage = state_.Workspace().message;
   ctx.stagedItemCount = state_.WorkspaceModel().staged.size();
   return ctx;
+}
+
+// ============================================================================
+// 操作历史（内存记录 + 平台存储契约）
+// ============================================================================
+
+void MainFrame::InitializeOperationHistory() {
+  historyStorage_ = platform::DescribeHistoryStorageAvailability();
+  historyPaths_ = platform::ResolveHistoryStorePaths();
+  historyWritable_ = historyStorage_.usable && historyPaths_.valid;
+  historyLoadNote_.clear();
+
+  if (historyStorage_.crossSessionPersistence && historyWritable_) {
+    const platform::HistoryReadResult read =
+        platform::ReadHistoryFile(historyPaths_.historyFile);
+    switch (read.kind) {
+      case platform::HistoryReadKind::absent:
+        break;  // 首次使用：开关默认关闭。
+      case platform::HistoryReadKind::unreadable:
+        historyWritable_ = false;  // 读不成不等于没有：这次不使用也不覆盖。
+        historyLoadNote_ = read.detail + L"本次运行不使用也不会覆盖这份历史文件。";
+        break;
+      case platform::HistoryReadKind::oversized:
+      case platform::HistoryReadKind::invalidUtf8:
+        historyLoadNote_ = read.detail + L"下一次保存时会把原件改名保留在旁边，再重新开始记录。";
+        break;
+      case platform::HistoryReadKind::loaded: {
+        const app::HistoryLoadResult parsed = app::ParseOperationLog(read.text);
+        switch (parsed.status) {
+          case app::HistoryLoadStatus::empty:
+            break;
+          case app::HistoryLoadStatus::corrupt:
+            historyLoadNote_ = L"历史文件读不成立（" + parsed.reason +
+                               L"）。下一次保存时会把原件改名保留，再从头开始。";
+            break;
+          case app::HistoryLoadStatus::tooNew:
+            historyWritable_ = false;
+            historyLoadNote_ = L"盘上的历史文件由更新版本的程序写出（版本 " +
+                               std::to_wstring(parsed.detectedVersion) +
+                               L"），本次不读取、不覆盖。";
+            break;
+          case app::HistoryLoadStatus::loaded:
+            historyLog_ = parsed.log;
+            break;
+        }
+        break;
+      }
+    }
+  } else if (!historyStorage_.reason.empty()) {
+    historyLoadNote_ = historyStorage_.reason;
+  }
+
+  if (historyRecordCheck_ != nullptr) {
+    historyRecordCheck_->SetValue(historyLog_.historyEnabled);
+    if (!historyWritable_) {
+      // 限制要一眼看得见，而不是只藏在工具提示里：不落盘时把这句话写进控件标题。
+      historyRecordCheck_->SetLabel(FromWide(L"记录操作历史（仅本次运行，不落盘）"));
+    }
+  }
+}
+
+bool MainFrame::HistoryRecordingEnabled() const { return historyLog_.historyEnabled; }
+
+std::wstring MainFrame::HistoryStorageLine() const {
+  if (historyStorage_.crossSessionPersistence) {
+    if (historyWritable_ && historyPaths_.valid) {
+      return app::DescribeHistoryStoragePath(historyPaths_.directory,
+                                             platform::kHistoryFileName);
+    }
+    if (!historyStorage_.reason.empty()) {
+      return L"不可写：" + historyStorage_.reason;
+    }
+    if (!historyPaths_.failureReason.empty()) {
+      return L"不可写：" + historyPaths_.failureReason;
+    }
+    if (!historyLoadNote_.empty()) {
+      return L"不可写：" + historyLoadNote_;
+    }
+    return L"不可写：这次没有可用的历史位置。";
+  }
+  return L"仅本次运行的内存（不落盘）：" +
+         (historyStorage_.reason.empty()
+              ? std::wstring(L"本平台的操作历史持久化尚未接入，关闭界面即丢失。")
+              : historyStorage_.reason);
+}
+
+std::wstring MainFrame::NextHistoryId() {
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  ++historyRecordCounter_;
+  return L"op-" + std::to_wstring(epoch < 0 ? 0 : epoch) + L"-" +
+         std::to_wstring(static_cast<unsigned long>(wxGetProcessId())) + L"-" +
+         std::to_wstring(historyRecordCounter_);
+}
+
+void MainFrame::ScheduleHistorySave() {
+  if (!historyWritable_) {
+    return;
+  }
+  historyIntents_.append = true;
+  historySavePending_ = true;
+  historySaveTimer_.StartOnce(static_cast<int>(kHistorySaveDebounceMs));
+}
+
+void MainFrame::OnHistorySaveTimer(wxTimerEvent&) {
+  if (!closing_) {
+    RunHistorySave();
+  }
+}
+
+void MainFrame::RunHistorySave() {
+  historySavePending_ = false;
+  historySaveTimer_.Stop();
+  if (!historyWritable_) {
+    return;
+  }
+  app::HistoryWriteIntents intents = historyIntents_;
+  historyIntents_ = app::HistoryWriteIntents{};  // 先清；写不成再原样放回，脏意不丢
+  if (!(intents.policy || intents.append || intents.replaceAll)) {
+    return;
+  }
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+  const platform::HistorySaveOutcome outcome =
+      platform::SaveOperationHistory(historyPaths_, historyLog_, intents, epoch);
+  const auto requeue = [&]() {
+    historyIntents_.append = historyIntents_.append || intents.append;
+    historyIntents_.policy = historyIntents_.policy || intents.policy;
+    historyIntents_.replaceAll = historyIntents_.replaceAll || intents.replaceAll;
+  };
+  switch (outcome.status) {
+    case platform::HistorySaveStatus::saved:
+    case platform::HistorySaveStatus::recoveredCorrupt:
+      historyLog_ = outcome.merged;  // 盘上现在就是这一份：下一次合并以它为基准
+      if (!outcome.report.keptFromDiskStrongerTerminal.empty()) {
+        SetFormNote(L"另一个窗口已记下某些操作更确定的结果（" +
+                    std::to_wstring(outcome.report.keptFromDiskStrongerTerminal.size()) +
+                    L" 条）；本次以先记录到终态的那份为准，没有把较弱的信息盖上去。");
+      }
+      if (!outcome.detail.empty()) {
+        SetStatus(state_.StatusNote() + L"｜" + outcome.detail);
+      }
+      return;
+    case platform::HistorySaveStatus::busy:
+      requeue();
+      ScheduleHistorySave();
+      return;
+    case platform::HistorySaveStatus::refusedTooNew:
+      historyWritable_ = false;
+      SetStatus(state_.StatusNote() + L"｜" + outcome.detail);
+      return;
+    case platform::HistorySaveStatus::failed:
+      // 写不进去不等于 Git 那一步没做成：两句分开说，脏意留回队列稍后再试一次。
+      requeue();
+      ScheduleHistorySave();
+      SetStatus(state_.StatusNote() + L"｜操作历史这次没写成功（" + outcome.detail +
+                L"）；Git 那一步的结果不受影响。");
+      return;
+  }
+}
+
+std::wstring MainFrame::RecordHistory(const app::HistoryCapture& capture,
+                                      const app::HistoryTerminalInfo& terminal,
+                                      const std::wstring& existingId, std::wstring* refusal) {
+  if (!capture.record) {
+    return {};  // 这次操作本来就不落历史。
+  }
+  const std::wstring id = existingId.empty() ? NextHistoryId() : existingId;
+  app::OperationRecord record =
+      app::ComposeHistoryRecord(id, capture.workTreeRoot, capture, terminal);
+  std::wstring reason;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(record), &reason)) {
+    if (refusal != nullptr) {
+      *refusal = L"操作历史没有记录：" + reason;
+    }
+    return {};
+  }
+  ScheduleHistorySave();
+  return id;
+}
+
+std::wstring MainFrame::BeginInProgressHistory(const app::HistoryCapture& capture,
+                                                long long startedEpoch,
+                                                std::wstring* refusal) {
+  app::HistoryTerminalInfo terminal;
+  terminal.outcome = app::HistoryOutcome::inProgress;
+  terminal.startedEpoch = startedEpoch;
+  terminal.terminalEpoch = 0;  // 还没有终态时刻：这一条只说明「发出去了」
+  terminal.completionLabel = L"执行中";
+  terminal.conclusion = L"命令窗口已经启动，本程序还没有拿到它的结果。";
+  const std::wstring id = RecordHistory(capture, terminal, std::wstring(), refusal);
+  if (id.empty()) {
+    return {};
+  }
+  if (historyWritable_) {
+    // 当场写盘，不等防抖：这条记录的意义正是「进程此刻没了也还查得到」。
+    historySavePending_ = false;
+    historySaveTimer_.Stop();
+    RunHistorySave();
+  }
+  return id;
+}
+
+void MainFrame::MarkHistoryRecordUnknown(const std::wstring& recordId,
+                                         std::wstring_view why) {
+  if (recordId.empty() || !HistoryRecordingEnabled()) {
+    return;
+  }
+  bool held = false;
+  for (const app::OperationRecord& existing : historyLog_.records) {
+    if (existing.id != recordId) {
+      continue;
+    }
+    held = true;
+    if (app::TerminalHasSettled(existing.terminal)) {
+      return;  // 已有更确定的结论：不降级、不改写。
+    }
+    break;
+  }
+  // 这条在途记录已经不在了（被保留策略裁掉，或当场就没落下来）：不拿一次补记新建孤儿行。
+  if (!held) {
+    return;
+  }
+  app::OperationRecord unknown;
+  unknown.id = recordId;
+  unknown.terminal = app::HistoryTerminal::unknown;
+  const platform::LocalInstant now = platform::CurrentLocalInstant();
+  unknown.terminalEpoch = now.valid ? now.utcEpochSeconds : 0;
+  unknown.completionLabel = L"没有收到完成通知";
+  unknown.outcomeNote = std::wstring(why);
+  std::wstring reason;
+  if (!app::AppendHistoryRecord(&historyLog_, std::move(unknown), &reason)) {
+    SetStatus(state_.StatusNote() + L"｜另外：这条在途操作的历史没能补成「结果未知」（" + reason +
+              L"）；Git 那一步的结果不受影响。");
+    return;
+  }
+  ScheduleHistorySave();
+}
+
+void MainFrame::SettleUnfinishedHistoryOnShutdown() {
+  if (!activeHistoryRecording_ || activeHistoryRecordId_.empty()) {
+    return;
+  }
+  MarkHistoryRecordUnknown(
+      activeHistoryRecordId_,
+      L"界面在关闭前没有收到「" +
+          (activeHistoryCapture_.operationLabel.empty()
+               ? std::wstring(L"这次操作")
+               : activeHistoryCapture_.operationLabel) +
+          L"」的完成通知。按你的选择，命令窗口里的 Git 没有被中断、也没有被重放或撤销，"
+          L"本程序不再读取它的结果：这条操作的结果未知，请以仓库现状核实。");
+}
+
+void MainFrame::ShowOperationHistory() {
+  HistoryDialog dialog(this, historyLog_.records, HistoryStorageLine(),
+                       state_.Repo().detection.root);
+  if (dialog.ShowModal() != wxID_OK) {
+    return;
+  }
+  const std::wstring id = dialog.selectedRecordId();
+  const auto found = std::find_if(historyLog_.records.begin(), historyLog_.records.end(),
+                                  [&](const app::OperationRecord& record) {
+                                    return record.id == id;
+                                  });
+  if (found == historyLog_.records.end()) {
+    SetStatus(L"选中的那条记录已经不在当前历史里（可能刚被保留策略裁掉），本次没有执行任何操作。");
+    UpdateUi();
+    return;
+  }
+  if (dialog.action() == HistoryDialogAction::restore) {
+    BeginRestoreFromRecord(*found);
+  } else if (dialog.action() == HistoryDialogAction::copyRestore) {
+    CopyHistoryRestoreText(*found);
+  }
+}
+
+void MainFrame::BeginRestoreFromRecord(const app::OperationRecord& record) {
+  if (!AdmitFlow(app::GitFlow::restore, L"按记录恢复")) {
+    return;
+  }
+  const OperationContext ctx = CaptureOperationContext();
+  if (!ctx.repoUsable) {
+    SetStatus(L"当前没有可用的工作区仓库，无法按记录恢复；请先识别一个可用的仓库。");
+    UpdateUi();
+    return;
+  }
+  // 记录属于另一个仓库时绝不恢复：同一份判定也供 Win32 过渡界面使用，
+  // 内容包括 refMove 档位、仓库规范键、引用名与对象 ID 形状。
+  const app::HistoryRestoreOffer offer =
+      app::DescribeHistoryRestoreOffer(record, ctx.detection.root);
+  if (!offer.offered) {
+    ShowInfo(L"无法按记录恢复", L"没有打开命令窗口，也没有对仓库做任何改动。\n\n" + offer.refusal);
+    SetStatus(L"未执行恢复：" + offer.refusal);
+    UpdateUi();
+    return;
+  }
+  restoreFlow_.Start(*this, ctx, offer.clues);
+  UpdateUi();
+}
+
+void MainFrame::CopyHistoryRestoreText(const app::OperationRecord& record) {
+  std::wstring payload;
+  std::wstring note;
+  if (record.restoreKind == app::HistoryRestoreKind::refMove) {
+    // 复制不要求当前仓库就是记录所属仓库：线索本身足够复现命令。但线索的形状检查
+    // 与恢复链路共用同一份（以记录自己的工作区根做归属比较）。
+    const app::HistoryRestoreOffer offer =
+        app::DescribeHistoryRestoreOffer(record, record.workTreeRoot);
+    if (!offer.offered) {
+      SetStatus(L"这条记录的恢复线索不成立，没有可复制的命令：" + offer.refusal);
+      UpdateUi();
+      return;
+    }
+    const git::RestoreCopyText copy =
+        git::DescribeRestoreCopy(offer.clues, platform::DefaultShellDialect());
+    if (!copy.cluesUsable) {
+      SetStatus(L"这条记录的恢复线索不成立，没有可复制的命令：" + copy.refusal);
+      UpdateUi();
+      return;
+    }
+    if (!copy.copyableCommand.empty()) {
+      payload = copy.copyableCommand;
+      note = L"已复制" + copy.dialectLabel +
+             L"的一行恢复命令（未执行，也不代表已恢复远端）。" + copy.copyNote +
+             L"粘贴前请核对目标与风险；换到别的 shell 就要重新核对这一行的写法。";
+    } else {
+      payload = copy.structuredFacts;
+      note = L"这一串参数不能安全地粘成一行（" + copy.copyRefusal +
+             L"），所以复制的是逐段列出的字段清单，不是命令。本程序没有替换任何字符；"
+             L"要执行请在终端里自己按段输入。";
+    }
+  } else {
+    payload = record.restoreNote;
+    if (payload.empty()) {
+      SetStatus(L"这条记录没有可复制的恢复说明。");
+      UpdateUi();
+      return;
+    }
+    note = L"已复制这条记录的恢复说明（一段说明文字，不是可直接执行的命令，也没有执行任何东西）。";
+    if (record.restoreKind == app::HistoryRestoreKind::manualRemote) {
+      note += L"涉及远端历史的回退要你自己判断协作影响；本程序不提供 force push 这类命令。";
+    }
+  }
+
+  bool copied = false;
+  if (wxTheClipboard->Open()) {
+    copied = wxTheClipboard->SetData(new wxTextDataObject(FromWide(payload)));
+    wxTheClipboard->Close();
+  }
+  if (!copied) {
+    SetStatus(L"复制到剪贴板失败。恢复线索仍可在操作历史窗口里选中阅读。");
+    UpdateUi();
+    return;
+  }
+  SetStatus(note);
+  UpdateUi();
 }
 
 void MainFrame::ClearWorkspaceState() {
@@ -1207,6 +1701,7 @@ void MainFrame::UpdateUi() {
   const bool repositoryReady = state_.GitUsable() && state_.RepoUsable();
   const bool workspaceReady =
       repositoryReady && state_.Workspace().status == git::WorkspaceLoadStatus::loaded;
+  const bool flowBusy = commitFlow_.Active() || undoFlow_.Active() || restoreFlow_.Active();
   refreshButton_->Enable(state_.GitUsable());
   browseRepo_->Enable(!busy);
   statusButton_->Enable(repositoryReady && !busy);
@@ -1215,7 +1710,10 @@ void MainFrame::UpdateUi() {
   panel_->stageAllButton()->Enable(stagingReady);
   panel_->unstageSelectedButton()->Enable(stagingReady);
   panel_->unstageAllButton()->Enable(stagingReady);
-  createCommit_->Enable(workspaceReady && !busy && !commitFlow_.Active());
+  createCommit_->Enable(workspaceReady && !busy && !flowBusy);
+  undoCommitButton_->Enable(workspaceReady && !busy && !flowBusy);
+  historyBrowseButton_->Enable(true);
+  historyRecordCheck_->Enable(true);
 
   SetLabelIfChanged(statusText_, FromWide(state_.StatusNote()));
   SetLabelIfChanged(formNoteText_, FromWide(state_.FormNote()));
@@ -1458,6 +1956,44 @@ void MainFrame::CreateCommit() {
     return;
   }
   commitFlow_.Start(*this, CaptureOperationContext(), state_.WorkspaceModel());
+  UpdateUi();
+}
+
+app::GitFlowActivity MainFrame::CurrentFlowActivity() const {
+  app::GitFlowActivity activity;
+  activity.commit = commitFlow_.Active();
+  activity.undo = undoFlow_.Active();
+  activity.restore = restoreFlow_.Active();
+  // fetch / pull / push / conflict 还没有统一界面入口：它们不会在这里占路，
+  // 但命令窗口单槽仍由 tasks_.OperationInFlight() 在共同前提里兜底。
+  return activity;
+}
+
+bool MainFrame::AdmitFlow(app::GitFlow requested, std::wstring_view actionLabel) {
+  app::WritePrerequisites prerequisites;
+  prerequisites.gitUsable = state_.GitUsable();
+  prerequisites.repoUsable = state_.RepoUsable();
+  prerequisites.commandWindowBusy = tasks_.OperationInFlight();
+  prerequisites.workspaceStillBound =
+      !state_.Repo().detection.root.empty() &&
+      git::PathsEqualFolded(state_.Repo().detection.root, tasks_.Identity().workTreeRoot);
+  const std::wstring refusal =
+      app::AdmitWriteFlow(requested, CurrentFlowActivity(), prerequisites, actionLabel);
+  if (refusal.empty()) {
+    return true;
+  }
+  SetStatus(refusal);
+  UpdateUi();
+  return false;
+}
+
+void MainFrame::UndoLastCommit() {
+  if (!AdmitFlow(app::GitFlow::undo, L"撤回最近提交")) {
+    return;
+  }
+  // 撤回只移动当前分支引用；预检、确认、执行前复核与命令窗口都在 UndoFlow 里，
+  // 界面不在这里替它判断「能不能撤」，也不直接拼任何 Git 命令。
+  undoFlow_.Start(*this, CaptureOperationContext());
   UpdateUi();
 }
 
@@ -1870,6 +2406,18 @@ bool MainFrame::LaunchCommandWindow(const git::CommandWindowOperation& operation
     UpdateUi();
     return false;
   }
+  // 公共边界上先核对「这次要落的那条历史记录本身成立不成立」：漏了仓库工作区根或没说清
+  // 是哪类操作，会等真正写盘时才被整条拒掉——那等于一件做过的操作在历史里查无此事。
+  // 历史开关没开时一律放行（不记录就没有可核对的记录）。
+  const std::wstring historyRefusal =
+      app::DescribeHistoryCaptureRefusal(options.history, HistoryRecordingEnabled());
+  if (!historyRefusal.empty()) {
+    platform::RemoveNulPathspecFile(options.pathspecFile);
+    platform::RemoveCommitMessageFile(options.messageFile);
+    SetStatus(historyRefusal + L"（没有启动命令窗口，仓库没有被改动。）");
+    UpdateUi();
+    return false;
+  }
   unsigned long long serial = 0;
   if (!tasks_.BeginOperation(operation.displayName, &serial, options.policy)) {
     platform::RemoveNulPathspecFile(options.pathspecFile);
@@ -1888,6 +2436,23 @@ bool MainFrame::LaunchCommandWindow(const git::CommandWindowOperation& operation
     if (!failure.environmentNotice.empty()) {
       note += L"｜" + failure.environmentNotice;
     }
+    // 启动失败本身也是一种终态：命令窗口没打开、Git 一个字都没跑。先写 Git 那一步的结论，
+    // 再把落历史被拒的那句并列附上；谁也不盖谁。
+    std::wstring launchHistoryRefusal;
+    if (options.history.record && HistoryRecordingEnabled()) {
+      const platform::LocalInstant now = platform::CurrentLocalInstant();
+      const long long epoch = now.valid ? now.utcEpochSeconds : 0;
+      app::HistoryTerminalInfo terminal;
+      terminal.outcome = app::HistoryOutcome::launchFailed;
+      terminal.startedEpoch = epoch;
+      terminal.terminalEpoch = epoch;
+      terminal.completionLabel = std::wstring(git::CommandCompletionLabel(failure.completion));
+      terminal.conclusion = note;
+      RecordHistory(options.history, terminal, std::wstring(), &launchHistoryRefusal);
+    }
+    if (!launchHistoryRefusal.empty()) {
+      note += L"｜" + launchHistoryRefusal;
+    }
     SetStatus(note);
     UpdateUi();
     ScheduleRefreshSoon();
@@ -1901,8 +2466,29 @@ bool MainFrame::LaunchCommandWindow(const git::CommandWindowOperation& operation
   activeCommitOperation_ = options.commitOperation;
   activeCommittedForm_ = options.committedForm;
   activeViewKind_ = options.viewKind;
+  activeUndoOperation_ = options.undoOperation;
+  activeRestoreHint_ = options.restoreHint;
+  activeRestoreOperation_ = options.restoreOperation;
+  activeHistoryCapture_ = options.history;
+  activeHistoryStartedEpoch_ = 0;
+  activeHistoryRecordId_.clear();
+  activeHistoryRecording_ = false;
   operationTimer_.Start(static_cast<int>(kOperationPollMs));
   SetStatus(options.startedNote);
+
+  if (options.history.record && HistoryRecordingEnabled()) {
+    const platform::LocalInstant now = platform::CurrentLocalInstant();
+    activeHistoryStartedEpoch_ = now.valid ? now.utcEpochSeconds : 0;
+    std::wstring inFlightRefusal;
+    activeHistoryRecordId_ = BeginInProgressHistory(
+        activeHistoryCapture_, activeHistoryStartedEpoch_, &inFlightRefusal);
+    activeHistoryRecording_ = !activeHistoryRecordId_.empty();
+    if (!inFlightRefusal.empty()) {
+      // Git 已经在跑，记录只是它旁边的附属信息：把这句附在启动结论后面，不盖掉它。
+      SetStatus(state_.StatusNote() + L"｜" + inFlightRefusal +
+                L"（Git 这一步照常执行，但这次之后查不到它的线索。）");
+    }
+  }
   UpdateUi();
   return true;
 }
@@ -2028,6 +2614,10 @@ void MainFrame::OnClose(wxCloseEvent& event) {
     return;
   }
   closing_ = true;
+  // 关闭前把还没结案的在途记录补成「结果未知」；这一刻是最后能写盘的机会，
+  // 因此紧接着同步执行一次保存，不依赖那个会被 StopWorkers 停掉的防抖定时器。
+  SettleUnfinishedHistoryOnShutdown();
+  RunHistorySave();
   StopWorkers();
   event.Skip();
 }

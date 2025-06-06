@@ -885,3 +885,100 @@ GC_TEST(operation_history_write_capture_factory_requires_the_three_identity_fiel
   GC_CHECK(!refusal.empty());
   GC_CHECK(refusal.find(L"workTreeRoot") != std::wstring::npos);
 }
+
+// ---- 统一界面共用的终态映射与恢复入口判定 ----
+
+GC_TEST(operation_history_terminal_mapping_never_guesses_success) {
+  using C = gc::git::CommandCompletion;
+  // 只有 finished 才按退出码策略分成成功/失败。
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::finished, true) ==
+           h::HistoryOutcome::succeeded);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::finished, false) ==
+           h::HistoryOutcome::failed);
+  // 三档「没有 Git 结果」各自分立，绝不混进成功或失败。
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::launchFailed, false) ==
+           h::HistoryOutcome::launchFailed);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::gitNotStarted, false) ==
+           h::HistoryOutcome::gitNotStarted);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::helperNeverStarted, false) ==
+           h::HistoryOutcome::gitNotStarted);
+  // 窗口提前关闭、超时仍无结果、以及两个中间态都只能是 unknown。
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::terminated, false) ==
+           h::HistoryOutcome::unknown);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::stillUnknown, false) ==
+           h::HistoryOutcome::unknown);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::launched, false) ==
+           h::HistoryOutcome::unknown);
+  GC_CHECK(h::MapCommandCompletionToHistoryOutcome(C::running, false) ==
+           h::HistoryOutcome::unknown);
+}
+
+GC_TEST(operation_history_restore_offer_requires_same_repository_and_refmove) {
+  h::OperationRecord record = MakeRecord(L"op-restore-offer");
+  record.restoreKind = h::HistoryRestoreKind::refMove;
+
+  // 同一个工作区（按规范键比较，斜杠与大小写不构成另一个仓库）可以交出线索。
+  const h::HistoryRestoreOffer same =
+      h::DescribeHistoryRestoreOffer(record, L"c:/REPO/proj/");
+  GC_REQUIRE(same.offered, "同一仓库的 refMove 记录应当可以进入恢复预检");
+  GC_CHECK(same.clues.valid);
+  GC_CHECK(same.clues.branchRef == record.restoreBranchRef);
+  GC_CHECK(same.clues.expectedCurrentOid == record.restoreExpectedCurrentId);
+  GC_CHECK(same.clues.moveToOid == record.restoreUndoToObjectId);
+  GC_CHECK(!same.clues.isRootDeletion);
+
+  // 换到另一个仓库：必须拒绝，并点名两边；绝不把这条记录的引用挪到新仓库上。
+  const h::HistoryRestoreOffer other =
+      h::DescribeHistoryRestoreOffer(record, L"C:\\repo\\other");
+  GC_CHECK(!other.offered);
+  GC_CHECK(other.refusal.find(L"C:\\repo\\proj") != std::wstring::npos);
+  GC_CHECK(other.refusal.find(L"C:\\repo\\other") != std::wstring::npos);
+
+  // 不是 refMove 的记录不能走自动恢复：manualRemote 只解释与复制，none 只给线索。
+  h::OperationRecord manual = record;
+  manual.restoreKind = h::HistoryRestoreKind::manualRemote;
+  const h::HistoryRestoreOffer manualOffer =
+      h::DescribeHistoryRestoreOffer(manual, record.workTreeRoot);
+  GC_CHECK(!manualOffer.offered);
+  GC_CHECK(manualOffer.refusal.find(L"远端") != std::wstring::npos);
+  h::OperationRecord none = record;
+  none.restoreKind = h::HistoryRestoreKind::none;
+  const h::HistoryRestoreOffer noneOffer =
+      h::DescribeHistoryRestoreOffer(none, record.workTreeRoot);
+  GC_CHECK(!noneOffer.offered);
+  GC_CHECK(noneOffer.refusal.find(L"不产生") != std::wstring::npos);
+}
+
+GC_TEST(operation_history_restore_offer_rejects_bad_clues_and_accepts_root_deletion) {
+  h::OperationRecord record = MakeRecord(L"op-restore-shape");
+  record.restoreKind = h::HistoryRestoreKind::refMove;
+
+  // 引用名必须落在本地分支命名空间；标签、远端跟踪引用即使来自记录也不复现成命令。
+  h::OperationRecord tag = record;
+  tag.restoreBranchRef = L"refs/tags/v1";
+  GC_CHECK(!h::DescribeHistoryRestoreOffer(tag, record.workTreeRoot).offered);
+
+  // 缺「操作后应指」的完整对象 ID：无法在恢复前核对现状，必须拒绝。
+  h::OperationRecord missingCurrent = record;
+  missingCurrent.restoreExpectedCurrentId.clear();
+  GC_CHECK(!h::DescribeHistoryRestoreOffer(missingCurrent, record.workTreeRoot).offered);
+
+  // 非删除形态缺「要挪回去」的对象 ID：不能组成带预期旧值的命令。
+  h::OperationRecord missingMove = record;
+  missingMove.restoreUndoToObjectId.clear();
+  GC_CHECK(!h::DescribeHistoryRestoreOffer(missingMove, record.workTreeRoot).offered);
+
+  // 删除形态：没有新值，但绝不能同时带着「要挪去的对象」——那是自相矛盾的线索。
+  h::OperationRecord root = record;
+  root.restoreIsRoot = true;
+  root.restoreUndoToObjectId.clear();
+  const h::HistoryRestoreOffer rootOffer =
+      h::DescribeHistoryRestoreOffer(root, record.workTreeRoot);
+  GC_REQUIRE(rootOffer.offered, "删除形态只要有预期旧值就可以交给恢复预检");
+  GC_CHECK(rootOffer.clues.isRootDeletion);
+  GC_CHECK(rootOffer.clues.moveToOid.empty());
+
+  h::OperationRecord contradictory = root;
+  contradictory.restoreUndoToObjectId = FullOid('d');
+  GC_CHECK(!h::DescribeHistoryRestoreOffer(contradictory, record.workTreeRoot).offered);
+}

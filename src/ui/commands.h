@@ -127,7 +127,8 @@ inline constexpr UINT kWorkspaceStatusCompleted = WM_APP + 5;
 // 作者默认身份（git config --get user.name/user.email）后台读取完成通知；wParam 为请求序号。
 inline constexpr UINT kAuthorConfigCompleted = WM_APP + 6;
 // 撤回最近提交的预检（HEAD/分支/父提交/远端跟踪引用/工作区状态，全部只读）完成通知；wParam 为请求序号。
-inline constexpr UINT kUndoProbeCompleted = WM_APP + 7;
+inline constexpr UINT kUndoProbeCompleted =
+    static_cast<UINT>(kUndoProbeCompletionId);  // 值与 WM_APP + 7 相同
 // fetch 目标的只读预检（当前分支/分支配置的远端/远端清单，全部只读）完成通知；wParam 为请求序号。
 inline constexpr UINT kFetchProbeCompleted = WM_APP + 8;
 // pull 的只读预检（分支/HEAD/上游/策略配置/现状，以及抓取后的关系与冲突预演）完成通知；
@@ -145,7 +146,8 @@ inline constexpr UINT kCommitProbeCompleted =
     static_cast<UINT>(kCommitProbeCompletionId);  // 值与 WM_APP + 12 相同
 // 「撤回最近提交」点头之后的 HEAD/分支后台复核完成通知；wParam 为请求序号。
 // 这一步原来是 GUI 线程上的同步子进程调用，走后台之后窗口不再冻结；没回来之前不发命令。
-inline constexpr UINT kUndoRecheckCompleted = WM_APP + 13;
+inline constexpr UINT kUndoRecheckCompleted =
+    static_cast<UINT>(kUndoRecheckCompletionId);  // 值与 WM_APP + 13 相同
 // pull 整合失败后的「现场读取」（流程痕迹／未合并条目／HEAD 位置，全部只读）完成通知；
 // wParam 为请求序号。读回来才补完那句结论并请求重读。
 inline constexpr UINT kPullAftermathCompleted = WM_APP + 14;
@@ -170,9 +172,11 @@ inline constexpr UINT kConflictProbeCompleted = WM_APP + 19;
 inline constexpr UINT kPersistentConsentNotice = WM_APP + 23;
 // 「按记录恢复引用」的只读预检（分支现值／要挪回的对象本地可读性——问的是能不能解析，不是可达——／有没有流程停着，全部本地只读）
 // 完成通知；wParam 为请求序号。命令本身在命令窗口里跑，不走这条通知。
-inline constexpr UINT kRestoreProbeCompleted = WM_APP + 24;
+inline constexpr UINT kRestoreProbeCompleted =
+    static_cast<UINT>(kRestoreProbeCompletionId);  // 值与 WM_APP + 24 相同
 // 恢复「点头之后、发命令之前」的分支现值复核完成通知；wParam 为请求序号。走后台，没回来不发命令。
-inline constexpr UINT kRestoreRecheckCompleted = WM_APP + 25;
+inline constexpr UINT kRestoreRecheckCompleted =
+    static_cast<UINT>(kRestoreRecheckCompletionId);  // 值与 WM_APP + 25 相同
 // 注意：WM_APP + 20 归命令窗口执行器的完成通知（platform::CommandWindowRunner::kCompletionMessage），
 // 它不在本文件里定义，历史上就差点与这里的序号撞车（撞了会表现为「终态回调把预检通知当成
 // 操作完成」这类极难查的错乱）。因此这一段从 19 直接跳到 21，文件末尾有一条 static_assert 兜底。
@@ -223,7 +227,7 @@ inline constexpr unsigned long kWorkspaceStatusTimeoutMs = 20000;
 // 读作者默认身份同样是本地只读查询（而且一次刷新里要问两句），沿用识别的 8 秒放宽值。
 inline constexpr unsigned long kAuthorConfigTimeoutMs = 8000;
 // 撤回预检同样是本地只读查询，但里面包含最慢的 git status，沿用工作区读取的 20 秒放宽值。
-inline constexpr unsigned long kUndoProbeTimeoutMs = 20000;
+inline constexpr unsigned long kUndoProbeTimeoutMs = kUndoProbeQueryTimeoutMs;
 // 读一条提交的文件变化（git show --name-status）同样是本地只读查询；
 // 它比 git log 重（要按对象读树并做重命名探测），沿用工作区读取的 20 秒放宽值。
 inline constexpr unsigned long kCommitChangesTimeoutMs = 20000;
@@ -233,7 +237,7 @@ inline constexpr unsigned long kCommitDetailTimeoutMs = 8000;
 // 确认框点头之后、启动命令窗口之前的 HEAD/分支复核只有两条毫秒级查询：现在走后台任务，
 // 超时即按「复核不过」取消本次执行（宁可不撤，也不对已经变了的 HEAD 盲目动引用），
 // 因此用短超时；GUI 线程不等它，冻结问题已不存在。
-inline constexpr unsigned long kUndoRecheckTimeoutMs = 3000;
+inline constexpr unsigned long kUndoRecheckTimeoutMs = kUndoRecheckQueryTimeoutMs;
 // fetch 目标预检同样是本地只读查询（symbolic-ref / config / remote -v 三条都是毫秒级），
 // 沿用识别的 8 秒放宽值以容纳慢盘；超时按「查询失败」展示，绝不自动重试。
 inline constexpr unsigned long kFetchProbeTimeoutMs = 8000;
@@ -273,12 +277,14 @@ inline constexpr unsigned long kConflictProbeTimeoutMs = 20000;
 
 // 「按记录恢复引用」的预检与复核都只有两条毫秒级本地只读查询（rev-parse --verify --quiet），
 // 沿用撤回复核那一档短超时：超时即按「读不回来 → 不发命令」收场，绝不对已变的现状盲目动引用。
-inline constexpr unsigned long kRestoreProbeTimeoutMs = 3000;
-inline constexpr unsigned long kRestoreRecheckTimeoutMs = 3000;
+inline constexpr unsigned long kRestoreProbeTimeoutMs = kRestoreProbeQueryTimeoutMs;
+inline constexpr unsigned long kRestoreRecheckTimeoutMs = kRestoreRecheckQueryTimeoutMs;
 
 // 编译期防撞：本文件里定义的每一条完成通知都不许等于执行器那条完成消息。
 // 新增通知时先核对这一段，别指望 switch 的重复 case 一定会报错（两条消息分属两个函数时就漏了）。
 static_assert(kSplitterDragged != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kUndoProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
+static_assert(kUndoRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictProbeCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictRecheckCompleted != platform::CommandWindowRunner::kCompletionMessage);
 static_assert(kConflictAftermathCompleted != platform::CommandWindowRunner::kCompletionMessage);

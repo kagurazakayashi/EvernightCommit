@@ -1204,7 +1204,7 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
                                                     L"--no-deref", head.branchRef,
                                                     head.headObjectId};
   const ShellCommandText recoveryCmd =
-      FormatShellCommand(L"git", recoveryArguments, ShellDialect::cmdInteractive);
+      FormatShellCommand(L"git", recoveryArguments, input.copyDialect);
   const std::wstring recoveryLine =
       recoveryCmd.expressible ? recoveryCmd.text
                               : (FormatCommandPreview(L"git", recoveryArguments) +
@@ -1214,7 +1214,7 @@ UndoCommitPlan BuildUndoCommitPlan(const UndoCommitPlanInput& input) {
   // 分支名里出现 cmd 救不回来的写法时不给一行命令，只给逐段列出的读法与原因。
   const std::vector<std::wstring> reflogArguments{L"reflog", L"show", head.branchName};
   const ShellCommandText reflogCmd =
-      FormatShellCommand(L"git", reflogArguments, ShellDialect::cmdInteractive);
+      FormatShellCommand(L"git", reflogArguments, input.copyDialect);
   const std::wstring reflogHowTo =
       reflogCmd.expressible
           ? (L"可用 " + reflogCmd.text + L" 查回原完整 ID")

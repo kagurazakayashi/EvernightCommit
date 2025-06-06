@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "app/task_coordinator.h"  // RepositoryBinding：这一步等的还是不是绑定时那个仓库
 #include "git/restore_plan.h"
+#include "platform/main_thread_dispatch.h"
 #include "platform/restore_probe.h"
 #include "ui/operation_host.h"
 
@@ -53,6 +55,11 @@ public:
 
   void BeginStop();
   void JoinWorkers();
+
+  // 预检/复核的完成通知改走主线程调度器（统一 wxWidgets 界面使用）。
+  // 未设置时保持平台的 PostCompletionNotification 投递（Win32 过渡界面）。
+  void SetCompletionDispatcher(std::shared_ptr<platform::MainThreadDispatcher> dispatcher,
+                               uint64_t probeSourceId, uint64_t recheckSourceId);
 
 private:
   // 这一轮绑定的仓库身份（判定在 app::RepositoryBinding，纯逻辑可测）：代次 + 工作区根 +

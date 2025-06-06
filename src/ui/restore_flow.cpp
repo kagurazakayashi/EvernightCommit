@@ -4,7 +4,8 @@
 #include <utility>
 
 #include "git/repository.h"
-#include "ui/commands.h"
+#include "platform/shell_dialect.h"
+#include "ui/flow_notifications.h"
 
 namespace gc::ui {
 namespace {
@@ -44,8 +45,8 @@ void RestoreFlow::Start(OperationHost& host, const OperationContext& ctx, git::R
   clues_ = std::move(clues);
   stage_ = Stage::preConfirmProbe;
 
-  const platform::RestoreProbeRequest request = MakeRequest(ctx, clues_, kRestoreProbeTimeoutMs);
-  probeWorker_.Request(ctx.notify, kRestoreProbeCompleted, request,
+  const platform::RestoreProbeRequest request = MakeRequest(ctx, clues_, kRestoreProbeQueryTimeoutMs);
+  probeWorker_.Request(ctx.notify, kRestoreProbeCompletionId, request,
                        [](const platform::RestoreProbeRequest& pending) {
                          return platform::RunRestoreProbeLoad(pending);
                        });
@@ -73,7 +74,7 @@ void RestoreFlow::OnProbeCompleted(OperationHost& host, const OperationContext& 
 
 void RestoreFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ctx,
                                  const git::RestorePreflightQueries& queries) {
-  plan_ = git::BuildRestorePlan(clues_, queries);
+  plan_ = git::BuildRestorePlan(clues_, queries, platform::DefaultShellDialect());
   if (plan_.blocked) {
     // 不可行（分支已移动/删除、对象在本地读不到、引用形态或占用不能放行、有流程停着、读不回来）：
     // 只把话说清楚，不生成任何命令。
@@ -108,8 +109,8 @@ void RestoreFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ct
   request.repositoryDirectory = binding_.workTreeRoot;
   request.absoluteGitDir = binding_.absoluteGitDir;
   request.branchRef = plan_.targetRef;
-  request.timeoutMilliseconds = kRestoreRecheckTimeoutMs;
-  recheckWorker_.Request(ctx.notify, kRestoreRecheckCompleted, std::move(request),
+  request.timeoutMilliseconds = kRestoreRecheckQueryTimeoutMs;
+  recheckWorker_.Request(ctx.notify, kRestoreRecheckCompletionId, std::move(request),
                          [](const platform::RestoreProbeRequest& pending) {
                            return platform::CaptureRestoreRecheck(pending);
                          });
@@ -232,6 +233,13 @@ void RestoreFlow::BeginStop() {
 void RestoreFlow::JoinWorkers() {
   probeWorker_.Join();
   recheckWorker_.Join();
+}
+
+void RestoreFlow::SetCompletionDispatcher(
+    std::shared_ptr<platform::MainThreadDispatcher> dispatcher, uint64_t probeSourceId,
+    uint64_t recheckSourceId) {
+  probeWorker_.SetCompletionDispatcher(dispatcher, probeSourceId);
+  recheckWorker_.SetCompletionDispatcher(std::move(dispatcher), recheckSourceId);
 }
 
 }  // namespace gc::ui

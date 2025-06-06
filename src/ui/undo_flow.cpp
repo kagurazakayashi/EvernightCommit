@@ -5,9 +5,10 @@
 
 #include "git/commit_history.h"
 #include "git/repository.h"
+#include "platform/path.h"  // ProbeRepositoryWorkflowState（Git 目录里的流程痕迹）
+#include "platform/shell_dialect.h"
 #include "platform/undo_probe.h"
-#include "platform/windows/win_path.h"
-#include "ui/commands.h"
+#include "ui/flow_notifications.h"
 
 namespace gc::ui {
 
@@ -24,8 +25,8 @@ void UndoFlow::Start(OperationHost& host, const OperationContext& ctx) {
   platform::UndoProbeRequest request;
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
-  request.timeoutMilliseconds = kUndoProbeTimeoutMs;
-  probeWorker_.Request(ctx.notify, kUndoProbeCompleted, std::move(request),
+  request.timeoutMilliseconds = kUndoProbeQueryTimeoutMs;
+  probeWorker_.Request(ctx.notify, kUndoProbeCompletionId, std::move(request),
                        [](const platform::UndoProbeRequest& pending) {
                          return platform::RunUndoProbeLoad(pending);
                        });
@@ -60,6 +61,9 @@ void UndoFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ctx,
   input.workflow = platform::ProbeRepositoryWorkflowState(ctx.detection.absoluteGitDir);
   input.repositoryRoot = ctx.detection.root;
   input.captured = captured_;
+  // 恢复线索里给人粘贴的那几句按本平台 shell 编排（Windows=cmd，Linux=POSIX）；
+  // 实际执行的参数数组不受影响。
+  input.copyDialect = platform::DefaultShellDialect();
   captured_ = git::CapturedSnapshot{};
 
   const git::UndoCommitPlan plan = git::BuildUndoCommitPlan(input);
@@ -89,8 +93,8 @@ void UndoFlow::ConfirmAndPlan(OperationHost& host, const OperationContext& ctx,
   platform::UndoProbeRequest request;
   request.exePath = ctx.gitExecutable;
   request.repositoryDirectory = ctx.detection.root;
-  request.timeoutMilliseconds = kUndoRecheckTimeoutMs;
-  recheckWorker_.Request(ctx.notify, kUndoRecheckCompleted, std::move(request),
+  request.timeoutMilliseconds = kUndoRecheckQueryTimeoutMs;
+  recheckWorker_.Request(ctx.notify, kUndoRecheckCompletionId, std::move(request),
                          [](const platform::UndoProbeRequest& pending) {
                            return platform::CaptureUndoHeadSnapshot(
                                pending.exePath, pending.repositoryDirectory,
@@ -181,6 +185,12 @@ void UndoFlow::BeginStop() {
 void UndoFlow::JoinWorkers() {
   probeWorker_.Join();
   recheckWorker_.Join();
+}
+
+void UndoFlow::SetCompletionDispatcher(std::shared_ptr<platform::MainThreadDispatcher> dispatcher,
+                                       uint64_t probeSourceId, uint64_t recheckSourceId) {
+  probeWorker_.SetCompletionDispatcher(dispatcher, probeSourceId);
+  recheckWorker_.SetCompletionDispatcher(std::move(dispatcher), recheckSourceId);
 }
 
 }  // namespace gc::ui

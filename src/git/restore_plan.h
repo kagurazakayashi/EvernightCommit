@@ -154,8 +154,11 @@ struct RestorePlan {
 // 主入口：把线索与实况判成恢复方案。feasible 之外的每一种都不产出可执行命令。
 // 只有 feasible 会填 arguments/previewText/copyableCommand；branchMoved 额外填 copyableCommand，
 // 但明确标注「照发也会被 Git 挡下」，交界面决定只复制还是放弃。
-[[nodiscard]] RestorePlan BuildRestorePlan(const RestoreClues& clues,
-                                           const RestorePreflightQueries& queries);
+// copyDialect 只决定「给人复制的命令」按哪种 shell 编排，不改变实际执行的参数数组；
+// 默认保持 Win32 过渡界面的交互式 cmd。
+[[nodiscard]] RestorePlan BuildRestorePlan(
+    const RestoreClues& clues, const RestorePreflightQueries& queries,
+    ShellDialect copyDialect = ShellDialect::cmdInteractive);
 
 // 从恢复线索复现「实际恢复会发出的那串参数」，并给出三种表示（见 shell_text.h 的分工）：
 //   * arguments —— 数据形态，与实际执行同一份（不含 -C，命令窗口自己绑工作目录）；

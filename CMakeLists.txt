@@ -218,7 +218,9 @@ target_link_libraries(gc_platform_contract INTERFACE gc_build_settings gc_core)
 # 这些控制器只依赖 app/、git/ 与 platform/ 契约，不包含任何原生句柄。
 # 单独成库，使 Linux 的 wxWidgets 目标与 Windows 的过渡界面消费同一份业务流程。
 add_library(gc_ui_flows STATIC
-  src/ui/commit_flow.cpp)
+  src/ui/commit_flow.cpp
+  src/ui/restore_flow.cpp
+  src/ui/undo_flow.cpp)
 target_include_directories(gc_ui_flows PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gc_ui_flows PUBLIC gc_platform_contract)
 
@@ -247,6 +249,7 @@ add_library(gc_platform STATIC
   src/platform/windows/persistent_store.cpp
   src/platform/windows/platform_init.cpp
   src/platform/windows/remote_choice_dialog.cpp
+  src/platform/windows/shell_dialect.cpp
   src/platform/windows/subprocess.cpp
   src/platform/windows/terminal.cpp
   src/platform/windows/utf_text.cpp
@@ -268,9 +271,7 @@ add_library(gc_ui STATIC
   src/ui/fetch_flow.cpp
   src/ui/pull_flow.cpp
   src/ui/push_flow.cpp
-  src/ui/restore_flow.cpp
   src/ui/submodule_flow.cpp
-  src/ui/undo_flow.cpp
   src/ui/upstream_write_flow.cpp
   # ---- Win32 过渡实现（只服务当前的 Windows 界面，待 wxWidgets 取代） ----
   src/ui/action_bar.cpp
@@ -328,15 +329,18 @@ else()
     src/platform/linux/local_time.cpp
     src/platform/linux/notification.cpp
     src/platform/linux/operation_directory.cpp
+    src/platform/linux/operation_history_store.cpp
     src/platform/linux/path.cpp
     src/platform/linux/scratch_files.cpp
+    src/platform/linux/shell_dialect.cpp
     src/platform/linux/subprocess.cpp
     src/platform/linux/terminal.cpp)
   target_include_directories(gc_platform_linux PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(gc_platform_linux PUBLIC gc_build_settings gc_platform_contract gc_core)
   message(STATUS "[范围] Linux：核心层 + 契约层 + 平台基础服务 + 测试"
-                 "（统一界面 evernight_commit_wx 已接通仓库浏览、只读查看、暂存与创建提交；"
-                 "终端设置与持久化仍无实现）")
+                 "（统一界面 evernight_commit_wx 已接通仓库浏览、只读查看、暂存、创建提交、"
+                 "撤回、操作历史与按记录恢复；终端设置与持久化仍无实现；"
+                 "操作历史在步骤 11 前只保留本会话内存记录）")
 endif()
 
 # ---------- wxWidgets 目标 ----------
@@ -369,6 +373,7 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
     src/ui/wx/app_main.cpp
     src/ui/wx/changes_panel.cpp
     src/ui/wx/commit_form_panel.cpp
+    src/ui/wx/history_dialog.cpp
     src/ui/wx/main_frame.cpp)
   target_include_directories(evernight_commit_wx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(evernight_commit_wx PRIVATE
@@ -384,7 +389,7 @@ target_link_libraries(gc_wx_bootstrap PRIVATE gc_build_settings gc_wx)
     target_link_options(evernight_commit_wx PRIVATE
       "/MANIFEST:EMBED" "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.manifest")
   endif()
-  message(STATUS "[wx] 统一界面目标：evernight_commit_wx（仓库浏览 + 只读查看 + 暂存 + 创建提交）")
+  message(STATUS "[wx] 统一界面目标：evernight_commit_wx（仓库浏览 + 只读查看 + 暂存 + 创建提交 + 撤回 + 操作历史/恢复）")
 endif()
 
 # ---------- 测试 ----------

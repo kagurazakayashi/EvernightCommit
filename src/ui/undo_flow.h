@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "git/commit_plan.h"
 #include "git/undo_commit_plan.h"
+#include "platform/main_thread_dispatch.h"
 #include "platform/undo_probe.h"
 #include "ui/operation_host.h"
 
@@ -45,6 +47,11 @@ public:
   // 窗口关闭：两阶段收尾（先全体喊停，再逐个 Join）。
   void BeginStop();
   void JoinWorkers();
+
+  // 预检/复核的完成通知改走主线程调度器（统一 wxWidgets 界面使用）。
+  // 未设置时保持平台的 PostCompletionNotification 投递（Win32 过渡界面）。
+  void SetCompletionDispatcher(std::shared_ptr<platform::MainThreadDispatcher> dispatcher,
+                               uint64_t probeSourceId, uint64_t recheckSourceId);
 
 private:
   // 放弃这次撤回（预检失败、用户取消、复核不过）：原因写进状态栏，不打开命令窗口。

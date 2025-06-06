@@ -187,6 +187,7 @@ constexpr const char* kWindowsFiles[] = {
 constexpr const char* kLinuxFiles[] = {
     "linux_environment_tests.cpp",
     "linux_git_toolchain_tests.cpp",
+    "linux_history_store_tests.cpp",
     "linux_local_time_tests.cpp",
     "linux_path_probe_tests.cpp",
     "linux_scratch_file_tests.cpp",
@@ -213,6 +214,7 @@ constexpr const char* kFixtureFiles[] = {
     "linux_git_query_tests.cpp",
     "linux_staging_commit_tests.cpp",
     "linux_terminal_git_tests.cpp",
+    "linux_undo_restore_flow_tests.cpp",
     "pull_probe_fixture_tests.cpp",
     "push_fixture_tests.cpp",
     "refresh_repository_tests.cpp",
@@ -350,6 +352,10 @@ constexpr const char* kLinuxVerifiedReadOnlyCases[] = {
     "linux_git_query_worker_cancel_stops_inflight_child",
     "linux_terminal_xterm_runs_real_git_readonly_status",
     "linux_terminal_xterm_delivers_metacharacter_pathspec_verbatim",
+    // linux_undo_restore_flow_tests.cpp —— 只 init 一个空仓库、起后台预检，不提交、不动引用；
+    // 靠「预检回来前切换仓库身份」验证旧结果作废，命令窗口一次都没启动。
+    "undo_flow_discards_probe_that_finished_after_repository_switch",
+    "restore_flow_discards_probe_when_repository_identity_changed",
 };
 
 // Linux 真实 Git 集成：只在用例自有的 PosixTempDirectory 里执行真实 git commit，
@@ -367,6 +373,11 @@ constexpr const char* kLinuxVerifiedCommitCases[] = {
     "linux_staging_unstage_selected_writes_index_only",
     "linux_staging_worktree_rename_needs_both_entries_and_records_one_rename",
     "linux_terminal_xterm_runs_real_git_commit",
+    // linux_undo_restore_flow_tests.cpp —— 在隔离仓库里建两条真实提交，然后交出并执行
+    // 控制器生成的 update-ref（只移动分支引用、不推送）；断言索引与工作区字节不变。
+    "undo_flow_launches_expected_ref_update_and_binds_history",
+    // 同文件：确认之后外部推进分支，方案里的预期旧值必须让 Git 拒绝并保持现场。
+    "undo_plan_expected_old_value_rejects_branch_moved_after_confirmation",
 };
 
 // 逐例核实过「在自有隔离临时仓库里执行真实 git commit，但不执行 git push」的夹具用例

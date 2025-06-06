@@ -5,6 +5,9 @@
 #include <string_view>
 #include <vector>
 
+#include "git/command_window.h"
+#include "git/restore_plan.h"
+
 namespace gc::app {
 
 // 「操作历史」的数据模型与版本化文本格式（纯逻辑层）。
@@ -298,6 +301,28 @@ enum class HistoryOutcome {
   launchFailed,   // 命令窗口 / 执行器启动失败
   gitNotStarted,  // 辅助进程报告 Git 进程从未被创建
 };
+
+// 命令窗口终态 → 历史记录里分立的结果。这是两个界面共用的一份映射：
+// 只有 finished 才按退出码策略分成成功/失败；launchFailed 单独一档；
+// gitNotStarted（含辅助进程从未真正开始执行）单独一档；窗口提前关闭与超过观察期限
+// 都只能是 unknown。任何默认分支同样按 unknown 处理，绝不把没认出来的终态猜成成功。
+[[nodiscard]] HistoryOutcome MapCommandCompletionToHistoryOutcome(
+    git::CommandCompletion completion, bool succeeded);
+
+// 一条历史记录能否在当前绑定的仓库里走「按记录恢复」入口，以及要交给恢复流程的线索。
+//   * 只有 refMove 会 offered：manualRemote 只解释与复制，none 不产生引用级恢复；
+//   * 记录必须属于当前工作区（按 CanonicalPathKey 比较）——把另一个仓库的引用挪走是纯粹的错，
+//     宁可拒绝并点名两个仓库，也不让旧结果串进新仓库；
+//   * 线索里的引用名与对象 ID 形状只是前置检查，Git 的权威裁定与现场复核仍由
+//     git/restore_plan 那条链路完成，这里绝不替它放行。
+struct HistoryRestoreOffer {
+  bool offered = false;
+  std::wstring refusal;
+  git::RestoreClues clues;
+};
+
+[[nodiscard]] HistoryRestoreOffer DescribeHistoryRestoreOffer(
+    const OperationRecord& record, std::wstring_view currentWorkTreeRoot);
 
 // 界面启动一次写操作时拷带走的「已确认事实」。record=false 表示这一类操作不落历史
 // （查看类、status、被用户取消的操作）。

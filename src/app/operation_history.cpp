@@ -943,6 +943,82 @@ HistoryTerminal MapOutcome(HistoryOutcome outcome) {
 }
 }  // namespace
 
+HistoryOutcome MapCommandCompletionToHistoryOutcome(git::CommandCompletion completion,
+                                                    bool succeeded) {
+  switch (completion) {
+    case git::CommandCompletion::launchFailed:
+      return HistoryOutcome::launchFailed;
+    case git::CommandCompletion::gitNotStarted:
+    case git::CommandCompletion::helperNeverStarted:
+      return HistoryOutcome::gitNotStarted;
+    case git::CommandCompletion::terminated:
+    case git::CommandCompletion::stillUnknown:
+      return HistoryOutcome::unknown;
+    case git::CommandCompletion::finished:
+      return succeeded ? HistoryOutcome::succeeded : HistoryOutcome::failed;
+    case git::CommandCompletion::launched:
+    case git::CommandCompletion::running:
+      return HistoryOutcome::unknown;
+  }
+  return HistoryOutcome::unknown;
+}
+
+HistoryRestoreOffer DescribeHistoryRestoreOffer(const OperationRecord& record,
+                                               std::wstring_view currentWorkTreeRoot) {
+  HistoryRestoreOffer offer;
+  if (record.restoreKind != HistoryRestoreKind::refMove) {
+    offer.refusal =
+        record.restoreKind == HistoryRestoreKind::manualRemote
+            ? L"这条记录涉及已推送到远端的历史：本程序只解释协作影响与复制线索，"
+              L"不自动生成引用级恢复命令（本地恢复也不会让远端跟着回去）。"
+            : L"这条记录不产生「把某个本地引用挪回去」的可审查恢复形态；"
+              L"本程序不自动撤销，也不提供 force push、hard reset、clean 或批量撤销。";
+    return offer;
+  }
+  const std::wstring currentKey = git::CanonicalPathKey(currentWorkTreeRoot);
+  const std::wstring recordKey =
+      record.repositoryKey.empty() ? git::CanonicalPathKey(record.workTreeRoot)
+                                   : record.repositoryKey;
+  if (currentWorkTreeRoot.empty() || currentKey.empty() || recordKey.empty() ||
+      currentKey != recordKey) {
+    offer.refusal = L"这条记录属于仓库 " +
+                    (record.workTreeRoot.empty() ? std::wstring(L"（记录里没有工作区根）")
+                                                 : record.workTreeRoot) +
+                    L"，当前绑定的是 " +
+                    (currentWorkTreeRoot.empty() ? std::wstring(L"（没有可用仓库）")
+                                                 : std::wstring(currentWorkTreeRoot)) +
+                    L"。请先切回那个仓库，再选这条记录恢复；绝不会把这个仓库的引用挪走。";
+    return offer;
+  }
+  if (!git::IsSafeUndoTargetRef(record.restoreBranchRef)) {
+    offer.refusal = L"这条记录的恢复目标不是完整的本地分支引用（refs/heads/…），"
+                    L"按约定不复现成命令。";
+    return offer;
+  }
+  if (!git::LooksLikeFullObjectId(record.restoreExpectedCurrentId)) {
+    offer.refusal = L"这条记录缺少「操作后该分支应指」的完整对象 ID，无法在恢复前核对现状。";
+    return offer;
+  }
+  if (!record.restoreIsRoot && !git::LooksLikeFullObjectId(record.restoreUndoToObjectId)) {
+    offer.refusal = L"这条记录缺少「要挪回去」的完整对象 ID，无法组成带预期旧值的恢复命令。";
+    return offer;
+  }
+  if (record.restoreIsRoot && !record.restoreUndoToObjectId.empty()) {
+    offer.refusal = L"这条记录的恢复线索自相矛盾：既标记为删除引用，又带着要挪去的对象 ID。";
+    return offer;
+  }
+
+  offer.offered = true;
+  offer.clues.valid = true;
+  offer.clues.repositoryRoot = record.workTreeRoot;
+  offer.clues.branchRef = record.restoreBranchRef;
+  offer.clues.expectedCurrentOid = record.restoreExpectedCurrentId;
+  offer.clues.moveToOid = record.restoreUndoToObjectId;
+  offer.clues.isRootDeletion = record.restoreIsRoot;
+  offer.clues.originalNote = record.restoreNote;
+  return offer;
+}
+
 OperationRecord ComposeHistoryRecord(std::wstring id, std::wstring workTreeRoot,
                                      const HistoryCapture& capture,
                                      const HistoryTerminalInfo& terminal) {

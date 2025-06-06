@@ -6,6 +6,7 @@
 
 #include "git/commit_plan.h"
 #include "git/repository.h"
+#include "git/shell_text.h"
 #include "git/workspace_model.h"
 #include "git/workspace_status.h"
 
@@ -352,6 +353,9 @@ struct UndoCommitPlanInput {
   RepositoryWorkflowState workflow;      // Git 目錄裡的流程痕跡（平臺層探測，與提交同一來源）
   std::wstring repositoryRoot;           // 剛剛讀回的工作區根
   CapturedSnapshot captured;             // 點擊瞬間界面顯示的摘要（用於「現狀已變」說明）
+  // 「恢復線索」裡那幾句給人自己粘貼的命令按哪種 shell 編排。它只影響展示文本，
+  // 不改變實際執行的參數數組；默認保持 Win32 過渡界面的交互式 cmd。
+  ShellDialect copyDialect = ShellDialect::cmdInteractive;
 };
 
 struct UndoCommitPlan {

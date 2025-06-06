@@ -40,23 +40,10 @@ constexpr int kInitialWindowWidth = 1100;
 // 底部操作栏是两行（Git 操作按钮一行、持久化区一行），初始高度随之多给一行。
 constexpr int kInitialWindowHeight = 810;
 
-// 命令窗口的一种终态 → 历史记录里分立的结果。绝不把「结果未知 / 启动失败 / Git 未创建」
-// 混进「成功 / 失败」：那几种各有措辞，恢复入口对「未知」一律拒绝照记录执行、只重新核实。
+// 命令窗口的一种终态 → 历史记录里分立的结果。映射本身收在 app/operation_history，
+// 与统一 wxWidgets 界面共用同一份判据：绝不把「结果未知 / 启动失败 / Git 未创建」混进成功或失败。
 app::HistoryOutcome DescribeHistoryOutcome(git::CommandCompletion completion, bool succeeded) {
-  switch (completion) {
-    case git::CommandCompletion::launchFailed:
-      return app::HistoryOutcome::launchFailed;
-    case git::CommandCompletion::gitNotStarted:
-    case git::CommandCompletion::helperNeverStarted:
-      return app::HistoryOutcome::gitNotStarted;
-    case git::CommandCompletion::terminated:
-    case git::CommandCompletion::stillUnknown:
-      return app::HistoryOutcome::unknown;
-    case git::CommandCompletion::finished:
-      return succeeded ? app::HistoryOutcome::succeeded : app::HistoryOutcome::failed;
-    default:
-      return app::HistoryOutcome::unknown;
-  }
+  return app::MapCommandCompletionToHistoryOutcome(completion, succeeded);
 }
 
 constexpr std::wstring_view kTipBrowseRepo =
@@ -4704,16 +4691,21 @@ void MainWindow::BeginRestoreFromRecord(HWND window, const app::OperationRecord&
     return;
   }
   const OperationContext ctx = CaptureOperationContext();
-  // 记录属于另一个仓库时绝不恢复：把别的仓库的引用挪走是纯粹的错。
-  if (!ctx.repoUsable || !git::PathsEqualFolded(ctx.detection.root, record.workTreeRoot)) {
-    state_.SetStatusNote(L"这条记录属于仓库 " + record.workTreeRoot + L"，当前绑定的是 " +
-                         (ctx.detection.root.empty() ? std::wstring(L"（没有可用仓库）")
-                                                     : ctx.detection.root) +
-                         L"。请先切回那个仓库，再选这条记录恢复。");
+  // 记录属于另一个仓库时绝不恢复：把别的仓库的引用挪走是纯粹的错。同一份判定
+  // （refMove、仓库规范键、引用名与对象 ID 形状）也供统一 wxWidgets 界面使用。
+  const app::HistoryRestoreOffer offer =
+      app::DescribeHistoryRestoreOffer(record, ctx.detection.root);
+  if (!ctx.repoUsable) {
+    state_.SetStatusNote(L"当前没有可用的工作区仓库，无法按记录恢复；请先识别一个可用的仓库。");
     RefreshTexts(window);
     return;
   }
-  restoreFlow_.Start(*this, ctx, CluesFromRecord(record));
+  if (!offer.offered) {
+    state_.SetStatusNote(offer.refusal);
+    RefreshTexts(window);
+    return;
+  }
+  restoreFlow_.Start(*this, ctx, offer.clues);
 }
 
 void MainWindow::CopyRestoreCommandForRecord(HWND window, const app::OperationRecord& record) {

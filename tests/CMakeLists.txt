@@ -99,13 +99,15 @@ set(GC_TEST_SOURCES_LINUX_ONLY
   linux_environment_tests.cpp
   linux_git_toolchain_tests.cpp
   linux_git_query_tests.cpp
+  linux_history_store_tests.cpp
   linux_local_time_tests.cpp
   linux_path_probe_tests.cpp
   linux_scratch_file_tests.cpp
   linux_subprocess_tests.cpp
   linux_terminal_git_tests.cpp
   linux_terminal_lifecycle_tests.cpp
-  linux_staging_commit_tests.cpp)
+  linux_staging_commit_tests.cpp
+  linux_undo_restore_flow_tests.cpp)
 
 # ---- 完整性审计：任何 *_tests.cpp 没进上面三张表，配置直接失败 ----
 # 用 GLOB 只做核对、不做构建输入（构建输入始终是上面三张显式清单）。
